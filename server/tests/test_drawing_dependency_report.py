@@ -42,6 +42,94 @@ def test_empty_dependencies_are_an_explicit_empty_report():
     assert from_pairs([])["dependencies"] == []
 
 
+@pytest.mark.parametrize("setup, layout_device, duplicates, status", [
+    ("office", "Shared.pc3", False, "matched"),
+    ("Office", "../local/Override.pc3", False, "matched"),
+    ("Missing", "Local.pc3", False, "unresolved"),
+    ("", "Direct.pc3", False, "direct"),
+    ("Office", "Local.pc3", True, "ambiguous"),
+])
+def test_real_intake_binds_layout_plot_settings_in_object_subclasses(
+    setup, layout_device, duplicates, status
+):
+    def layout(name, device, page_setup, handle):
+        return (f"0\nLAYOUT\n5\n{handle}\n100\nAcDbPlotSettings\n"
+                f"1\n{page_setup}\n2\n{device}\n7\nLocal.stb\n"
+                f"100\nAcDbLayout\n1\n{name}\n2\nDecoy.pc3\n7\nDecoy.ctb\n")
+
+    named = ("0\nPLOTSETTINGS\n5\nAB\n100\nAcDbPlotSettings\n"
+             "1\nOffice\n2\nShared.pc3\n7\nShared.ctb\n")
+    objects = layout("Roof", layout_device, setup, "A1") + named
+    objects += layout("Model", "ModelOnly.pc3", setup, "A2")
+    if duplicates:
+        objects += named.replace("AB\n", "AC\n").replace("Shared.pc3", "Other.pc3")
+    raw = ("0\nSECTION\n2\nENTITIES\n" + layout("Decoy", "Bad.pc3", setup, "A3") +
+           "0\nENDSEC\n0\nSECTION\n2\nOBJECTS\n" + objects + "0\nENDSEC\n0\nEOF\n").encode()
+    report = parse_dxf_bytes(raw)["dependency_report"]
+    assert report["plot_layout_bindings"] == [{
+        "layout": "Roof",
+        "page_setup": setup or None,
+        "layout_resources": {"plot_device": layout_device, "plot_style": "Local.stb"},
+        "setup_status": status,
+        "setup_resources": ({"plot_device": "Shared.pc3", "plot_style": "Shared.ctb"}
+                            if status == "matched" else None),
+    }]
+    expected = {layout_device, "Local.stb", "Shared.pc3", "Shared.ctb"}
+    if duplicates:
+        expected.add("Other.pc3")
+    assert {row["name"] for row in report["dependencies"]} == expected
+    assert report["external_files_opened"] is False
+
+
+@pytest.mark.parametrize(
+    "section,device,style,expected",
+    [
+        ("OBJECTS", "Office.pc3", "monochrome.ctb",
+         [("plot_device", "Office.pc3"), ("plot_style", "monochrome.ctb")]),
+        ("OBJECTS", r"C:\Plotters\Wide Format.pc3", "../styles/screened.stb",
+         [("plot_device", r"C:\Plotters\Wide Format.pc3"),
+          ("plot_style", "../styles/screened.stb")]),
+        ("OBJECTS", "", "screened.stb", [("plot_style", "screened.stb")]),
+        ("OBJECTS", "Office.pc3", "", [("plot_device", "Office.pc3")]),
+        ("ENTITIES", "Decoy.pc3", "decoy.ctb", []),
+    ],
+)
+def test_normal_intake_reports_plot_resources_without_resolving_them(
+    section, device, style, expected, monkeypatch
+):
+    import builtins
+    import io
+    import os
+
+    line = "0\nLINE\n5\nAA\n8\nDesign\n10\n1\n20\n2\n11\n3\n21\n4\n"
+    settings = (
+        "0\nPLOTSETTINGS\n5\nAB\n100\nAcDbPlotSettings\n"
+        f"1\nSetup name.pc3\n2\n{device}\n4\nMedia name.ctb\n7\n{style}\n"
+    )
+    objects = settings if section == "OBJECTS" else ""
+    entities = line + (settings if section == "ENTITIES" else "")
+    raw = (
+        f"0\nSECTION\n2\nENTITIES\n{entities}0\nENDSEC\n"
+        f"0\nSECTION\n2\nOBJECTS\n{objects}0\nENDSEC\n0\nEOF\n"
+    ).encode()
+
+    def forbidden_open(*args, **kwargs):
+        pytest.fail("Intake attempted to open a plot resource")
+
+    with monkeypatch.context() as guard:
+        for module in (builtins, io, os):
+            guard.setattr(module, "open", forbidden_open)
+        intake = parse_dxf_bytes(raw)
+
+    report = intake["dependency_report"]
+    assert report["scope"] == "local_dxf_records"
+    assert report["external_files_opened"] is False
+    assert report["dependencies"] == [
+        {"kind": kind, "name": name, "disposition": "reported"} for kind, name in expected
+    ]
+    assert intake["polylines"][0]["pts"] == [[1.0, 2.0, 0.0], [3.0, 4.0, 0.0]]
+
+
 @pytest.mark.parametrize("kind", ["MTEXT", "MULTILEADER", "TABLE", "ACAD_TABLE"])
 def test_inline_font_controls_preserve_chunk_order_and_literal_names(kind):
     pairs = [(0, "SECTION"), (2, "ENTITIES"), (0, kind),

@@ -8,7 +8,7 @@ import NodeCard from './NodeCard.jsx'
 import LatencyPipe from './LatencyPipe.jsx'
 import { contract, resolveManifest, registry } from './registry.js'
 import { addBlock, connectPipe, disconnectPipe, emptyGraph, missingInputs, pipeId, removeBlock, removeOutput, roundTrip, setOutput, updateSettings, validateGraph } from './graphDoc.js'
-import { connectionStatus } from './portCompat.js'
+import { compatibleSources, connectionStatus } from './portCompat.js'
 import { createDependencyLayoutRunner } from './dependencyLayout.js'
 import { pushRecent } from './libraryCategories.js'
 import { graphLayouts } from '../history/labArtifactsClient.js'
@@ -16,6 +16,7 @@ import { humanizeError } from '../../errorHumanize.js'
 
 const nodeTypes = { block: NodeCard }
 const edgeTypes = { latency: LatencyPipe }
+const directionRefusal = 'Connect an output to an input'
 const asPipe = connection => ({ from: { node: connection.source, port: connection.sourceHandle }, to: { node: connection.target, port: connection.targetHandle } })
 
 function Editor({ initialDocument, onChange, entries, measurements, upstream, codeEvidence, tools, onLoadTools }) {
@@ -35,10 +36,10 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
   const [selected, setSelected] = useState(null)
   const [armed, setArmed] = useState(null)
   const [pending, setPending] = useState(null)
-  const [message, setMessage] = useState('')
+  const [{ message, rejectedInput, repairSource }, setNotice] = useState({ message: '' })
+  const setMessage = useCallback((message, rejectedInput) => setNotice({ message, rejectedInput }), [])
   const [layoutBusy, setLayoutBusy] = useState(false)
   const request = useRef(0)
-  const lastRefusal = useRef('')
   const canvas = useRef(null)
   const search = useRef(null)
   const flow = useReactFlow()
@@ -60,6 +61,10 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
     onChange?.({ document: draft(current.current), ready, problems })
   }
   const connect = pipe => { commit(connectPipe(current.current, pipe, entries)); setMessage('Pipe connected') }
+  const statusOfPipe = pipe => {
+    try { return connectionStatus(current.current, pipe, entries) }
+    catch (error) { return { ok: false, reason: humanizeError(error) } }
+  }
   const disconnect = id => { commit(disconnectPipe(current.current, id)); setMessage('Pipe disconnected') }
   const remove = id => { commit(removeBlock(current.current, id)); setSelected(null) }
   const add = (manifest, position) => {
@@ -94,7 +99,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
       setPositions(next); setMessage('Layout updated')
     } catch (error) { if (token === request.current) setMessage(humanizeError(error)) }
     finally { if (token === request.current) setLayoutBusy(false) }
-  }, [layoutRunner])
+  }, [layoutRunner, setMessage])
   const relayout = () => {
     setLayoutBusy(true)
     const dimensions = Object.fromEntries(flow.getNodes().map(node => [node.id, node.measured || {}]))
@@ -119,7 +124,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
         { from: { node: pending.node, port: pending.port }, to: { node: block.id, port: name } }, entries)
       if (pending.type === 'target' && direction === 'outputs') return connectionStatus(document,
         { from: { node: block.id, port: name }, to: { node: pending.node, port: pending.port } }, entries)
-      return { ok: false, reason: 'Connect an output to an input' }
+      return { ok: false, reason: directionRefusal }
     }
     return { id: block.id, type: 'block', position: positions[block.id] || { x: index * 370, y: 30 }, selected: selected === block.id,
       data: { manifest, unresolved: problem, missing: missingInputs(document, block, entries), settingsError,
@@ -132,6 +137,8 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
     source: pipe.from.node, sourceHandle: pipe.from.port, target: pipe.to.node, targetHandle: pipe.to.port,
     data: { measurement: measurements.pipes?.[pipeId(pipe)], budget: source.problem || target.problem ? null : source.manifest.latency_budget_us, disconnect } }
   })
+  const repairOptions = rejectedInput ? compatibleSources(document, rejectedInput, entries) : []
+  const chosenSource = repairOptions.find(from => JSON.stringify(from) === repairSource)
   return <div className="lab-home lab-canvas-editor" data-canvas-editor tabIndex={-1} onKeyDown={event => {
     if (event.key === 'Escape') setArmed(null)
     if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey ||
@@ -171,21 +178,50 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
             const removed = new Set(changes.filter(change => change.type === 'remove').map(change => change.id))
             if (removed.size) commit({ ...current.current, pipes: current.current.pipes.filter(pipe => !removed.has(pipeId(pipe))) })
           }}
-          onConnectStart={(_, params) => { lastRefusal.current = ''; setPending({ node: params.nodeId, port: params.handleId, type: params.handleType }) }}
-          onConnectEnd={() => { setPending(null); if (lastRefusal.current) setMessage(lastRefusal.current) }}
-          isValidConnection={connection => {
-            let status
-            try { status = connectionStatus(document, asPipe(connection), entries) }
-            catch (error) { status = { ok: false, reason: humanizeError(error) } }
-            lastRefusal.current = status.reason
-            return status.ok
+          onConnectStart={(_, params) => setPending({ node: params.nodeId, port: params.handleId, type: params.handleType })}
+          onConnectEnd={(_, { fromHandle, toHandle, isValid }) => {
+            setPending(null)
+            if (isValid || !fromHandle || !toHandle) return
+            if (fromHandle.type === toHandle.type) {
+              if (fromHandle.nodeId !== toHandle.nodeId || fromHandle.id !== toHandle.id) setMessage(directionRefusal)
+              return
+            }
+            // React Flow can skip validation for handles disabled during the drag.
+            const [source, target] = fromHandle.type === 'source' ? [fromHandle, toHandle] : [toHandle, fromHandle]
+            const pipe = {
+              from: { node: source.nodeId, port: source.id },
+              to: { node: target.nodeId, port: target.id },
+            }
+            const status = statusOfPipe(pipe)
+            if (!status.ok) setMessage(status.reason, pipe.to)
           }}
+          isValidConnection={connection => statusOfPipe(asPipe(connection)).ok}
           onConnect={connection => { try { connect(asPipe(connection)) } catch (error) { setMessage(humanizeError(error)) } }}>
           <Background color="var(--leaf-color-border)" /><Controls />
         </ReactFlow>
       </div>
       {!document.blocks.length && <p>Add a block from the palette to begin.</p>}
-      <footer><p role="status">{message}</p><p>{validation.ready ? 'Ready' : 'Review the blocks and connections before continuing.'}</p></footer>
+      <footer>
+        <p role="status">{message}</p>
+        {repairOptions.length > 0 && <form onSubmit={event => {
+          event.preventDefault()
+          if (!chosenSource) return
+          try { connect({ from: chosenSource, to: rejectedInput }) }
+          catch (error) { setMessage(humanizeError(error), rejectedInput) }
+        }}>
+          <label>Compatible sources for {rejectedInput.node} / {rejectedInput.port}
+            <select value={chosenSource ? repairSource : ''} onChange={event => {
+              const value = event.target.value
+              setNotice(previous => ({ ...previous, repairSource: value }))
+            }}>
+              <option value="">Choose output</option>
+              {repairOptions.map(from => <option key={`${from.node}/${from.port}`} value={JSON.stringify(from)}>{from.node} / {from.port}</option>)}
+            </select>
+          </label>
+          <button type="submit" disabled={!chosenSource}>Connect pipe</button>
+        </form>}
+        <p>{validation.ready ? 'Ready' : 'Review the blocks and connections before continuing.'}</p>
+      </footer>
     </section>
     <OutputActionsContext.Provider value={{ set: (name, endpoint) => commit(setOutput(current.current, name, endpoint, entries)),
       remove: name => commit(removeOutput(current.current, name)) }}>

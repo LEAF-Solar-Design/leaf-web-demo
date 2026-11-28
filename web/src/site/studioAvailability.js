@@ -79,6 +79,7 @@ function freezeDeep(value) {
 
 export const STAGING_HOST = 'platform-staging.leafdesign.ai'
 const STAGING_ONLY = Object.freeze([STAGING_HOST])
+const PRODUCTION_HOSTS = Object.freeze([...APP_ONLY_HOSTS].filter((host) => host !== STAGING_HOST))
 const APP_HOSTS = Object.freeze([...APP_ONLY_HOSTS])
 
 // Every row: { workspace, label, status, disclaimer, evidence, hosts?, tool?, note?, adopted? }.
@@ -204,6 +205,17 @@ export const STUDIO_AVAILABILITY = freezeDeep({
     evidence: 'audit:before/journeys/solar-arlo.desktop1440.json',
   },
   // -- CAD -------------------------------------------------------------------
+  // Operator decision D2 (2026-11-27): sync back to AutoCAD is coming soon.
+  // Hidden on the production hosts; staging and local keep the row so it can
+  // be rehearsed. Inverse of the staging-evidence rows above, by decision.
+  'cad.drawing-sync': {
+    workspace: 'cad',
+    label: 'Drawing sync (Pull and Publish) in the AutoCAD palette',
+    status: 'unavailable',
+    disclaimer: 'Sync back to AutoCAD is not yet available.',
+    hosts: PRODUCTION_HOSTS,
+    evidence: 'source:AutoCAD palette Drawing sync row, decision D2',
+  },
   'cad.sample-drawing': {
     workspace: 'cad',
     label: 'Sample rooftop drawing',

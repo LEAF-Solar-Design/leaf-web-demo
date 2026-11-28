@@ -157,6 +157,28 @@ describe('durable user text replay', () => {
 })
 
 describe('tool steps render as ledger rows with a state word', () => {
+  it.each(['{"contract":"x"}', '  [1,2]'])('keeps a structured summary out of the done chip: %s', async (summary) => {
+    await setup([
+      event('turn_started', 't1'),
+      event('tool_call', 't1', { tool: 'count_panels', args: { layer: 'roof' } }),
+      event('tool_result', 't1', { tool: 'count_panels', ok: true, summary, result: { contract: 'x' } }),
+    ])
+    const [row] = steps()
+    expect(row).toHaveAttribute('data-state', 'done')
+    expect(row).not.toHaveTextContent(summary.trim())
+    fireEvent.click(row.querySelector('button'))
+    expect(row.querySelector('.converse-tool-detail')).toHaveTextContent('"contract": "x"')
+  })
+
+  it.each([[true, '3 panels'], [false, '{"contract":"x"}']])('retains the outcome for ok=%s and summary=%s', async (ok, summary) => {
+    await setup([
+      event('turn_started', 't1'),
+      event('tool_call', 't1', { tool: 'count_panels' }),
+      event('tool_result', 't1', { tool: 'count_panels', ok, summary }),
+    ])
+    expect(steps()[0]).toHaveTextContent(summary)
+  })
+
   it('reads Running, then Done, with the verb and its object', async () => {
     await setup([
       event('turn_started', 't1'),

@@ -571,6 +571,12 @@ function serverBlockChild(child) {
     return entityToPolyline(child)
   }
   const kind = child.kind
+  if (kind === 'OTHER' && child.type === 'POLYLINE') {
+    const outline = child.outline
+    if (!Array.isArray(outline?.pts) || outline.pts.length < 2 || outline.pts.length > MAX_POINTS
+      || !outline.pts.every(serverPoint)) return null
+    return entityToPolyline({ type: 'POLYLINE', vertices: outline.pts, layer: outline.layer, closed: outline.closed === true })
+  }
   if (!['LINE', 'LWPOLYLINE', 'CIRCLE', 'ARC'].includes(kind)) return null
   let vertices
   if (kind === 'LINE' || kind === 'LWPOLYLINE') {
@@ -607,39 +613,94 @@ export function projectServerBlocks(intake) {
   const cache = new Map()
   const polylines = [], inserts = []
   let points = 0, sampledPoints = 0, truncated = 0
+  let nestedVisits = 0, nestedPoints = 0
+  const nestedDepthLimit = 8
+  const polylineChild = (pl) => ({ type: 'LWPOLYLINE', layer: pl.layer, vertices: pl.pts, closed: pl.closed })
+  const normalizeReference = (source) => {
+    const positioned = Array.isArray(source.pt)
+    const ip = positioned ? serverPoint(source.pt) : (finite(source.x) && finite(source.y)
+      && (source.z === undefined || finite(source.z)) ? [source.x, source.y, source.z ?? 0] : null)
+    if (!ip) return null
+    const rotation = source.rot ?? 0
+    return { ...source, ip, pt: ip, sourceHandle: String(source.handle ?? ''),
+      layer: typeof source.layer === 'string' && source.layer ? source.layer : '0',
+      scale: source.scale ?? [1, 1, 1], normal: source.nrm ?? [0, 0, 1],
+      rotationDeg: finite(rotation) ? (positioned ? rotation : rotation * 180 / Math.PI) : NaN,
+      columnSpacing: source.columnSpacing ?? source.column_spacing,
+      rowSpacing: source.rowSpacing ?? source.row_spacing }
+  }
+
+  // Cache direct samples only. An expanded definition depends on its current
+  // ancestors and remaining budget, so a shared child must be visited per path.
   const normalizedDefinition = (name) => {
     if (cache.has(name)) return cache.get(name)
     const source = definitions.get(name)
     if (!source) { cache.set(name, null); return null }
     const children = [], rows = Array.isArray(source.children) ? source.children : []
-    let complete = source.complete === true && rows.length <= BLOCK_CHILD_CAP
+    const nested = Array.isArray(source.nested_inserts) ? source.nested_inserts : []
+    const nestedRows = rows.slice(0, BLOCK_CHILD_CAP).filter((row) => row?.kind === 'OTHER' && row.type === 'INSERT')
+    const nestedCaptured = nested.length > 0 && nested.length === nestedRows.length
+      && source.count === rows.length && source.nested_inserts_incomplete !== true
+    const outlineCaptured = rows.slice(0, BLOCK_CHILD_CAP).some((row) =>
+      row?.kind === 'OTHER' && row.type === 'POLYLINE' && row.outline != null)
+    let complete = (source.complete === true || nestedCaptured || outlineCaptured) && rows.length <= BLOCK_CHILD_CAP
+      && source.nested_inserts_incomplete !== true
     if (source.count !== undefined && source.count !== rows.length) complete = false
+    if (nested.length && !nestedCaptured) complete = false
     for (const child of rows.slice(0, BLOCK_CHILD_CAP)) {
+      if (child?.kind === 'OTHER' && child.type === 'INSERT' && nested.length) continue
       if (sampledPoints >= MAX_POINTS) { complete = false; truncated++; break }
       const pl = serverBlockChild(child)
       if (!pl) { complete = false; continue }
       if (sampledPoints + pl.pts.length > MAX_POINTS) { complete = false; truncated++; continue }
       sampledPoints += pl.pts.length
-      children.push({ type: 'LWPOLYLINE', layer: pl.layer, vertices: pl.pts, closed: pl.closed })
+      children.push(polylineChild(pl))
     }
-    const result = { base: serverPoint(source.base), baseUnknown: source.baseUnknown, complete, children }
+    const result = { base: serverPoint(source.base), baseUnknown: source.baseUnknown, complete, children, nested }
     cache.set(name, result)
     return result
   }
+
+  const expandDefinition = (name, ancestors) => {
+    if (ancestors.has(name) || ancestors.size > nestedDepthLimit) return null
+    const direct = normalizedDefinition(name)
+    if (!direct?.nested.length) return direct
+    ancestors.add(name)
+    const children = [...direct.children]
+    let complete = direct.complete
+    for (const source of direct.nested.slice(0, BLOCK_CHILD_CAP)) {
+      if (nestedVisits >= MAX_POINTS || nestedPoints >= MAX_POINTS || children.length >= BLOCK_CHILD_CAP) {
+        complete = false
+        truncated++
+        break
+      }
+      nestedVisits++
+      if (source?.invisible === true) continue
+      const reference = source && normalizeReference(source)
+      const definition = reference && expandDefinition(String(reference.name).toUpperCase(), ancestors)
+      if (!definition) { complete = false; continue }
+      const expanded = expandBlockReference(reference, definition, { pointLimit: MAX_POINTS - nestedPoints })
+      if (!expanded.complete) complete = false
+      truncated += expanded.truncated ?? 0
+      for (const pl of expanded.polylines) {
+        nestedPoints += pl.pts.length
+        if (children.length >= BLOCK_CHILD_CAP) { complete = false; truncated++; continue }
+        children.push(polylineChild(pl))
+      }
+    }
+    ancestors.delete(name)
+    return { ...direct, complete: complete && direct.nested.length <= BLOCK_CHILD_CAP, children }
+  }
+
   for (let i = 0; i < Math.min(modelInserts.length, MAX_POINTS); i++) {
     const source = modelInserts[i]
-    if (!source || typeof source !== 'object') continue
-    const positioned = Array.isArray(source.pt)
-    const ip = positioned ? serverPoint(source.pt) : (finite(source.x) && finite(source.y)
-      && (source.z === undefined || finite(source.z)) ? [source.x, source.y, source.z ?? 0] : null)
-    if (!ip) continue
-    const rotation = source.rot ?? 0
-    const normal = source.nrm ?? [0, 0, 1]
-    const row = { ...source, ip, pt: ip, sourceHandle: String(source.handle ?? ''),
-      layer: typeof source.layer === 'string' && source.layer ? source.layer : '0',
-      scale: source.scale ?? [1, 1, 1], normal,
-      rotationDeg: finite(rotation) ? (positioned ? rotation : rotation * 180 / Math.PI) : NaN }
-    const definition = normalizedDefinition(String(source.name).toUpperCase())
+    if (!source || typeof source !== 'object' || source.invisible === true) continue
+    const row = normalizeReference(source)
+    if (!row) continue
+    const ip = row.ip
+    const name = String(source.name).toUpperCase()
+    const direct = normalizedDefinition(name)
+    const definition = direct?.nested.length ? expandDefinition(name, new Set()) : direct
     const expanded = definition ? expandBlockReference(row, definition, { pointLimit: MAX_POINTS - points })
       : { polylines: [], complete: false }
     for (const pl of expanded.polylines) { polylines.push(pl); points += pl.pts.length }
@@ -721,15 +782,7 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
     }
     if (entity?.type === 'DIMENSION') {
       if (entity.dimtype === 'LINEAR' || entity.dimtype === 'ALIGNED') {
-        const schematic = dimensionSchematic(entity)
-        if (!schematic.length) continue
-        const [a, b] = schematic[2].pts
-        const batch = [...schematic.slice(0, 5), ...textGlyphPolylines({
-          text: formatMeasurement(entity.measurement),
-          pt: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2 + DIM_TEXT_GAP, a[2]],
-          height: DIM_TEXT_HEIGHT, centered: true,
-          handle: schematic[2].handle, layer: schematic[2].layer,
-        })]
+        const batch = dimensionDrawPolylines(entity)
         const size = batch.reduce((sum, pl) => sum + pl.pts.length, 0)
         if (points + size > MAX_POINTS) { truncated += 1; continue }
         points += size
@@ -822,4 +875,49 @@ export function intakeRoundPolylines(intake) {
     out.push({ handle: String(a.handle ?? ''), layer: typeof a.layer === 'string' && a.layer ? a.layer : '0', pts: arcPoints(centre[0], centre[1], centre[2], a.r, a.start_deg, a.end_deg), closed: false })
   }
   return out
+}
+
+function dimensionDrawPolylines(entity) {
+  const schematic = dimensionSchematic(entity)
+  if (!schematic.length) return []
+  const { pts: [a, b], handle, layer } = schematic[2]
+  return [...schematic.slice(0, 5), ...textGlyphPolylines({
+    text: formatMeasurement(entity.measurement),
+    pt: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2 + DIM_TEXT_GAP, a[2]],
+    height: DIM_TEXT_HEIGHT, centered: true, handle, layer,
+  })]
+}
+
+// The server intake carries DXF dimensions separately from its polylines.
+// Model-space records omit space metadata, including in older saved intakes.
+export function intakeDimensionPolylines(intake) {
+  const dimensions = intake?.dimensions
+  const polylines = []
+  let truncated = 0
+  if (!Array.isArray(dimensions) || intake.source === 'engine') return { polylines, truncated }
+  let points = 0
+  for (const dimension of dimensions) {
+    if (dimension?.type !== 'LINEAR' && dimension?.type !== 'ALIGNED') continue
+    if (dimension.space === 'paper') continue
+    if (typeof dimension.layout === 'string' && dimension.layout && dimension.layout.toLowerCase() !== 'model') continue
+    const { handle } = dimension
+    if (typeof handle !== 'string' || !handle.trim()) continue
+    const batch = dimensionDrawPolylines({
+      dimtype: dimension.type,
+      def1: dimension.p1,
+      def2: dimension.p2,
+      dimline: dimension.dimline,
+      rotationDeg: dimension.rotation_deg,
+      measurement: dimension.measurement,
+      layer: dimension.layer,
+    })
+    const size = batch.reduce((sum, polyline) => sum + polyline.pts.length, 0)
+    if (points + size > MAX_POINTS) {
+      truncated++
+      continue
+    }
+    for (const polyline of batch) polylines.push({ ...polyline, handle, strokeOnly: true })
+    points += size
+  }
+  return { polylines, truncated }
 }

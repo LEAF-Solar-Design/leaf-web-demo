@@ -71,6 +71,7 @@ ANONYMOUS_QUOTA_PRINCIPAL = "_anonymous"
 # the validation layer before any harness/template work runs.
 MAX_AUTHOR_DESCRIPTION = 8_000
 DEFAULT_AUTHOR_TIMEOUT_S = 120.0
+AUTHOR_STATUS_GUIDANCE = "Progress shows live on the build card. Do not state build, compile or publish status, and do not promise to check later."
 
 
 class _AuthorFields(BaseModel):
@@ -412,7 +413,13 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
             except ImportError:
                 timed_out = False
             return _harness_unavailable_response(timed_out=timed_out)
-        tool, code, preview = fb.author_tool(req.description)
+        try:
+            tool, code, preview = fb.author_tool(req.description)
+        except fb.InvalidEdgeDistance as exc:
+            return JSONResponse(status_code=422, content=with_envelope_fields({
+                "error": error_obj("BAD_PARAMS", str(exc), retryable=False),
+                "reason_code": "invalid_edge_distance",
+            }))
         source = "template"
         if harness_url:
             preview = "[harness unreachable; templated fallback] " + preview
@@ -498,42 +505,7 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
     )
 
 
-_CUSTOMIZATION_ERROR_MESSAGES = {
-    "revision_target_missing": "This Branch tool has no published version to revise. Publish a version first, or create a new tool.",
-    "invalid_stage_source_request": "Invalid staged source request.",
-    "stage_source_not_available": "Staged source is not available.",
-    "stage_source_failed": "Staged source could not be read.",
-    "customization_stage_disabled": (
-        "Tool authoring is not enabled for this workspace in this environment. "
-        "The approved request was not executed."
-    ),
-    "customization_publish_disabled": (
-        "Tool publication is not enabled for this workspace in this environment. "
-        "The approved request was not executed."
-    ),
-    "invalid_stage_request": (
-        "The requested authoring mode is not supported by the protected authoring path. "
-        "Use build mode."
-    ),
-    "builder_entitlement_missing": (
-        "This workspace does not have the builder entitlement required for tool authoring."
-    ),
-    "customization_harness_unavailable": (
-        "Protected tool authoring is temporarily unavailable. "
-        "The approved request was not executed."
-    ),
-    "idempotency_key_required": (
-        "Tool authoring requires a request identity. The approved request was not executed."
-    ),
-    "tenant_identity_binding_unavailable": (
-        "Tool authoring requires a verified workspace identity for the requester. "
-        "The approved request was not executed."
-    ),
-    "stage_authority_invalid": (
-        "Tool authoring requires the requester's active app turn. "
-        "The approved request was not executed."
-    ),
-}
+_CUSTOMIZATION_ERROR_MESSAGES = customization_service.CUSTOMIZATION_ERROR_MESSAGES
 
 
 def _stage_authority_refusal_detail(
@@ -691,9 +663,13 @@ def _customization_error(
         exc.code,
         "Protected tool authoring could not complete. The approved request was not executed.",
     )
-    return JSONResponse(status_code=exc.status_code, content=with_envelope_fields({
-        "error": error_obj("BAD_PARAMS", message, retryable=False),
+    retryable = exc.code in {"customization_stage_queue_full", "customization_stage_queue_unavailable"}
+    return JSONResponse(status_code=exc.status_code,
+                        headers={"Retry-After": "60"} if retryable else None,
+                        content=with_envelope_fields({
+        "error": error_obj("BAD_PARAMS", message, retryable=retryable),
         "reason_code": exc.code,
+        **({"harness_not_called": True} if exc.harness_not_called else {}),
         **({"failures": exc.failures} if exc.code in {"branch_package_invalid", "capability_not_allowed"} else {}),
     }))
 
@@ -902,7 +878,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
             **({"graph_input": req.graph_input} if req.graph_input is not None else {}),
         )
         if result.get("contract") == "leaf.customization-stage-job.v1":
-            return JSONResponse(status_code=202, content=result)
+            return JSONResponse(status_code=202, content={**result, "guidance": AUTHOR_STATUS_GUIDANCE})
         return result
     # The daily authoring cap is charged inside stage(), immediately before the
     # harness call, so everything it refuses first costs nothing.
@@ -1050,6 +1026,37 @@ def recover_stage(
         )
     status_code = {"found": 200, "admission_pending": 202, "not_found": 404}[outcome["status"]]
     return JSONResponse(status_code=status_code, content=outcome)
+
+
+@router.post("/api/author/stages/{change_set_id}/withdraw")
+def withdraw_stage(change_set_id: str, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    try:
+        if not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", change_set_id):
+            raise CustomizationServiceError("invalid_recovery_request", 422)
+        binding = customization_service._binding(tenant)
+        service = CustomizationService.configured()
+        change = service.store.get_change_set(tenant_id=str(tenant), change_set_id=change_set_id)
+        if change.author_subject != binding.subject:
+            return _customization_error(CustomizationServiceError("change_set_not_found", 404))
+        result = service.store.withdraw_stage(
+            tenant_id=str(tenant), change_set_id=change_set_id,
+            author_subject=binding.subject, now_ms=int(time.time() * 1000),
+        )
+        if result["withdrawn"]:
+            if author_quota.refund_enabled():
+                customization_service.refund_unstarted_build(str(tenant), change_set_id)
+            try:
+                change = service.store.get_change_set(tenant_id=str(tenant), change_set_id=change_set_id)
+                customization_service.finish_stage_authority_for_change(change)
+            except Exception:
+                pass
+        return {"contract": "leaf.customization-stage-withdraw.v1", **result}
+    except ChangeSetNotFoundError:
+        return _customization_error(CustomizationServiceError("change_set_not_found", 404))
+    except CustomizationServiceError as exc:
+        return _customization_error(exc)
+    except Exception as exc:
+        return _customization_error(CustomizationServiceError("customization_stage_failed", 503), cause=exc)
 
 
 @router.get("/api/author/stages/{change_set_id}")

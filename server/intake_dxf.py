@@ -33,7 +33,7 @@ import math
 import re
 from typing import Any, Dict, List
 
-from dxf_intake import _TEXT_MAX_CHARS as MAX_TEXT_CHARS, _layout_block_name
+from dxf_intake import _TEXT_MAX_CHARS as MAX_TEXT_CHARS, _TEXT_STYLE_FIELDS, _layout_block_name
 
 # Bounds shared with the write contract (server/mutation_plan.py) so a document
 # the plan could never describe is refused at the same size here.
@@ -145,6 +145,13 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         _fail("intake is not an object")
     if "solar_inspection" in intake or "solar_mapping" in intake:
         _fail("solar interchange requires the original drawing and the licensed mutation lane")
+    if "insunits_error" in intake:
+        _fail("Cannot export a drawing with conflicting insertion units")
+    insunits = intake.get("insunits")
+    if "insunits" in intake and (type(insunits) is not int or not 0 <= insunits <= 24):
+        _fail("INSUNITS must be an integer unit code from 0 through 24")
+    if intake.get("blocksCapped"):
+        _fail("Cannot export because the intake block database was capped")
     layers_in = intake.get("layers", [])
     polylines = intake.get("polylines", [])
     texts = intake.get("texts", [])
@@ -418,35 +425,20 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             kind_sources.append(ent)
             kind_properties.append(_entity_property_groups(properties, ent.get("handle"), where))
 
+    raw_blocks = intake.get("blocks", {})
+    known_blocks = raw_blocks if isinstance(raw_blocks, dict) else {}
     for k, ent in enumerate(inserts):
         where = f"inserts[{k}]"
-        if not isinstance(ent, dict):
-            _fail(f"{where}: not an object")
-        name = _layer_name(ent.get("name"), where)
-        raw_blocks = intake.get("blocks", {})
-        known = raw_blocks if isinstance(raw_blocks, dict) else {}
-        if _layout_block_name(name) or name not in known:
+        fields = _validated_insert(ent, where)
+        layer, name = fields[:2]
+        if _layout_block_name(name) or name not in known_blocks:
             _fail(f"{where}: unresolved block reference {name}")
-        layer = _layer_name(ent.get("layer"), where)
-        point = [_number(ent.get(axis), f"{where}.{axis}") for axis in ("x", "y", "z")]
-        normal = _vector(ent.get("nrm", [0, 0, 1]), f"{where}.nrm")
-        if not any(normal):
-            _fail(f"{where}: nrm must not be the zero vector")
-        scale = _vector(ent.get("scale", [1, 1, 1]), f"{where}.scale")
-        rotation = _number(ent.get("rot", 0), f"{where}.rot")
-        degrees = math.degrees(rotation)
-        # Recover whole degrees when their radians have the exact same
-        # six-decimal reading (for example 1.570796 represents 90 degrees).
-        whole_degrees = round(degrees)
-        rotation = (float(whole_degrees)
-                    if rotation == round(math.radians(whole_degrees), 6)
-                    else round(degrees, 6))
         h = _real_handle(ent.get("handle"), where, real)
         if h is not None:
             highest = max(highest, int(h, 16))
             h = ent["handle"]
         note_layer(layer)
-        kinds.append(("insert", layer, name, point, normal, scale, rotation, h))
+        kinds.append(("insert", fields, h))
         kind_sources.append(ent)
         kind_properties.append(_entity_property_groups(properties, ent.get("handle"), where))
     for k, ent in enumerate(dimensions):
@@ -516,12 +508,17 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         kind_sources.append(ent)
         kind_properties.append([])
 
-    blocks = _validated_blocks(intake["blocks"], note_layer) if "blocks" in intake else None
+    blocks = (_validated_blocks(raw_blocks, note_layer, real, MAX_ENTITIES - len(kinds))
+              if "blocks" in intake else None)
     if blocks is not None:
         total_points += sum(len(child.get("pts", [])) for block in blocks.values()
                             for child in block["children"])
         if total_points > MAX_POINTS:
             _fail(f"more than {MAX_POINTS} points in total")
+        for block in blocks.values():
+            for _, handle in block["nested_inserts"]:
+                if handle is not None:
+                    highest = max(highest, int(handle, 16))
 
     next_handle = highest + 1
 
@@ -537,6 +534,11 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     # Settle synthetic entity handles before table/definition handles, so
     # BLOCK_RECORD identities are above every model-space entity identity.
     kinds = [row[:-1] + (row[-1] if row[-1] is not None else fresh_handle(),) for row in kinds]
+    text_style_names = [source["style"] for row, source in zip(kinds, kind_sources)
+                        if row[0] == "text" and "style" in source]
+    text_style_names.extend(child["style"] for block in (blocks or {}).values()
+                            for child in block["children"] if "style" in child)
+    text_style_records = _used_text_styles(intake.get("text_styles", {}), text_style_names)
     textstyle_handles = {}
     mlstyle_handles = {}
     ml_linetype = None
@@ -566,17 +568,29 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             out += ["0", "DIMSTYLE", "105", fresh_handle(), "100", "AcDbSymbolTableRecord",
                     "100", "AcDbDimStyleTableRecord", "2", name, "70", "0"]
         out += ["0", "ENDTAB"]
-    if textstyle_handles:
+    if ml_linetype is not None:
         out += ["0", "TABLE", "2", "LTYPE", "70", "1", "0", "LTYPE", "5", ml_linetype,
                 "100", "AcDbSymbolTableRecord", "100", "AcDbLinetypeTableRecord",
                 "2", "ByLayer", "70", "0", "3", "", "72", "65", "73", "0",
                 "40", "0.0", "0", "ENDTAB"]
-        out += ["0", "TABLE", "2", "STYLE", "70", str(len(textstyle_handles))]
-        for name, handle in textstyle_handles.items():
+    styles_to_emit = {name: (handle, None) for name, handle in textstyle_handles.items()}
+    leader_style_names: dict[str, list[str]] = {}
+    for name in textstyle_handles:
+        leader_style_names.setdefault(name.casefold(), []).append(name)
+    for key, (name, fields) in text_style_records.items():
+        existing_names = leader_style_names.get(key)
+        if existing_names:
+            for existing in existing_names:
+                styles_to_emit[existing] = (textstyle_handles[existing], fields)
+        else:
+            styles_to_emit[name] = (fresh_handle(), fields)
+    if styles_to_emit:
+        out += ["0", "TABLE", "2", "STYLE", "70", str(len(styles_to_emit))]
+        for name, (handle, fields) in styles_to_emit.items():
             out += ["0", "STYLE", "5", handle, "100", "AcDbSymbolTableRecord",
-                    "100", "AcDbTextStyleTableRecord", "2", name, "70", "0",
-                    "40", "0.0", "41", "1.0", "50", "0.0", "71", "0",
-                    "42", "0.2", "3", "arial.ttf", "4", ""]
+                    "100", "AcDbTextStyleTableRecord", "2", name]
+            for code, field, default in _TEXT_STYLE_FIELDS:
+                out += [str(code), fields[field] if fields else default]
         out += ["0", "ENDTAB"]
     block_records = {}
     if blocks is not None or mleaders:
@@ -593,13 +607,15 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     if blocks is not None:
         out += ["0", "SECTION", "2", "BLOCKS"]
         for name, owner in block_records.items():
-            block = blocks.get(name, {"base": [0.0, 0.0, 0.0], "children": []})
+            block = blocks.get(name, {"base": [0.0, 0.0, 0.0], "children": [], "nested_inserts": []})
             out += ["0", "BLOCK", "5", fresh_handle(), "330", owner,
                     "100", "AcDbEntity", "8", "0", "100", "AcDbBlockBegin",
                     "2", name, "70", "1" if name.startswith("*") and not _layout_block_name(name) else "0",
                     *_point_groups(block["base"]), "3", name, "1", ""]
             for child in block["children"]:
                 out += _emit_block_child(child, fresh_handle(), owner)
+            for fields, handle in block["nested_inserts"]:
+                out += _emit_insert(fields, handle or fresh_handle(), owner)
             out += ["0", "ENDBLK", "5", fresh_handle(), "330", owner,
                     "100", "AcDbEntity", "8", "0", "100", "AcDbBlockEnd"]
         out += ["0", "ENDSEC"]
@@ -647,14 +663,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                             "10", _num(x), "20", _num(y), "30", _num(z), "70", "32"]
                 out += ["0", "SEQEND", "100", "AcDbEntity", "8", layer]
         elif row[0] == "insert":
-            _, layer, name, point, normal, scale, rotation, _ = row
-            point = _wcs_to_ocs(point, normal)
-            out += ["0", "INSERT", "5", h]
-            if block_records:
-                out += ["330", block_records["*Model_Space"]]
-            out += ["100", "AcDbEntity", "8", layer, "100", "AcDbBlockReference", "2", name,
-                    *_point_groups(point), "41", _num(scale[0]), "42", _num(scale[1]),
-                    "43", _num(scale[2]), "50", _num(rotation), *_point_groups(normal, 210)]
+            out += _emit_insert(row[1], h, block_records["*Model_Space"])
         elif row[0] == "round":
             _, layer, field, (cx, cy, cz), radius, normal, angles, _ = row
             tilted = normal != [0.0, 0.0, 1.0]
@@ -694,14 +703,16 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             _, layer, kind, (x, y, z), value, normal, _ = row
             if normal is not None:
                 x, y, z = _wcs_to_ocs([x, y, z], normal)
+            style = kind_sources[idx].get("style")
+            style_groups = ["7", style] if style is not None else []
             if kind == "TEXT":
                 out += ["0", "TEXT", "5", h, "100", "AcDbEntity", "8", layer,
                         "100", "AcDbText", "10", _num(x), "20", _num(y), "30", _num(z),
-                        "40", TEXT_HEIGHT, "1", value, "100", "AcDbText"]
+                        "40", TEXT_HEIGHT, "1", value, *style_groups, "100", "AcDbText"]
             else:
                 out += ["0", "MTEXT", "5", h, "100", "AcDbEntity", "8", layer,
                         "100", "AcDbMText", "10", _num(x), "20", _num(y), "30", _num(z),
-                        "40", TEXT_HEIGHT, "1", value]
+                        "40", TEXT_HEIGHT, "1", value, *style_groups]
             if normal is not None:
                 out += _point_groups(normal, 210)
         source = kind_sources[idx]
@@ -940,7 +951,11 @@ def _r2000_envelope(lines, fresh_handle, handseed, intake, emit_dimstyle_table):
         head, records = tables[name]
         sections["TABLES"].extend([head, *records, [("0", "ENDTAB")]])
     result = ["0", "SECTION", "2", "HEADER", "9", "$ACADVER", "1", "AC1015",
-              "9", "$HANDSEED", "5", handseed(), "0", "ENDSEC"]
+              "9", "$HANDSEED", "5", handseed()]
+    insunits = intake.get("insunits")
+    if insunits is not None:
+        result.extend(["9", "$INSUNITS", "70", str(insunits)])
+    result.extend(["0", "ENDSEC"])
     for name in ("TABLES", "BLOCKS", "ENTITIES", "OBJECTS"):
         result.extend(["0", "SECTION", "2", name])
         for record in sections[name]:
@@ -1018,9 +1033,91 @@ def _vector(value, where, width=3):
     return [_number(v, where) for v in value]
 
 
-def _validated_blocks(blocks, note_layer):
+def _validated_insert(ent, where):
+    if not isinstance(ent, dict):
+        _fail(f"{where}: not an object")
+    name = _layer_name(ent.get("name"), where)
+    layer = _layer_name(ent.get("layer"), where)
+    point = [_number(ent.get(axis), f"{where}.{axis}") for axis in ("x", "y", "z")]
+    normal = _vector(ent.get("nrm", [0, 0, 1]), f"{where}.nrm")
+    if not any(normal):
+        _fail(f"{where}: nrm must not be the zero vector")
+    scale = _vector(ent.get("scale", [1, 1, 1]), f"{where}.scale")
+    rotation = _number(ent.get("rot", 0), f"{where}.rot")
+    degrees = math.degrees(rotation)
+    # Recover whole degrees from the parser's six-decimal radians.
+    whole_degrees = round(degrees)
+    rotation = (float(whole_degrees)
+                if rotation == round(math.radians(whole_degrees), 6)
+                else round(degrees, 6))
+
+    array_groups = []
+    array_fields = ("columns", "rows", "column_spacing", "row_spacing")
+    if any(field in ent for field in array_fields):
+        for field, code in (("columns", "70"), ("rows", "71")):
+            count = ent.get(field, 1)
+            if type(count) is not int or not 1 <= count <= 32767:
+                _fail(f"{where}: {field} must be an integer from 1 through 32767")
+            array_groups.extend((code, str(count)))
+        for field, code in (("column_spacing", "44"), ("row_spacing", "45")):
+            spacing = _number(ent.get(field, 0), f"{where}.{field}")
+            array_groups.extend((code, _num(spacing)))
+    invisible = ent.get("invisible", False)
+    if type(invisible) is not bool:
+        _fail(f"{where}: invisible must be a boolean")
+    return layer, name, point, normal, scale, rotation, array_groups, invisible
+
+
+def _emit_insert(fields, handle, owner):
+    layer, name, point, normal, scale, rotation, array_groups, invisible = fields
+    visibility_groups = ["60", "1"] if invisible else []
+    point = _wcs_to_ocs(point, normal)
+    return ["0", "INSERT", "5", handle, "330", owner,
+            "100", "AcDbEntity", "8", layer, *visibility_groups,
+            "100", "AcDbBlockReference", "2", name,
+            *_point_groups(point), "41", _num(scale[0]), "42", _num(scale[1]),
+            "43", _num(scale[2]), "50", _num(rotation), *array_groups, *_point_groups(normal, 210)]
+
+
+def _used_text_styles(catalogue, names):
+    if not isinstance(catalogue, dict):
+        _fail("text_styles must be an object")
+    result = {}
+    for name in names:
+        _layer_name(name, "text style")
+        key = name.casefold()
+        if key == "standard" or key in result:
+            continue
+        definition = catalogue.get(key)
+        if not isinstance(definition, dict):
+            _fail(f"text style {name!r}: missing STYLE definition")
+        canonical_name = _layer_name(definition.get("name"), "STYLE definition")
+        if canonical_name.casefold() != key:
+            _fail(f"text style {name!r}: STYLE name does not match the reference")
+        fields = {}
+        for code, field, default in _TEXT_STYLE_FIELDS:
+            value = definition.get(field, default)
+            if not isinstance(value, str) or len(value) > 255 or _CONTROL_RE.search(value):
+                _fail(f"text style {name!r}: invalid {field}")
+            try:
+                if code in (70, 71):
+                    if not 0 <= int(value) <= 32767:
+                        raise ValueError
+                elif code not in (3, 4) and not math.isfinite(float(value)):
+                    raise ValueError
+            except ValueError:
+                _fail(f"text style {name!r}: invalid {field}")
+            fields[field] = value
+        result[key] = (canonical_name, fields)
+    return result
+
+
+def _validated_blocks(blocks, note_layer, real, remaining_entities):
     if not isinstance(blocks, dict) or len(blocks) > 200:
         _fail("blocks must be an object of at most 200 definitions")
+    if any(not isinstance(name, str) for name in blocks):
+        _fail("block name must be a string")
+    known_names = {name.casefold() for name in blocks}
     result = {}
     for name, block in blocks.items():
         _layer_name(name, "block name")
@@ -1060,6 +1157,14 @@ def _validated_blocks(blocks, note_layer):
                                elev=_number(child.get("elev"), where))
                     if not any(row["nrm"]):
                         _fail(f"{where}: nrm must not be the zero vector")
+                    if "thickness" in child:
+                        row["thickness"] = _number(child["thickness"], f"{where}.thickness")
+                    if "bulges" in child:
+                        bulges = child["bulges"]
+                        if not isinstance(bulges, list) or len(bulges) != len(points):
+                            _fail(f"{where}.bulges: expected one value per vertex")
+                        row["bulges"] = [_number(bulge, f"{where}.bulges[{j}]")
+                                         for j, bulge in enumerate(bulges)]
             elif kind == "POINT":
                 row["pt"] = _vector(child.get("pt"), where)
             elif kind in ("CIRCLE", "ARC"):
@@ -1077,11 +1182,42 @@ def _validated_blocks(blocks, note_layer):
                            height=_number(child.get("height"), where),
                            rot=_number(child.get("rot"), where),
                            text=_text_value(child.get("text"), where).replace("|", " "))
+                if "style" in child:
+                    row["style"] = child["style"]
             else:
                 _fail(f"{where}: unsupported block child kind")
             note_layer(layer)
             rows.append(row)
-        result[name] = {"base": base, "children": rows}
+        nested_inserts = block.get("nested_inserts", [])
+        if block.get("nested_inserts_incomplete"):
+            _fail(f"blocks[{name}]: nested INSERT data is incomplete")
+        if not isinstance(nested_inserts, list) or len(nested_inserts) > 10000:
+            _fail(f"blocks[{name}]: nested_inserts must be a list of at most 10000")
+        remaining_entities -= len(nested_inserts)
+        if remaining_entities < 0:
+            _fail(f"more than {MAX_ENTITIES} entities including nested INSERTs")
+        references = []
+        for k, ent in enumerate(nested_inserts):
+            where = f"blocks[{name}].nested_inserts[{k}]"
+            fields = _validated_insert(ent, where)
+            layer, target = fields[:2]
+            if _layout_block_name(target) or target.casefold() not in known_names:
+                _fail(f"{where}: unresolved block reference {target}")
+            handle = _real_handle(ent.get("handle"), where, real)
+            note_layer(layer)
+            references.append((fields, ent["handle"] if handle is not None else None))
+        source_count = block.get("count")
+        # Nested INSERT previews can overlap the actual references.
+        captured = max(len(children), len(rows) + len(references))
+        if "dropped_legacy_geometry" in block:
+            dropped = block["dropped_legacy_geometry"]
+            if (type(dropped) is not int or not 1 <= dropped <= 60
+                    or block.get("complete") is not False
+                    or type(source_count) is not int or source_count != captured + dropped):
+                _fail(f"blocks[{name}]: cannot export truncated block children")
+        elif type(source_count) is int and source_count > captured:
+            _fail(f"blocks[{name}]: cannot export truncated block children")
+        result[name] = {"base": base, "children": rows, "nested_inserts": references}
     return result
 
 
@@ -1100,8 +1236,13 @@ def _emit_block_child(child, handle, owner):
     elif kind == "LWPOLYLINE":
         out += ["100", "AcDbPolyline", "90", str(len(child["pts"])),
                 "70", "1" if child["closed"] else "0", "38", _num(child["elev"])]
-        for point in child["pts"]:
+        if child.get("thickness"):
+            out += ["39", _num(child["thickness"])]
+        bulges = child.get("bulges")
+        for j, point in enumerate(child["pts"]):
             out += _point_groups(point)
+            if bulges is not None and bulges[j]:
+                out += ["42", _num(bulges[j])]
         out += _point_groups(child["nrm"], 210)
     elif kind in ("CIRCLE", "ARC"):
         out += ["100", "AcDbCircle", *_point_groups(child["c"]), "40", _num(child["r"])]
@@ -1110,7 +1251,10 @@ def _emit_block_child(child, handle, owner):
             out += ["100", "AcDbArc", "50", _num(child["start_deg"]), "51", _num(child["end_deg"])]
     else:
         out += ["100", "AcDbText", *_point_groups(child["pt"]), "40", _num(child["height"]),
-                "50", _num(child["rot"]), "1", child["text"], "100", "AcDbText"]
+                "50", _num(child["rot"]), "1", child["text"]]
+        if "style" in child:
+            out += ["7", child["style"]]
+        out += ["100", "AcDbText"]
     return out
 
 

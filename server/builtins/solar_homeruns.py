@@ -1,12 +1,17 @@
 """Required W1 terminal routing candidate for the existing mutation broker."""
 import copy
 import hashlib
+import math
+import re
 import uuid
 
 from solar_design_graph import GraphValidationError, _bounded_json, entities
+from solar_joint_homerun_routing import MAX_KEEP_OUTS
 from solar_sizing_client import advance, checked_graph
 from solar_solve_results import HOMERUN_KINDS
 from solar_wiring_client import licensed_preview, local_routes
+
+_KEEP_OUT_LAYER = re.compile(r"(?<![A-Z0-9])keep[ _-]*outs?(?![A-Z0-9])", re.IGNORECASE)
 
 
 def _replace_homeruns(graph, routes):
@@ -37,15 +42,66 @@ def _replace_homeruns(graph, routes):
     return dropped
 
 
-def create_homeruns(intake, params, *, licensed_write=None):
+def _validate_request(params):
     _bounded_json(params)
-    if (type(params) is not dict or set(params) - {"expected_rev", "cancel"}
-            or type(params.get("cancel", False)) is not bool):
+    if (type(params) is not dict or set(params) - {"expected_rev", "cancel", "routing_constraints"}
+            or type(params.get("cancel", False)) is not bool
+            or ("routing_constraints" in params and type(params["routing_constraints"]) is not dict)):
         raise GraphValidationError("INVALID_ROUTING_REQUEST")
+
+
+def _routing_constraints(intake, graph, requested):
+    if type(intake) is not dict:
+        return requested
+    saved = []
+    scale = graph["project"]["units"]["meters_per_unit"]
+    for polyline in intake.get("polylines", []):
+        if type(polyline) is not dict:
+            continue
+        layer = polyline.get("layer")
+        if (polyline.get("space") == "paper" or type(layer) is not str
+                or not _KEEP_OUT_LAYER.search(layer)):
+            continue
+        points = polyline.get("pts")
+        bulges = polyline.get("bulges", [])
+        invalid = GraphValidationError("INVALID_ROUTING_CONSTRAINTS", "drawing.keep_outs")
+        if (polyline.get("closed") is not True or polyline.get("width")
+                or type(bulges) is not list or any(bulges)
+                or type(points) is not list or len(points) < 3
+                or any(type(point) is not list or len(point) < 2 or any(
+                    type(value) not in (int, float) or abs(value) > 1e15 or not math.isfinite(value)
+                    for value in point[:2]) for point in points)):
+            raise invalid
+        # The router accepts planar boxes. The envelope of a straight outline
+        # keeps every segment outside the drawn area, including rotated outlines.
+        x_coords, y_coords = zip(*(point[:2] for point in points))
+        saved.append({"min_xy": [min(x_coords) * scale, min(y_coords) * scale],
+                      "max_xy": [max(x_coords) * scale, max(y_coords) * scale]})
+        if len(saved) > MAX_KEEP_OUTS:
+            raise invalid
+    if not saved:
+        return requested
+    constraints = {"keep_outs": [], "aisles": []} if requested is None else requested
+    if (set(constraints) != {"keep_outs", "aisles"}
+            or any(type(items) is not list for items in constraints.values())):
+        raise GraphValidationError("INVALID_ROUTING_CONSTRAINTS", "routing_constraints")
+    names = {item["name"] for items in constraints.values() for item in items
+             if type(item) is dict and type(item.get("name")) is str}
+    ordinal = 0
+    for box in saved:
+        ordinal += 1
+        while f"Drawing keepout {ordinal}" in names:
+            ordinal += 1
+        box["name"] = f"Drawing keepout {ordinal}"
+    return {**constraints, "keep_outs": [*constraints["keep_outs"], *saved]}
+
+
+def create_homeruns(intake, params, *, licensed_write=None):
+    _validate_request(params)
     graph = checked_graph(intake, params.get("expected_rev"))
     if params.get("cancel", False):
         return {"graph": graph, "cancelled": True}
-    routes = local_routes(graph)
+    routes = local_routes(graph, _routing_constraints(intake, graph, params.get("routing_constraints")))
     # Replace only the terminal leads (feeders and trenches stay) and invalidate derived tables.
     dropped = _replace_homeruns(graph, routes)
     changed = list(routes)
@@ -58,11 +114,8 @@ def create_homeruns(intake, params, *, licensed_write=None):
     return {"graph": candidate, "receipt": receipt, "cancelled": False}
 
 
-def run(intake, params):
-    _bounded_json(params)
-    if (type(params) is not dict or set(params) - {"expected_rev", "cancel"}
-            or type(params.get("cancel", False)) is not bool):
-        raise GraphValidationError("INVALID_ROUTING_REQUEST")
+def run(intake, params, *, source_intake=None):
+    _validate_request(params)
     graph = checked_graph(intake, params.get("expected_rev"))
     if params.get("cancel", False):
         return graph
@@ -76,7 +129,7 @@ def run(intake, params):
     if not readiness["input_ready"]:
         raise GraphValidationError(readiness["input_reason"].upper())
 
-    routes = local_routes(graph)
+    routes = local_routes(graph, _routing_constraints(source_intake, graph, params.get("routing_constraints")))
     prior = {}
     for route in graph["routes"]:
         if route["route_kind"] in HOMERUN_KINDS:

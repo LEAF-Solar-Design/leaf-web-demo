@@ -103,6 +103,41 @@ describe('Deploys', () => {
     expect(screen.getByRole('button', { name: 'Activate published revision' })).toBeDisabled()
   })
 
+  it('previews the pinned corpus plan with a GET and clears it when the interval or publication changes', async () => {
+    const { client, update } = ledger()
+    const fetchImpl = vi.fn(async (url, options) => {
+      if (!url.includes('preview_doc_id')) return emptyActivations()
+      const query = new URL(url, 'http://localhost').searchParams
+      expect(query.get('preview_doc_id')).toBe('strategy')
+      const plan = {
+        doc_id: query.get('preview_doc_id'), revision: Number(query.get('revision')), interval_s: Number(query.get('interval_s')),
+        graph_sha256: 'a'.repeat(64), registry_digest: 'b'.repeat(64), input_digest: 'c'.repeat(64),
+        ops_revision: 'lab-ops.v1', max_run_wall_s: 600, pipes: [], outputs: {},
+        blocks: [{ id: 'eval', registry: { id: 'corpus-evaluator', version: '1.0.0', code_sha256: 'd'.repeat(64) },
+          settings_sha256: 'e'.repeat(64), effect: 'read', inputs: { corpus: { material_id: 'corpus-3',
+            byte_size: 7, sha256: 'f'.repeat(64) } } }],
+        blockers: [{ code: 'lab_activation_corpus_authority_unavailable', block: 'eval' }],
+      }
+      expect(options.method).toBe('GET')
+      expect(options.body).toBeUndefined()
+      return { ok: true, json: async () => plan }
+    })
+    render(<DeploysView client={client} fetchImpl={fetchImpl} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Preview execution plan' }))
+    const plan = await screen.findByRole('region', { name: 'Execution plan' })
+    expect(plan).toHaveTextContent('Published r2. Proposed interval 60 seconds.')
+    expect(plan).toHaveTextContent('Corpus material corpus-3, 7 bytes.')
+    expect(screen.getByRole('button', { name: 'Activate published r2' })).toBeDisabled()
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '90' } })
+    expect(screen.queryByRole('region', { name: 'Execution plan' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Preview execution plan' }))
+    expect(await screen.findByRole('region', { name: 'Execution plan' }))
+      .toHaveTextContent('Published r2. Proposed interval 90 seconds.')
+    update({ published: 3 })
+    expect(screen.queryByRole('region', { name: 'Execution plan' })).toBeNull()
+    expect(fetchImpl.mock.calls.every(([, options]) => options.method === 'GET')).toBe(true)
+  })
+
   it('keeps the control result when an older poll completes later', async () => {
     const { client } = ledger()
     const row = { activation_id: 'a1', doc_id: 'strategy', revision: 2, state: 'active', interval_s: 60,
@@ -162,7 +197,7 @@ describe('Deploys', () => {
     const fetchImpl = vi.fn(async (url, options) => {
       if (options.method === 'POST') {
         if (url.endsWith('/activations')) {
-          expect(JSON.parse(options.body)).toEqual({ doc_id: 'strategy', interval_s: 90 })
+          expect(JSON.parse(options.body)).toEqual({ doc_id: 'strategy', interval_s: 90, expected_revision: 2 })
           rows = [{ activation_id: 'a1', doc_id: 'strategy', revision: 2, state: 'active', interval_s: 90,
             lease_expires_at: '2026-10-26T12:00:00Z', coalesced_ticks: 2,
             last_output: { result: 7 }, last_summary: { state: 'finished' },

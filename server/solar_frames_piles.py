@@ -501,7 +501,7 @@ def _common(project_id, base):
 def generate_frames(backend, tenant_id, drawing_id, *, base, boundary, preset, drawing_units, project_id=None):
     """frame-generate: pack frames into `boundary` (drawing units) with the plugin preset object."""
     base = _common(project_id, base)
-    if type(drawing_units) is not str or drawing_units not in ps.UNITS:
+    if type(drawing_units) is not str or drawing_units not in ("m", "ft"):
         raise FramesPilesError("FRAMES_PILES_DRAWING_UNITS_INVALID")
     boundary = _boundary(boundary)
     loaded, _ = load_preset(preset)

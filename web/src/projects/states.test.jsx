@@ -30,6 +30,13 @@ vi.mock('./api.js', () => ({
   setIdentityDisplayName: vi.fn(),
 }))
 
+vi.mock('../api.js', async (importOriginal) => ({
+  ...await importOriginal(),
+  createProjectSolarClient: vi.fn(() => ({ dispose: vi.fn() })),
+  openProject: vi.fn(),
+}))
+
+import { openProject } from '../api.js'
 import { getProjectLifecycle, listOrgInvitations } from './api.js'
 import ProjectLifecyclePanel from './ProjectLifecyclePanel.jsx'
 import Membership from './Membership.jsx'
@@ -38,13 +45,74 @@ import CloneDialog from './CloneDialog.jsx'
 import DangerZone from './DangerZone.jsx'
 import ReceiptPanel from './ReceiptPanel.jsx'
 import OrgInvitations from './OrgInvitations.jsx'
+import ProjectDiscrepancyRanking from './ProjectDiscrepancyRanking.jsx'
+import ProjectOptimizerCoverage from './ProjectOptimizerCoverage.jsx'
 
 afterEach(cleanup)
 
 const noop = () => {}
 const PROJECT_ID = '11111111-2222-4333-8444-555555555555'
+const DASHBOARD_PROJECT = { org_id: 'org-1', project_id: PROJECT_ID, name: 'Rooftop Array' }
+const EMPTY_WORKSPACE = { project: DASHBOARD_PROJECT, drawing_versions: [], drawing_artifacts: [] }
+
+function openOptimizerCoverage() {
+  const utils = render(<ProjectOptimizerCoverage orgId="org-1" projectId={PROJECT_ID} viewerId="viewer-1" />)
+  fireEvent.click(screen.getByRole('button', { name: 'Check optimizer coverage' }))
+  return utils
+}
+
+function openDiscrepancyRanking() {
+  const utils = render(<ProjectDiscrepancyRanking orgId="org-1" principalId="viewer-1"
+    projects={[DASHBOARD_PROJECT]} onOpenRevision={vi.fn()} />)
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Rank engineering discrepancies' }))
+  return utils
+}
 
 const COMPONENT_REGISTRY = [
+  {
+    name: 'ProjectOptimizerCoverage',
+    async loading() {
+      openProject.mockReturnValueOnce(new Promise(() => {}))
+      const utils = openOptimizerCoverage()
+      expect(screen.getByRole('status')).toHaveTextContent('Checking saved drawing revisions')
+      return utils
+    },
+    async empty() {
+      openProject.mockResolvedValueOnce(EMPTY_WORKSPACE)
+      const utils = openOptimizerCoverage()
+      expect(await screen.findByText('No saved drawing revisions.')).toBeVisible()
+      return utils
+    },
+    async error() {
+      openProject.mockRejectedValueOnce(new Error('Workspace is unavailable.'))
+      const utils = openOptimizerCoverage()
+      expect(await screen.findByText('Optimizer measurement coverage could not be read. Try again.')).toBeVisible()
+      return utils
+    },
+  },
+  {
+    name: 'ProjectDiscrepancyRanking',
+    async loading() {
+      openProject.mockReturnValueOnce(new Promise(() => {}))
+      const utils = openDiscrepancyRanking()
+      expect(screen.getByRole('menuitem', { name: /Checking saved revisions/ })).toBeDisabled()
+      return utils
+    },
+    async empty() {
+      openProject.mockResolvedValueOnce(EMPTY_WORKSPACE)
+      const utils = openDiscrepancyRanking()
+      expect(await screen.findAllByText('No verified discrepancy found')).not.toHaveLength(0)
+      expect(screen.getByRole('status')).toHaveTextContent('1 of 1 projects checked.')
+      expect(screen.getByRole('status')).not.toHaveTextContent('unavailable')
+      return utils
+    },
+    async error() {
+      openProject.mockRejectedValueOnce(new Error('Workspace is unavailable.'))
+      const utils = openDiscrepancyRanking()
+      await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('1 unavailable.'))
+      return utils
+    },
+  },
   {
     name: 'OrgInvitations',
     async loading() {

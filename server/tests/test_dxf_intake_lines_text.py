@@ -6,8 +6,11 @@ for the APS extractor so a DWG and its DXF twin yield the same labels.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
 import dxf_intake  # noqa: E402
 import intake_dxf  # noqa: E402
 import intake_parse  # noqa: E402
+from tool_loader import resolve_local_file, run_tool_dynamic  # noqa: E402
 
 
 def _dxf(entities: str) -> bytes:
@@ -31,6 +35,37 @@ def test_line_becomes_two_point_open_polyline():
                                     "pts": [[0.0, 0.0, 0.0], [3000.0, 0.0, 0.0]],
                                     "xdata": None, "handle": "A1"}]
     assert "texts" not in intake
+
+
+@pytest.mark.parametrize("measurement", [False, True])
+def test_model_entity_counts_include_unprojected_entities_and_exclude_children(measurement):
+    raw = _dxf(
+        "0\nELLIPSE\n5\nA1\n8\nRAFTER_45X145\n410\nmOdEl\n"
+        "0\nHATCH\n5\nA2\n8\nRAFTER_45X145\n"
+        "0\nINSERT\n5\nA3\n8\n0\n2\nExample\n66\n1\n"
+        "0\nATTRIB\n8\nCompoundChild\n0\nSEQEND\n8\nCompoundChild\n"
+        "0\nPOLYLINE\n5\nA4\n8\n0\n"
+        "0\nVERTEX\n8\nCompoundChild\n10\n0\n20\n0\n"
+        "0\nVERTEX\n8\nCompoundChild\n10\n1\n20\n1\n"
+        "0\nSEQEND\n8\nCompoundChild\n"
+        "0\nPOINT\n5\nA5\n8\nPaperByFlag\n67\n1\n"
+        "0\nHATCH\n5\nA6\n8\nPaperByLayout\n410\nSheet 1\n"
+        "0\nPOINT\n5\nA7\n"
+    )
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf",
+                                        include_measurement_evidence=measurement,
+                                        include_model_entity_counts=True)
+    assert intake["model_entity_counts"] == {"RAFTER_45X145": 2, "0": 3}
+
+
+def test_model_entity_counts_can_be_empty(tmp_path):
+    raw = _dxf("0\nPOINT\n5\nA1\n8\nPaper\n67\n1\n")
+    path = tmp_path / "t.dxf"
+    path.write_bytes(raw)
+    intake = dxf_intake.parse_dxf_file(path, include_model_entity_counts=True)
+    assert intake["model_entity_counts"] == {}
+    assert "model_entity_counts" not in dxf_intake.parse_dxf_file(path)
+    assert "model_entity_counts" not in dxf_intake.parse_dxf_bytes(raw)
 
 
 def test_text_and_mtext_land_in_additive_texts_field():
@@ -426,3 +461,102 @@ def test_lwpolyline_non_finite_normal_is_refused():
                 "210\n0\n220\n0\n230\nnan\n10\n0\n20\n0\n10\n2\n20\n0\n")
     with pytest.raises(dxf_intake.DxfParseError, match="finite"):
         dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+
+
+_BOUNDS_REPO = Path(__file__).resolve().parents[2]
+_BOUNDS_CANDIDATE = _BOUNDS_REPO / "tools/xbench/candidates/x13/layer-bounding-boxes/1.0.1"
+_BOUNDS_MODEL_LAYER = "Struc_Plan_GB_PL"
+
+
+def _run_bounds_tool(monkeypatch, root, tool, intake, params):
+    monkeypatch.setenv("LEAF_TENANT_REPO", str(root))
+    monkeypatch.setenv("LEAF_SANDBOX", "off")
+    assert resolve_local_file(tool) == root / tool["entry"]
+    response = run_tool_dynamic(tool, intake, params, aps_live=False)
+    assert response["ok"], response["error"]
+    assert response["version"] == tool["version"]
+    return response["result"]
+
+
+def _bounds_candidate_tool():
+    return json.loads(
+        (_BOUNDS_CANDIDATE / "tools/layer-bounding-boxes/tool.json").read_text(encoding="utf-8")
+    )
+
+
+def test_s04_model_space_keeps_shared_layer_bounds(monkeypatch, tmp_path):
+    intake = dxf_intake.parse_dxf_file(_BOUNDS_CANDIDATE / "fixtures/s04-model-paper.dxf")
+    raw = (_BOUNDS_REPO / "data/nl_author_receipt.json").read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == (
+        "1a931347cfc5cddc2b91d2c656e7503c78be35b2a6a284f32e9b5243ea6160db"
+    )
+    archive = json.loads(raw)
+    original = tmp_path / archive["tool"]["entry"]
+    original.parent.mkdir(parents=True)
+    original.write_bytes(archive["entry_code"].encode("utf-8"))
+
+    archived = _run_bounds_tool(monkeypatch, tmp_path, archive["tool"], intake, {})
+    assert [row["layer"] for row in archived["layers"]] == [
+        _BOUNDS_MODEL_LAYER, "PS_ANNOT", "MODEL_AUX"
+    ]
+    assert archived["layers"][0]["min_x"] == -100
+    assert archived["layers"][0]["geometry_count"] == 2
+
+    tool = _bounds_candidate_tool()
+    assert tool["version"] == "1.0.1"
+    result = _run_bounds_tool(monkeypatch, _BOUNDS_CANDIDATE, tool, intake, {})
+
+    assert result["layer_count"] == 2
+    assert [row["layer"] for row in result["layers"]] == [_BOUNDS_MODEL_LAYER, "MODEL_AUX"]
+    assert result["layers"][0] == {
+        "layer": _BOUNDS_MODEL_LAYER, "min_x": 0, "max_x": 4, "min_y": 0, "max_y": 3,
+        "width": 4, "height": 3, "area": 12, "geometry_count": 1,
+    }
+    assert result["layers"][1] == archived["layers"][2]
+
+
+def test_s04_paper_only_filter_returns_empty_success(monkeypatch):
+    intake = dxf_intake.parse_dxf_file(_BOUNDS_CANDIDATE / "fixtures/s04-model-paper.dxf")
+    result = _run_bounds_tool(monkeypatch, _BOUNDS_CANDIDATE, _bounds_candidate_tool(), intake, {"layers": ["PS_ANNOT"]})
+    assert result == {"layers": [], "layer_count": 0}
+
+
+def test_legacy_faces_and_explicit_model_faces_keep_their_bounds(monkeypatch):
+    intake = {
+        "faces3d": [
+            {"layer": "Panels", "pts": [[0, 0, 1], [3, 2, 1]]},
+            {"layer": "Panels", "pts": [[-1, -2, 0], [1, 1, 0]], "space": "model"},
+            {"layer": "Panels", "pts": [[-100, -100, 0], [100, 100, 0]], "space": "paper"},
+        ]
+    }
+    result = _run_bounds_tool(monkeypatch, _BOUNDS_CANDIDATE, _bounds_candidate_tool(), intake, {"layers": ["Panels"]})
+    assert result == {
+        "layer_count": 1,
+        "layers": [{
+            "layer": "Panels", "min_x": -1, "max_x": 3, "min_y": -2, "max_y": 2,
+            "width": 4, "height": 4, "area": 16, "geometry_count": 2,
+        }],
+    }
+
+
+@pytest.mark.parametrize("layer", [" Roof Edge", "Roof Edge ", " Roof Edge "])
+@pytest.mark.parametrize("declared", [True, False], ids=["declared", "undeclared"])
+def test_padded_layer_references_follow_the_table(layer, declared):
+    extra_layer = f"0\nLAYER\n2\n{layer}\n70\n0\n62\n -7 \n" if declared else ""
+    dxf = (
+        f" 0\n SECTION \n 2\nHEADER\n9\n$CLAYER\n8\n{layer}\n0\nENDSEC\n"
+        "0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n"
+        f"0\nLAYER\n2\nRoof Edge\n70\n0\n62\n7\n{extra_layer}"
+        "0\nENDTAB\n0\nENDSEC\n"
+        f"0\nSECTION\n2\nENTITIES\n0\nLINE\n8\n{layer}\n10\n 0 \n20\n0\n"
+        "11\n 1 \n21\n0\n0\nENDSEC\n0\nEOF\n"
+    ).encode("ascii")
+
+    intake = dxf_intake.parse_dxf_bytes(dxf)
+    expected = layer if declared else "Roof Edge"
+
+    assert intake["layers"] == (["Roof Edge", layer] if declared else ["Roof Edge"])
+    assert intake.get("hidden_layers", []) == ([layer] if declared else [])
+    assert intake["active_layer"] == expected
+    assert intake["polylines"][0]["layer"] == expected
+    assert intake["polylines"][0]["pts"] == [[0, 0, 0], [1, 0, 0]]

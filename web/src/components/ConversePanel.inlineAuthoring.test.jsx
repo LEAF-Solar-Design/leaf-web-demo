@@ -32,6 +32,32 @@ const tick = (ms) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
 const response = (status, value) => ({ status, ok: status < 300, json: async () => value })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks() })
 
+it.each([true, false])('retires the waiting note after the plan is resolved with approved=%s', async (approved) => {
+  render(<ConversePanel sessionId="session" />)
+  await push(event('turn_started', 'plan'), event('plan_proposed', 'plan', proposed),
+    event('turn_complete', 'plan', { stop_reason: 'awaiting_approval' }))
+  expect(screen.getByText('Waiting on your decision above.')).toBeVisible()
+  await push(event('confirmation_resolved', 'plan', { confirmation_id: 'p1', approved }))
+  expect(screen.queryByText('Waiting on your decision above.')).toBeNull()
+})
+
+it('keeps the waiting note until every decision card in the turn is resolved', async () => {
+  render(<ConversePanel sessionId="session" />)
+  await push(event('turn_started', 'plan'), event('plan_proposed', 'plan', proposed),
+    event('plan_proposed', 'plan', { ...proposed, confirmation_id: 'p2' }),
+    event('turn_complete', 'plan', { stop_reason: 'awaiting_approval' }))
+  await push(event('confirmation_resolved', 'plan', { confirmation_id: 'p1', approved: true }))
+  expect(screen.getByText('Waiting on your decision above.')).toBeVisible()
+  await push(event('confirmation_resolved', 'plan', { confirmation_id: 'p2', approved: false }))
+  expect(screen.queryByText('Waiting on your decision above.')).toBeNull()
+})
+
+it('keeps the waiting note when the turn has no decision card', async () => {
+  render(<ConversePanel sessionId="session" />)
+  await push(event('turn_started', 'plan'), event('turn_complete', 'plan', { stop_reason: 'awaiting_approval' }))
+  expect(screen.getByText('Waiting on your decision above.')).toBeVisible()
+})
+
 it('takes a short prompt through questions, plan approval, two compile attempts and publication inline', async () => {
   vi.useFakeTimers()
   const stagePath = '/api/author/stages/' + id
@@ -47,10 +73,12 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
       branch: { synced: true, compile: { status: 'passed' }, ran: true, summary: 'Counted 12 panels' } },
   ]
   const requests = []
+  let statusCalls = 0
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     const { pathname, search } = new URL(url, 'http://test')
     const path = pathname + search
     const body = init.body ? JSON.parse(init.body) : undefined
+    if (path === '/api/tool-envelopes/tenant/status') { statusCalls++; return response(404, {}) }
     requests.push([init.method || 'GET', path, body])
     if (path === '/api/sessions/session/messages') return response(202, { turn_id: body.answers ? 'answer' : 'build' })
     if (path === '/api/agent/approvals/p1') return response(200, { resolved: true })
@@ -84,10 +112,10 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
     event('tool_call', 'build', { tool: 'author_tool' }), event('tool_result', 'build', built),
     event('tool_result', 'build', built), event('turn_complete', 'build'))
   const build = screen.getByRole('region', { name: 'Tool authoring' })
-  expect(build).toHaveTextContent('queued')
-  expect(build).toHaveTextContent('Branch has not reported yet')
+  expect(build).toHaveTextContent('Waiting to start')
+  expect(build).toHaveTextContent('Not deployed yet')
   await tick(1999)
-  expect(build).toHaveTextContent('queued')
+  expect(build).toHaveTextContent('Waiting to start')
   await tick(1)
   expect(build).toHaveTextContent('Attempt 1: refused, CS1026 main.csx:50')
   await tick(2000)
@@ -100,9 +128,9 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
   expect(build).toHaveTextContent('Published to your plugin catalog')
   expect(requests.at(-1)).toEqual(['GET', stagePath, undefined])
   await tick(3199)
-  expect(build).toHaveTextContent('Branch has not reported yet')
+  expect(build).toHaveTextContent('Deployed. AutoCAD picks it up within a minute.')
   await tick(1)
-  expect(build).toHaveTextContent('Synced · Compile · passed · Ran · Counted 12 panels')
+  expect(build).toHaveTextContent('Deployed. AutoCAD picks it up within a minute.')
   await tick(5000)
   expect(requests).toEqual([
     ['POST', '/api/sessions/session/messages', { answers }],
@@ -111,8 +139,9 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
     ['GET', stagePath, undefined], ['GET', stagePath, undefined], ['GET', stagePath, undefined],
     ['GET', reviewPath + '/context?change_set_id=' + id, undefined], ['GET', stagePath + '?view=source', undefined],
     ['POST', reviewPath, { change_set_id: id, staged_commit: commit, catalog_digest: digest, decision: 'approve' }],
-    ['GET', stagePath, undefined], ['GET', stagePath, undefined],
+    ['GET', stagePath, undefined],
   ])
+  expect(statusCalls).toBeGreaterThanOrEqual(1)
   expect(track).toHaveBeenCalledWith('plan.approved', { revision: 1 })
   expect(track).toHaveBeenCalledWith('review.decided', { decision: 'approve', approval_kind: 'independent' })
 })
@@ -188,7 +217,7 @@ it('settles the step on a foreign result and mounts the failed build only for th
   const build = screen.getByRole('region', { name: 'Tool authoring' })
   expect(build).toHaveTextContent('Review the missing delimiter')
   expect(build).toHaveTextContent('Attempt 1: refused, CS1026 main.csx:50')
-  expect(within(build).getByRole('button', { name: 'Fix with these errors' })).toBeEnabled()
+  expect(within(build).getByRole('button', { name: 'Try the build again' })).toBeEnabled()
   expect(fetch).toHaveBeenCalledTimes(1)
 })
 

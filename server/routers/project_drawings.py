@@ -1,6 +1,7 @@
 """Authenticated canonical project drawing context and checkout endpoints."""
 from __future__ import annotations
 
+import logging
 import math
 import re
 from typing import Annotated, Optional
@@ -8,6 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from psycopg import Error as PostgresError
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
 import deps
@@ -16,10 +18,12 @@ import solar_project_context as service
 from envelopes import ErrorCode, err_envelope, with_envelope_fields
 
 router = APIRouter()
+_LOG = logging.getLogger(__name__)
 _NO_STORE = {"Cache-Control": "no-store"}
 _PROJECT_DRAWING_PATH = re.compile(
     r"^/api/projects/[^/]+/(?:solar-layout|drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
-    r"drawings/[^/]+/versions/[^/]+/(?:physical|solar-reads|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf|solar-layout(?:/operations)?)|"
+    r"drawings/[^/]+/versions/[^/]+/(?:physical|solar-reads|solar-schedule-comparison|"
+    r"solar-engineering-comparison|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf|solar-layout(?:/operations)?)|"
     r"drawings/[^/]+/solar-artifacts/[^/]+)/?$")
 _FAILURES = {
     "demo_actor_refused": (403, False),
@@ -121,6 +125,24 @@ def _dispatch(operation):
         return _dispatch(lambda: service.refuse("INTERNAL"))
 
 
+def _add_solve_history(context, preparation):
+    from leaf_platform.project_solve_history import latest_by_frame
+
+    frames = preparation["frames"]
+    try:
+        history = latest_by_frame(
+            context.binding, context.intake_sha256, preparation["graph_sha256"],
+            [frame["id"] for frame in frames],
+        )
+    except (PostgresError, RuntimeError) as exc:
+        _LOG.warning("project_solve_history_unavailable exception_type=%s", type(exc).__name__)
+        preparation["solve_history_available"] = False
+        return
+    preparation["solve_history_available"] = True
+    for frame in frames:
+        frame["latest_solve"] = history.get(frame["id"])
+
+
 @router.get("/api/projects/{project_id}/drawing-versions/{input_version_id}/context")
 def context_route(project_id: UUID, input_version_id: UUID, drawing_id: Optional[UUID] = None,
                   tenant=Depends(deps.require_active_tenant),
@@ -140,7 +162,10 @@ def context_route(project_id: UUID, input_version_id: UUID, drawing_id: Optional
                   "role_discovery": discover_roles(context.intake)}
         if prepare_solve or solve_frame is not None:
             from solar_project_solve_preparation import prepare_solve as prepare
-            result["solve_preparation"] = prepare(context.intake, solve_frame, is_head=binding.is_head)
+            preparation = prepare(context.intake, solve_frame, is_head=binding.is_head)
+            if preparation["available"] and solve_frame is None:
+                _add_solve_history(context, preparation)
+            result["solve_preparation"] = preparation
         return result
     return _dispatch(operation)
 
@@ -401,7 +426,9 @@ from starlette.concurrency import run_in_threadpool
 import solar_project_admission as output_policy
 import solar_project_artifacts as output_artifacts
 import solar_project_read as output_reads
+import solar_project_schedule_compare as schedule_compare
 import solar_project_solaredge as project_solaredge
+import solar_saved_engineering_comparison as engineering_compare
 from solar_design_graph import GraphValidationError
 
 _OUTPUT_FAILURES = {
@@ -425,6 +452,8 @@ _OUTPUT_FAILURES = {
     "SIP_R6_TOOL_MANIFEST_MISMATCH": (409, "The Solar tool changed. Refresh the tools and try again."),
     "SIP_R6_STALE_CURRENT": (409, "The drawing changed. Select the current version and run the tool again."),
     "ARTIFACT_STALE": (409, "The drawing changed after this file was made. Select the current version and run the tool again."),
+    "SCHEDULE_COMPARISON_VERSION_MISMATCH": (409, "Select a schedule saved for each requested drawing version."),
+    "SCHEDULE_COMPARISON_ARTIFACT_KIND": (409, "Select two saved electrical schedules."),
     "ARTIFACT_ID_INVALID": (400, "The project artifact reference is invalid."),
     "ARTIFACT_NOT_FOUND": (404, "The project artifact was not found."),
     "ARTIFACT_CORRUPT": (500, "The stored project artifact failed its integrity check."),
@@ -527,6 +556,64 @@ def solar_read_route(project_id: str, drawing_id: str, input_version_id: str,
             x_org_id, x_project_id, input_version_id)
         return output_reads.run_project_read(tenant, proj, drawing, version, body["tool"],
             body.get("params", {}), catalog_digest=body["catalog_digest"], current=body.get("current", False))
+    return _output_dispatch(operation)
+
+
+def _bounded_comparison_response(result):
+    response = JSONResponse(content=with_envelope_fields({"result": result}), headers=_NO_STORE)
+    if len(response.body) > output_reads.MAX_OUTPUT_BYTES:
+        raise GraphValidationError("READ_OUTPUT_LIMIT_EXCEEDED")
+    return response
+
+
+@router.get("/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-engineering-comparison")
+def solar_engineering_comparison_route(
+        project_id: str, drawing_id: str, input_version_id: str, compare_version_id: str,
+        tenant=Depends(deps.require_active_tenant),
+        x_org_id: Optional[str] = Header(default=None), x_project_id: Optional[str] = Header(default=None)):
+    def operation():
+        if not output_policy.project_runs_enabled():
+            raise GraphValidationError("project_execution_disabled")
+        proj, drawing, before = _output_scope(tenant, project_id, drawing_id,
+            x_org_id, x_project_id, input_version_id)
+        try:
+            after = UUID(compare_version_id)
+        except ValueError:
+            raise GraphValidationError("SIP_R6_INVALID_REQUEST") from None
+        result = engineering_compare.compare(tenant, proj, drawing, before, after)
+        return _bounded_comparison_response(result)
+    return _output_dispatch(operation)
+
+
+@router.get("/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-schedule-comparison")
+def solar_schedule_comparison_route(
+        project_id: str, drawing_id: str, input_version_id: str,
+        compare_version_id: str, before_artifact_id: Optional[str] = None, after_artifact_id: Optional[str] = None,
+        cable_offset: Optional[str] = None,
+        tenant=Depends(deps.require_active_tenant),
+        x_org_id: Optional[str] = Header(default=None), x_project_id: Optional[str] = Header(default=None)):
+    def operation():
+        if not output_policy.project_runs_enabled():
+            raise GraphValidationError("project_execution_disabled")
+        proj, drawing, before = _output_scope(tenant, project_id, drawing_id,
+            x_org_id, x_project_id, input_version_id)
+        try:
+            after = UUID(compare_version_id)
+        except ValueError:
+            raise GraphValidationError("SIP_R6_INVALID_REQUEST") from None
+        if cable_offset is not None and not re.fullmatch(r"[0-9]{1,10}", cable_offset):
+            raise GraphValidationError("SIP_R6_INVALID_REQUEST")
+        if before_artifact_id is None and after_artifact_id is None and cable_offset is not None:
+            result = schedule_compare.compare_saved_cable_layouts(
+                tenant, proj, drawing, before, after, int(cable_offset))
+            return _bounded_comparison_response(result)
+        if before_artifact_id is None or after_artifact_id is None:
+            raise GraphValidationError("SIP_R6_INVALID_REQUEST")
+        result = schedule_compare.compare_saved_schedules(
+            tenant, proj, drawing, before_version_id=before, after_version_id=after,
+            before_artifact_id=before_artifact_id, after_artifact_id=after_artifact_id,
+            cable_offset=None if cable_offset is None else int(cable_offset))
+        return _bounded_comparison_response(result)
     return _output_dispatch(operation)
 
 

@@ -8,7 +8,7 @@ vi.mock('../../telemetry.js', async original => ({ ...await original(), track: v
 const plan = { title: 'Label the roof', target: 'branch', change_kind: 'revise', target_tool_name: 'roof-label',
   summary: '<img src=x>', behavior: ['Find roof panels', 'Label matching panels'],
   inputs: [{ name: 'threshold', type: 'number', default: 0, description: 'Minimum area' }],
-  output: 'A count', capabilities: ['drawing.write'], undo: 'Use Undo',
+  output: 'A count', capabilities: ['drawing.write', 'drawing.read'], undo: 'Use Undo',
   assumptions: ['A drawing is open'], acceptance: ['Every panel has a label'],
   answers: { q1: { labels: ['Selected'] }, q2: { other: 'Roof layer' } } }
 const props = { sessionId: 'session', proposal: { confirmation_id: 'plan', revision: 2, plan } }
@@ -18,16 +18,27 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); vi.clear
 
 it('renders the plan contract as plain text and reports the replaced revision', () => {
   const view = render(<PlanCard {...props} />)
-  for (const text of ['Label the roof', 'Branch tool, runs inside AutoCAD', 'Revise roof-label', '<img src=x>',
-    'A count', 'Changes your drawing', 'Use Undo', 'A drawing is open', 'Every panel has a label', 'q1 · Selected', 'q2 · Roof layer']) {
+  for (const text of ['Label the roof', 'Runs inside AutoCAD', 'Revise roof-label', '<img src=x>',
+    'A count', 'Changes your drawing', 'Reads your drawing', 'Use Undo', 'A drawing is open', 'Every panel has a label', 'Selected', 'Roof layer']) {
     expect(screen.getByText(text)).toBeVisible()
   }
   expect(screen.getByText('Find roof panels').parentElement.tagName).toBe('OL')
+  expect(screen.getByText('What to check after you run it')).toBeVisible()
+  expect(screen.getByText('Studio compiles this tool but does not run it. Its first run is in AutoCAD, on your drawing.')).toBeVisible()
   expect(screen.getByRole('table')).toHaveTextContent('thresholdnumber0Minimum area')
   expect(document.querySelector('img')).toBeNull()
+  expect(screen.queryByText(/q[12] · /)).toBeNull()
   view.rerender(<PlanCard {...props} replacedBy={3} />)
   expect(screen.getByRole('status')).toHaveTextContent('Replaced by revision 3')
   expect(screen.queryByRole('button')).toBeNull()
+})
+
+it('shows the Studio target and omits an empty answers section', () => {
+  render(<PlanCard {...props} proposal={{ ...props.proposal, plan: { ...plan, target: 'studio', answers: {} } }} />)
+  expect(screen.getByText('Runs in Studio')).toBeVisible()
+  expect(screen.getByText('Acceptance checks')).toBeVisible()
+  expect(screen.queryByText('Studio compiles this tool but does not run it. Its first run is in AutoCAD, on your drawing.')).toBeNull()
+  expect(screen.queryByRole('heading', { name: 'Your answers' })).toBeNull()
 })
 
 it.each([

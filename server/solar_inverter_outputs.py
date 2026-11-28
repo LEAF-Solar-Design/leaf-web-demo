@@ -889,11 +889,11 @@ def _cables(state):
         out.append({"kind": STRING_KIND, "circuit": detail.get("circuit"), "panels": detail.get("panel_count"),
                     "segment": None, "source": item["string"],
                     "length": polyline_length(pts) if len(pts) > 1 else 0.0})
-    for item in state["rows"]["cable"]:
+    for route_index, item in enumerate(state["rows"]["cable"]):
         detail = item.get("_detail") or {}
         pts = _points(item["vertices"], "cable vertices")
         out.append({"kind": item["cable_kind"], "circuit": detail.get("circuit"), "panels": None,
-                    "segment": item.get("segment"), "source": item.get("from"),
+                    "segment": item.get("segment"), "source": item.get("from"), "route_index": route_index,
                     "length": polyline_length(pts, item.get("bulges"), bool(detail.get("closed")))})
     return out
 
@@ -912,6 +912,7 @@ def string_records(state, host):
             continue                                  # no cable record: never collected
         circuits.setdefault(cable["circuit"] or "", []).append(cable)
     sizer = host.get("StringSizerStandard") if isinstance(host, dict) else None
+    saved_watts = host.get("StringPowerWattsByHandle", {}) if isinstance(host, dict) else {}
     records = []
     for circuit, members in circuits.items():
         string_cable, total = None, 0.0
@@ -929,6 +930,8 @@ def string_records(state, host):
                   "string": _int_or_zero(match.group(1)), "modules": _int_or_zero(string_cable["panels"]),
                   "homerun_inches": total, "zone": "", "circuit": string_cable["circuit"],
                   "cold_voc_per_module": 0.0, "vmax": 0, "standard": None}
+        if string_cable["source"] in saved_watts:
+            record["dc_watts"] = saved_watts[string_cable["source"]]
         if isinstance(sizer, dict):
             record["cold_voc_per_module"] = float(sizer.get("max_module_voltage") or 0.0)
             record["vmax"] = int(sizer.get("string_design_voltage") or 0)
@@ -988,6 +991,19 @@ def _kw(value):
     return cs_text(cs_round(value, 2))
 
 
+def _saved_dc_watts(records):
+    if records and all("dc_watts" in record for record in records):
+        return math.fsum(record["dc_watts"] for record in records)
+    return None
+
+
+def _scheduled_dc_kw(records, modules, pmax):
+    if pmax > 0:
+        return modules * pmax / 1000.0
+    watts = _saved_dc_watts(records)
+    return watts / 1000.0 if watts is not None else None
+
+
 def combiner_schedule(inverter, module, records, l1_to_l2):
     """ScheduleRegistry.InverterScheduleL1L2 (:210-300)."""
     ac_kw = safe_parse_double(inverter.get("maxACPower")) / 1000.0 if inverter is not None else 0.0
@@ -1009,26 +1025,30 @@ def combiner_schedule(inverter, module, records, l1_to_l2):
             modules = sum(r["modules"] for r in group)
             counts = list(dict.fromkeys(r["modules"] for r in group))
             per = str(counts[0]) if len(counts) == 1 else ", ".join(str(r["modules"]) for r in group)
-            dc = cs_format(modules * pmax / 1000.0, "N2") if pmax > 0 else "-"
+            dc_kw = _scheduled_dc_kw(group, modules, pmax)
+            dc = cs_format(dc_kw, "N2") if dc_kw is not None else "-"
             rows.append([name, f"CB-{cb}", str(len(group)), per, str(modules), dc, "-", "-"])
             l2_strings += len(group)
             l2_modules += modules
-        l2_dc = l2_modules * pmax / 1000.0 if pmax > 0 else 0.0
-        l2_ac = min(l2_dc, ac_kw) if ac_kw > 0 else 0.0
+        l2_dc = _scheduled_dc_kw(by_l2[l2], l2_modules, pmax)
+        l2_ac = min(l2_dc or 0.0, ac_kw) if ac_kw > 0 and pmax > 0 else 0.0
+        show_ac = ac_kw > 0 and (pmax > 0 or l2_dc is None)
         rows.append([name + " Total", "", str(l2_strings), "", str(l2_modules),
-                     _kw(l2_dc) if pmax > 0 else "-", _kw(l2_ac) if ac_kw > 0 else "-",
+                     _kw(l2_dc) if l2_dc is not None else "-", _kw(l2_ac) if show_ac else "-",
                      _kw(l2_dc / l2_ac) if (pmax > 0 and ac_kw > 0 and l2_ac > 0) else "-"])
         grand_strings += l2_strings
         grand_modules += l2_modules
-        grand_dc += l2_dc
+        grand_dc += l2_dc or 0.0
         grand_ac += l2_ac
-    rows.append(_grand_total(grand_strings, grand_modules, grand_dc, grand_ac, pmax))
+    if pmax <= 0:
+        grand_dc = _scheduled_dc_kw(records, grand_modules, pmax)
+    rows.append(_grand_total(grand_strings, grand_modules, grand_dc, grand_ac))
     return {"title": "COMBINER / INVERTER SCHEDULE", "headers": list(COMBINER_HEADERS), "rows": rows}
 
 
-def _grand_total(strings, modules, dc, ac, pmax):
-    return ["GRAND TOTAL", "", str(strings), "", str(modules), _kw(dc) if pmax > 0 else "-",
-            _kw(ac) if ac > 0 else "-", _kw(dc / ac) if (dc > 0 and ac > 0) else "-"]
+def _grand_total(strings, modules, dc, ac):
+    return ["GRAND TOTAL", "", str(strings), "", str(modules), _kw(dc) if dc is not None else "-",
+            _kw(ac) if ac > 0 else "-", _kw(dc / ac) if (dc and dc > 0 and ac > 0) else "-"]
 
 
 def inverter_schedule_standard(inverter, module, records):
@@ -1051,20 +1071,24 @@ def inverter_schedule_standard(inverter, module, records):
             modules = sum(r["modules"] for r in group)
             counts = list(dict.fromkeys(r["modules"] for r in group))
             per = str(counts[0]) if len(counts) == 1 else ", ".join(str(r["modules"]) for r in group)
-            dc = cs_format(modules * pmax / 1000.0, "N2") if pmax > 0 else "-"
+            dc_kw = _scheduled_dc_kw(group, modules, pmax)
+            dc = cs_format(dc_kw, "N2") if dc_kw is not None else "-"
             rows.append([f"INV-{inv}", letter, str(len(group)), per, str(modules), dc, "-", "-"])
             inv_strings += len(group)
             inv_modules += modules
-        inv_dc = inv_modules * pmax / 1000.0 if pmax > 0 else 0.0
-        inv_ac = min(inv_dc, ac_kw) if ac_kw > 0 else 0.0
+        inv_dc = _scheduled_dc_kw(by_inv[inv], inv_modules, pmax)
+        inv_ac = min(inv_dc or 0.0, ac_kw) if ac_kw > 0 and pmax > 0 else 0.0
+        show_ac = ac_kw > 0 and (pmax > 0 or inv_dc is None)
         rows.append([f"INV-{inv} Total", "", str(inv_strings), "", str(inv_modules),
-                     _kw(inv_dc) if pmax > 0 else "-", _kw(inv_ac) if ac_kw > 0 else "-",
+                     _kw(inv_dc) if inv_dc is not None else "-", _kw(inv_ac) if show_ac else "-",
                      _kw(inv_dc / inv_ac) if (pmax > 0 and ac_kw > 0 and inv_ac > 0) else "-"])
         grand_strings += inv_strings
         grand_modules += inv_modules
-        grand_dc += inv_dc
+        grand_dc += inv_dc or 0.0
         grand_ac += inv_ac
-    rows.append(_grand_total(grand_strings, grand_modules, grand_dc, grand_ac, pmax))
+    if pmax <= 0:
+        grand_dc = _scheduled_dc_kw(records, grand_modules, pmax)
+    rows.append(_grand_total(grand_strings, grand_modules, grand_dc, grand_ac))
     return {"title": "INVERTER SCHEDULE", "headers": list(INVERTER_HEADERS), "rows": rows}
 
 
@@ -1084,6 +1108,7 @@ def string_schedule(module, records, l1_to_l2):
         vmax = r["vmax"]
         margin = vmax - voc_cold if (voc_cold > 0 and vmax > 0) else 0.0
         col1 = (str(l1_to_l2[r["inverter"]]) if r["inverter"] in l1_to_l2 else "?") if l1_to_l2 else r["mppt"]
+        power = r["modules"] * pmax if module else r.get("dc_watts")
         rows.append([
             str(r["inverter"]), col1, str(r["string"]), r["zone"] or "-", str(r["modules"]),
             cs_text(cs_round(voc, 1)) if module else "-",
@@ -1093,7 +1118,7 @@ def string_schedule(module, records, l1_to_l2):
             cs_text(cs_round(r["modules"] * vmp, 1)) if module else "-",
             cs_text(cs_round(isc, 2)) if module else "-",
             cs_text(cs_round(isc * 1.25, 2)) if module else "-",
-            cs_text(cs_round(r["modules"] * pmax, 0)) if module else "-",
+            cs_text(cs_round(power, 0)) if power is not None else "-",
             cs_text(cs_round(r["homerun_inches"] / 12.0, 1)),
             "-", "-", "-",                              # cable sizing runs only with a module (:330)
             r["standard"] or "-"])
@@ -1101,7 +1126,8 @@ def string_schedule(module, records, l1_to_l2):
         total_power += r["modules"] * pmax
     totals = [""] * len(headers)
     totals[0], totals[2], totals[4] = "TOTAL", str(len(records)), str(total_modules)
-    totals[12] = cs_text(cs_round(total_power, 0)) if module else "-"
+    watts = total_power if module else _saved_dc_watts(records)
+    totals[12] = cs_text(cs_round(watts, 0)) if watts is not None else "-"
     rows.append(totals)
     return {"title": "STRING SCHEDULE", "headers": headers, "rows": rows}
 
@@ -1128,7 +1154,8 @@ def feeder_schedule(state, host, l1_to_l2):
 
 def build_schedules(state, host):
     """InsertSchedulesCmd.Run steps 1-6 (:31-104): the non-empty schedules in insertion order. Cable
-    sizing needs a module and the capture host resolves none (every module column prints "-")."""
+    sizing needs a module and the capture host resolves none. A registered drawing can supply
+    installed DC watts from its saved frame ratings independently of catalog and cable sizing."""
     inverter = host.get("InverterCatalogRecord")
     module = host.get("ModuleCatalogRecord")
     records = string_records(state, host)
@@ -1528,7 +1555,7 @@ def _compare_circuit_keys(a, b):
     return (a[0] > b[0]) - (a[0] < b[0])
 
 
-def homeruns_sheet(state):
+def _homerun_rows(state):
     """WriteHomerunsSheet (:1862-1888) over the detailed view PreCalculateViewItems builds (:2457-2552,
     CreateListViewItem :2584-2689): the header, then one row per cable. The rows are built in mCables
     order (StringCalculations.performCalc, :87-88): the cables in SelectAll order (_select_all_order),
@@ -1562,15 +1589,21 @@ def homeruns_sheet(state):
                                               "export name")
             length = cs_fixed(cable["length"] / 12.0, 2)
             if match:
-                items.append((int(match.group(1)),
-                              [f"{device_number_of(circuit)} - {match.group(2)}", match.group(1), which, panels,
-                               length, cs_fixed(total_ft, 2), cs_fixed(total_ft / 2, 2)]))
+                key = int(match.group(1))
+                cells = [f"{device_number_of(circuit)} - {match.group(2)}", match.group(1), which, panels,
+                         length, cs_fixed(total_ft, 2), cs_fixed(total_ft / 2, 2)]
             else:
-                items.append((INT_MAX, ["-", "-", which, panels, length, "N/A", "N/A"]))
+                key = INT_MAX
+                cells = ["-", "-", which, panels, length, "N/A", "N/A"]
+            items.append((key, cells, cable.get("route_index")))
             if len(items) > MAX_SCHEDULE_ROWS:
                 raise InverterOutputError(f"the homerun sheet exceeds {MAX_SCHEDULE_ROWS} rows")
     dotnet_list_sort(items, _compare_circuit_keys)
-    return [list(HOMERUN_HEADERS)] + [row for _, row in items]
+    return items
+
+
+def homeruns_sheet(state):
+    return [list(HOMERUN_HEADERS)] + [cells for _, cells, _ in _homerun_rows(state)]
 
 
 def export_equipment_sheet(inverter, count, low, location):
@@ -1676,7 +1709,7 @@ def export_string_sheet(inverter, records, low):
                    ["Cable sizing per NEC 310.16 (ampacity) + NEC 210.19 FPN (voltage drop ≤ 2% recommended)"]]
 
 
-def cable_export(state, host, form_values):
+def cable_export(state, host, form_values, *, include_route_rows=False):
     """CableExport, Export All (StringExportCmd.cs:33-94, StringHomerunExportForm.cs:318-413; declared, see
     the module docstring): the homerun cables found, the workbook the form writes, in its sheet order:
     Homeruns, Equipment, Inverter and String Schedule, then the Feeder Schedule when L2 collectors are on
@@ -1696,7 +1729,8 @@ def cable_export(state, host, form_values):
     inverter = host.get("InverterCatalogRecord")
     count, low, location = _export_host(host)
     records = string_records(after, host)
-    sheets = [("Homeruns", homeruns_sheet(after))]
+    items = _homerun_rows(after)
+    sheets = [("Homeruns", [list(HOMERUN_HEADERS)] + [cells for _, cells, _ in items])]
     for name, grid in (("Equipment Schedule", export_equipment_sheet(inverter, count, low, location)),
                        ("Inverter Schedule", export_inverter_sheet(inverter, records, low)),
                        ("String Schedule", export_string_sheet(inverter, records, low))):
@@ -1710,5 +1744,10 @@ def cable_export(state, host, form_values):
     if any(len(text) > MAX_CELL_CHARS for _, grid in sheets for row_cells in grid for text in row_cells):
         raise InverterOutputError("a workbook cell exceeds the comparator's string bound")
     data = write_workbook(sheets)
-    return after, [f"CableExport: wrote {len(sheets)} sheet(s)."], \
-        {"sheets": sheets, "bytes": data, "text": workbook_text(sheets)}
+    workbook = {"sheets": sheets, "bytes": data, "text": workbook_text(sheets)}
+    if include_route_rows:
+        workbook["route_count"] = len(after["rows"]["cable"])
+        workbook["route_rows"] = {route_index: row_number
+                                  for row_number, (_, _, route_index) in enumerate(items, 2)
+                                  if route_index is not None}
+    return after, [f"CableExport: wrote {len(sheets)} sheet(s)."], workbook

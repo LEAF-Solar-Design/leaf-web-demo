@@ -128,6 +128,71 @@ def _cleanup_evidence(job, receipt, run_id, block_id, *, stable):
     return evidence
 
 
+def _pinned_graph(tenant, source):
+    artifact = ledger.get(tenant, source['doc_id'], source['graph_revision'])
+    graph = artifact['graph']
+    if (artifact['tenant_id'] != tenant or artifact['doc_id'] != source['doc_id']
+            or artifact['revision'] != source['graph_revision']
+            or artifact['sha256'] != source['graph_sha256']
+            or graph_digest(graph) != source['graph_sha256']):
+        raise GraphRefused('lab_recovery_digest_mismatch')
+    validate_graph(graph)
+    return graph
+
+
+def _matches_intent(job, tenant, project, intent):
+    return (str(job.get('tenant_id')) == tenant and str(job.get('org_id')) == tenant
+            and str(job.get('project_id')) == project and job.get('idempotency_key') == intent
+            and job.get('tool') == corpus.OPERATION)
+
+
+def inspect_jobs(tenant, run_id, *, authorize):
+    """Read status and pinned input lineage for each corpus block on this exact run."""
+    source = store.get(tenant, run_id)
+    if source['tenant_id'] != tenant or source['run_id'] != run_id:
+        raise GraphRefused('lab_recovery_source_mismatch')
+    authority = store.corpus_authority(source)
+    if authority is None:
+        return {'corpus': False}
+    authorize(source)
+    graph = _pinned_graph(tenant, source)
+    blocks = [block for block in graph['blocks'] if block['registry']['id'] == 'corpus-evaluator']
+    project = authority['project_id']
+    if not blocks or any(block['settings']['project_id'] != project for block in blocks):
+        raise GraphRefused('lab_recovery_project_mismatch')
+    statuses = {'submitted': 'queued', 'queued': 'queued', 'running': 'running',
+                'failed': 'failed', 'complete': 'completed'}
+    intents = {f'lab:{run_id}:{block["id"]}:corpus:v1': block for block in blocks}
+    # One snapshot of just the exact intents. The project idempotency index
+    # makes each intent unique; treat a duplicate as unavailable if encountered.
+    with platform_link.platform_db().cursor() as cur:
+        cur.execute('SELECT job_id, tenant_id, org_id, project_id, tool, idempotency_key, status, attempt '
+                    'FROM async_jobs WHERE tenant_id=%s AND org_id=%s AND project_id=%s '
+                    'AND idempotency_key = ANY(%s)', (tenant, tenant, project, list(intents)))
+        jobs_by_intent = {}
+        for job in cur.fetchall():
+            intent = job['idempotency_key']
+            jobs_by_intent[intent] = job if intent not in jobs_by_intent else None
+    items = []
+    for intent, block in intents.items():
+        settings = block['settings']
+        job = jobs_by_intent.get(intent)
+        status, job_id, attempt = 'unavailable', None, None
+        if intent not in jobs_by_intent and source['state'] in {'queued', 'running'}:
+            status = 'not submitted'
+        if job is not None and _matches_intent(job, tenant, project, intent):
+            job_status, job_attempt = statuses.get(job.get('status')), job.get('attempt')
+            if job_status is not None and type(job_attempt) is int and job_attempt >= 0:
+                status, job_id, attempt = job_status, job['job_id'], job_attempt
+        items.append({'block_id': block['id'], 'status': status, 'job_id': job_id, 'attempt': attempt,
+                      'inputs': {'corpus_sha256': settings['corpus']['sha256'],
+                                 'suite_sha256': settings['suite']['sha256'],
+                                 'settings_sha256': graph_digest(settings)}})
+    authorize(source)
+    return {'corpus': True, 'source': {key: source[key] for key in
+            ('run_id', 'graph_revision', 'graph_sha256', 'input_digest')}, 'blocks': items}
+
+
 def prepare(tenant, run_id, *, authorize, include_cleanup=False):
     """Resolve immutable source and authoritative jobs, then recheck live access."""
     source = store.get(tenant, run_id)
@@ -141,14 +206,7 @@ def prepare(tenant, run_id, *, authorize, include_cleanup=False):
         raise GraphRefused('lab_corpus_unavailable')
     if source['state'] not in {'finished', 'failed', 'cancelled'}:
         raise GraphRefused('lab_recovery_terminal_required')
-    artifact = ledger.get(tenant, source['doc_id'], source['graph_revision'])
-    graph = artifact['graph']
-    if (artifact['tenant_id'] != tenant or artifact['doc_id'] != source['doc_id']
-            or artifact['revision'] != source['graph_revision']
-            or artifact['sha256'] != source['graph_sha256']
-            or graph_digest(graph) != source['graph_sha256']):
-        raise GraphRefused('lab_recovery_digest_mismatch')
-    validate_graph(graph)
+    graph = _pinned_graph(tenant, source)
     if (not graph['blocks'] or graph['pipes']
             or any(block['registry']['id'] != 'corpus-evaluator' for block in graph['blocks'])):
         raise GraphRefused('lab_recovery_independent_corpus_required')
@@ -166,9 +224,7 @@ def prepare(tenant, run_id, *, authorize, include_cleanup=False):
                 'job_id': None, 'status': None, 'receipt_sha256': None}
         if job is None:
             disposition, reason = 'unresolved', receipt['reason_category']
-        elif (str(job.get('tenant_id')) != tenant or str(job.get('org_id')) != tenant
-                or str(job.get('project_id')) != authority['project_id']
-                or job.get('idempotency_key') != intent or job.get('tool') != corpus.OPERATION):
+        elif not _matches_intent(job, tenant, authority['project_id'], intent):
             # Never project any identifier, status or receipt from foreign jobs.
             disposition, reason = 'unresolved', 'job_binding_mismatch'
         else:

@@ -355,6 +355,8 @@ def commit(tenant, project_id, drawing_id, parent_id, tool, params, *,
         import project_string_tag_write as tags
         try:
             output, metadata = tags.splice_tags(source, parent.intake, result["string_tag_plan"])
+            result["label_moves"] = metadata["label_moves"]
+            result["moved_label_count"] = len(result["label_moves"])
             # Bind the normalized confirmation too: even optional params whose
             # values match defaults must conflict when changed under one key.
             metadata["params_sha256"] = hashlib.sha256(params_json.encode("utf-8")).hexdigest()

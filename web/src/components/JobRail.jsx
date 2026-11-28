@@ -12,14 +12,14 @@
 // Slice 11a: the rail is the HOST of the BuildQueueCard. Every row is one
 // build record (lib/buildQueue.js): a job row maps through fromBrokerJob,
 // which carries this file's former stateTag / costUsd / dot vocabulary
-// verbatim, so a broker row renders exactly as before. `builds` (optional,
+// and shows queue wait from the job timestamps once known. `builds` (optional,
 // GET /api/builds records already parsed) adds terminal receipts to matching
 // broker rows and adds records that the recent-jobs list does not carry.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import './rails.css'
 
 import QueueCard from './BuildQueueCard.jsx'
-import { currentJobCountsAsRunning, fromBrokerJob, runningBuildCount } from '../lib/buildQueue.js'
+import { currentJobCountsAsRunning, fromBrokerJob, runningBuildCount, toEpochMs } from '../lib/buildQueue.js'
 import { dayLabel, fmtWhen } from '../lib/railTime.js'
 import { useLoadingPhase } from '../lib/loadingTiming.js'
 
@@ -58,6 +58,11 @@ function JobRow({ job, buildRecord, current, onSelect, onRetry }) {
     && buildRecord.id === mapped.id && buildRecord.state === mapped.state
     ? buildRecord
     : mapped
+  const createdAt = toEpochMs(job.created_at)
+  const startedAt = toEpochMs(job.started_at)
+  const queueWaitMs = createdAt != null && startedAt != null && startedAt >= createdAt
+    ? startedAt - createdAt
+    : null
   const canRetry = job.status === 'failed' && typeof onRetry === 'function'
   return (
     <BuildQueueCard
@@ -65,6 +70,7 @@ function JobRow({ job, buildRecord, current, onSelect, onRetry }) {
         ? { ...record, actions: [...record.actions, 'retry'] }
         : record}
       current={current}
+      queueWaitMs={queueWaitMs}
       onSelect={onSelect ? () => onSelect(job) : undefined}
       actions={canRetry ? { retry: () => onRetry(job) } : undefined}
     />

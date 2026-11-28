@@ -177,6 +177,78 @@ it('W1C5 shows a completed solve proposal as ready for review without a publishe
   expect(screen.queryByText('Proposal ready for review; not published')).toBeNull()
 })
 
+it('exports the complete retained envelope of the selected report and retires the previous link', async () => {
+  const blobs = []
+  const createObjectURL = vi.fn((blob) => {
+    blobs.push(blob)
+    return `blob:report-${blobs.length}`
+  })
+  const revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', Object.assign(class extends URL {}, { createObjectURL, revokeObjectURL }))
+  try {
+    const first = {
+      job_id: 'first-report', tool_name: 'Measure', status: 'complete', input_version_id: 'first-version',
+      result: {
+        ok: true, project_context: { project_id: project.project_id, input_version_id: 'first-version' },
+        result: { layers: [{ layer: 'Panels', count: 12 }], details: 'a'.repeat(5000) },
+      },
+    }
+    const second = {
+      ...first, job_id: 'second-report', status: 'succeeded', input_version_id: 'second-version',
+      result: { ok: true, project_context: { project_id: project.project_id, input_version_id: 'second-version' }, result: { layers: [] } },
+    }
+    const readBlob = (blob) => new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(JSON.parse(reader.result))
+      reader.onerror = () => reject(reader.error)
+      reader.readAsText(blob)
+    })
+    const props = { project, pane: 'jobs', workspace: { jobs: [first, second] } }
+    const { rerender } = render(<ProjectWorkspacePanels {...props} currentJob={first} />)
+    const link = () => screen.getByRole('link', { name: 'Download result JSON' })
+    expect(link()).toHaveAttribute('href', 'blob:report-1')
+    expect(link()).toHaveAttribute('download', 'result.json')
+    expect(await readBlob(blobs[0])).toEqual(first.result)
+
+    rerender(<ProjectWorkspacePanels {...props} currentJob={second} />)
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:report-1')
+    expect(link()).toHaveAttribute('href', 'blob:report-2')
+    expect(await readBlob(blobs[1])).toEqual(second.result)
+
+    for (const job of [
+      { ...second, result: first.result },
+      { ...second, status: 'failed' },
+      { ...second, status: 'running' },
+      { ...second, input_version_id: null },
+      { ...second, result: { ok: true, result: [] } },
+      { ...second, result: { ...second.result, ok: undefined } },
+      { ...second, result: { ...second.result, result: null } },
+    ]) {
+      rerender(<ProjectWorkspacePanels {...props} currentJob={job} />)
+      expect(screen.queryByRole('link', { name: 'Download result JSON' })).toBeNull()
+    }
+    const foreign = { ...second, result: { ...second.result, project_context: {
+      ...second.result.project_context, project_id: 'other-project',
+    }, result: { marker: 'foreign report content' } } }
+    rerender(<ProjectWorkspacePanels {...props} currentJob={foreign} />)
+    expect(screen.getByText('Report input version could not be verified')).toBeVisible()
+    expect(screen.queryByText(/foreign report content/)).toBeNull()
+
+    for (const details of ['x'.repeat(1024 * 1024), '界'.repeat(400000)]) {
+      rerender(<ProjectWorkspacePanels {...props} currentJob={{
+        ...second, result: { ...second.result, result: { details } },
+      }} />)
+      expect(screen.getByRole('status')).toHaveTextContent('This saved result is too large to preview or download here.')
+      expect(screen.queryByRole('link', { name: 'Download result JSON' })).toBeNull()
+    }
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:report-2')
+    expect(createObjectURL).toHaveBeenCalledTimes(2)
+  } finally {
+    cleanup()
+    vi.unstubAllGlobals()
+  }
+})
+
 it('B2 row6 orders versions and preserves honest material and tool empties', () => {
   const old = { version_id: 'old', seq: 1, created_at: '2026-09-01' }
   const recent = { version_id: 'recent', seq: 2, created_at: '2026-09-02' }
@@ -733,4 +805,52 @@ it('author content override distinguishes empty from omitted content', () => {
   expect(screen.queryByLabelText('What should the tool do?')).toBeNull()
   view.rerender(<NavRail activeSurface="browser" authorOpen />)
   expect(screen.getByLabelText('What should the tool do?')).toBeInTheDocument()
+})
+
+function comparisonJob(id, drawingVersion = 'drawing-1', toolVersion = '1.0.0', tool = 'layer-report', projectId = 'p1') {
+  return {
+    job_id: id, status: 'succeeded', tool_name: tool, input_version_id: drawingVersion,
+    result: {
+      ok: true, tool, version: toolVersion, result: { layers: [] },
+      project_context: { project_id: projectId, input_version_id: drawingVersion },
+    },
+  }
+}
+
+it.each([
+  ['same versions', comparisonJob('candidate'), 'Same drawing version', 'Same tool version'],
+  ['different drawing', comparisonJob('candidate', 'drawing-2'), 'Different drawing versions', 'Same tool version'],
+  ['different tool version', comparisonJob('candidate', 'drawing-1', '2.0.0'), 'Same drawing version', 'Different tool versions'],
+  ['different tool identity', comparisonJob('candidate', 'drawing-1', '1.0.0', 'area-report'), 'Same drawing version', 'Different tools'],
+  ['missing version', comparisonJob('candidate', 'drawing-1', null), 'Same drawing version', 'Tool version could not be verified'],
+])('Jobs compares %s using the saved report envelope', (_label, candidate, drawing, tool) => {
+  const jobs = [comparisonJob('reference'), candidate]
+  render(<ProjectWorkspacePanels pane="jobs" project={project} workspace={{ jobs }} mock />)
+  const comparison = within(screen.getByRole('region', { name: 'Compare saved reports' }))
+  const first = comparison.getByRole('combobox', { name: 'First report' })
+  const second = comparison.getByRole('combobox', { name: 'Second report' })
+  fireEvent.change(first, { target: { value: 'reference' } })
+  expect(within(second).queryByRole('option', { name: /reference/ })).toBeNull()
+  fireEvent.change(second, { target: { value: 'candidate' } })
+  expect(comparison.getByText(drawing)).toBeVisible()
+  expect(comparison.getByText(tool)).toBeVisible()
+})
+
+it('Jobs excludes unbound reports and clears a comparison when a saved report disappears', () => {
+  const reference = comparisonJob('reference')
+  const candidate = comparisonJob('candidate')
+  const alternate = comparisonJob('alternate')
+  const foreign = comparisonJob('foreign', 'drawing-1', '1.0.0', 'layer-report', 'p2')
+  const unbound = comparisonJob('unbound')
+  unbound.result.project_context.input_version_id = 'drawing-2'
+  const panel = jobs => <ProjectWorkspacePanels pane="jobs" project={project} workspace={{ jobs }} mock />
+  const { rerender } = render(panel([reference, candidate, alternate, foreign, unbound]))
+  const comparison = within(screen.getByRole('region', { name: 'Compare saved reports' }))
+  fireEvent.change(comparison.getByRole('combobox', { name: 'First report' }), { target: { value: 'reference' } })
+  fireEvent.change(comparison.getByRole('combobox', { name: 'Second report' }), { target: { value: 'candidate' } })
+  expect(comparison.queryByRole('option', { name: /foreign|unbound/ })).toBeNull()
+  expect(comparison.getByText('Same drawing version')).toBeVisible()
+  rerender(panel([reference, alternate, foreign, unbound]))
+  expect(comparison.queryByText('Same drawing version')).toBeNull()
+  expect(comparison.getByRole('combobox', { name: 'Second report' })).toHaveValue('')
 })

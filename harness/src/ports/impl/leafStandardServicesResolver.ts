@@ -638,6 +638,12 @@ export class LeafStandardServicesHumanApprovalHost {
   }
 }
 
+const noAuthorStandardServices = new AsyncLocalStorage<boolean>();
+
+export function withoutAuthorStandardServices<T>(action: () => Promise<T>): Promise<T> {
+  return noAuthorStandardServices.run(true, action);
+}
+
 export function withAuthorStandardServicesAuthority<T>(
   authority: Omit<AuthorAuthority, "subscription_mount_id">,
   action: () => Promise<T>,
@@ -677,6 +683,7 @@ export class AuthorStandardServicesRunner implements AgentRunner {
 
   run(input: AgentRunInput): Promise<AgentRunResult> {
     if (!this.enabled) return this.inner.run(input);
+    if (noAuthorStandardServices.getStore() === true) return this.inner.run(input);
     const current = authorAuthority.getStore();
     if (!current?.subscription_mount_id) {
       throw new Error("standard_services_author_authority_missing");

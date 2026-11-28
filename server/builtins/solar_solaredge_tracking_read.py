@@ -8,8 +8,11 @@ or "unassigned" (framed panels no PDF string covers). Optional "reference_change
 missing frames, missing panels, moved panels and unrecorded framed panels. For panel changes,
 frame_ref is the saved group frame (null for bridge/unassigned); current_frame_ref is current
 membership (null when unframed). Rows follow saved frame/string/panel order, then new panel id
-order, independent of current graph array order. The PDF inverter ids and string inputs are
-labels only: nothing here is a string, inverter, device, route, schedule or Solve state.
+order, independent of current graph array order. The "optimizer_assignment_changes" section
+compares saved electrical string membership with the accepted report's measured optimizer
+membership by shared panel identity. The "optimizers" section pages explicit
+report measurements where available. PDF inverter ids and string inputs remain
+documentary labels. The read does not modify electrical design or Solve state.
 
 Freshness is a reference check, never a digest comparison. record.report.graph_sha256 names the
 graph BEFORE the accept, so it never equals the digest of the graph that holds the record; the
@@ -44,9 +47,11 @@ READS_VERSION_HISTORY = True
 OUTPUT_SCHEMA = "leaf.solar-solaredge-tracking-read.v1"
 INVALID = "INVALID_SOLAREDGE_TRACKING_READ_REQUEST"
 RECORD_INVALID = "SOLAREDGE_IMPORT_RECORD_INVALID"
-SECTIONS = ("strings", "frames", "unassigned", "reference_changes")
+SECTIONS = ("strings", "frames", "unassigned", "reference_changes",
+            "optimizer_assignment_changes", "optimizers")
 PAGE_ITEMS = 1_000
 PAGE_BYTES = 262_144
+MEASUREMENT_INLINE_BYTES = 262_144
 MAX_REF = 100
 MAX_VERSION = 99_999_999
 _PARAM_KEYS = frozenset(("section", "offset"))
@@ -217,10 +222,97 @@ def _references(graph, record, changes=None):
 def _section(graph, record, section):
     changes = [] if section == "reference_changes" else None
     references = _references(graph, record, changes)
+    if section == "optimizer_assignment_changes":
+        return _optimizer_assignment_rows(graph, record, references), references
+    if section == "optimizers":
+        measurement = record.get("optimizer_measurement")
+        return measurement["optimizers"] if measurement else [], references
     items = changes if changes is not None else {
         "strings": record["strings"], "frames": record["frames"],
         "unassigned": record["unassigned_panel_refs"]}[section]
     return items, references
+
+
+def _covered_string_optimizer_counts(record, optimizers):
+    """Count markers only when they partition all assigned panels by saved string."""
+    strings = record["strings"]
+    if not strings or any(row["partial"] for row in strings):
+        return None
+    remaining = {ref: row["index"] for row in strings for ref in row["panel_refs"]}
+    counts = [0] * len(strings)
+    seen_ids = set()
+    for optimizer in optimizers:
+        index = optimizer["string_index"]
+        refs = optimizer["panel_refs"]
+        if (not _int(index, 0, len(strings) - 1) or not refs or optimizer["id"] in seen_ids
+                or optimizer["pdf_matrix"] != strings[index]["pdf_matrix"]
+                or any(remaining.pop(ref, None) != index for ref in refs)):
+            return None
+        seen_ids.add(optimizer["id"])
+        counts[index] += 1
+    return None if remaining else counts
+
+
+def project_page(graph, record, section, offset):
+    """Page the verified project record and bound duplicated measurement detail."""
+    rows, references = _section(graph, record, section)
+    measurement = record.get("optimizer_measurement")
+    if measurement is not None:
+        measurement = dict(measurement)
+        counts = None
+        if measurement["graph_rev"] != graph["rev"] or not references["current"]:
+            measurement.update(complete=False, total_count=None, string_counts=None)
+        elif (section == "strings" and not measurement["complete"]
+              and record.get("acceptance") is None and record["unassigned_panel_refs"]
+              and len(record["frames"]) == len(graph["frames"])):
+            counts = _covered_string_optimizer_counts(record, measurement["optimizers"])
+        if len(canonical_bytes(measurement)) > MEASUREMENT_INLINE_BYTES:
+            if measurement["complete"]:
+                counts = measurement["string_counts"]
+            measurement.update(optimizers=None, string_counts=None,
+                               optimizer_rows=len(measurement["optimizers"]))
+        if section == "strings" and counts is not None:
+            rows = [{**row, "optimizer_count": count}
+                    for row, count in zip(rows, counts, strict=True)]
+    items, page = _page(rows, offset)
+    return items, page, references, measurement
+
+
+def _optimizer_assignment_rows(graph, record, references):
+    """Compare partitions by panel identity without treating PDF indexes as saved string IDs."""
+    measurement = record.get("optimizer_measurement")
+    unavailable = None
+    if measurement is None:
+        unavailable = "missing_optimizer_measurement"
+    elif measurement["graph_rev"] != graph["rev"] or not references["current"]:
+        unavailable = "stale_optimizer_measurement"
+    elif not measurement["complete"]:
+        unavailable = "incomplete_optimizer_measurement"
+
+    report_index_by_panel = {}
+    if unavailable is None:
+        report_index_by_panel = {
+            panel_ref: optimizer["string_index"]
+            for optimizer in measurement["optimizers"]
+            for panel_ref in optimizer["panel_refs"]
+        }
+
+    rows = []
+    for string in sorted(graph["strings"], key=lambda item: item["id"]):
+        refs = string["ordered_panel_refs"]
+        reason = unavailable
+        if reason is None and (not refs or any(ref not in report_index_by_panel for ref in refs)):
+            reason = "saved_panels_without_report_measurement"
+        indexes = [] if reason else sorted({report_index_by_panel[ref] for ref in refs})
+        if reason:
+            verdict = "unavailable"
+        elif len(indexes) == 1 and len(refs) == len(record["strings"][indexes[0]]["panel_refs"]):
+            verdict = "match"
+        else:
+            verdict = "different"
+        rows.append({"saved_string_id": string["id"], "circuit_tag": string["circuit_tag"],
+                     "report_string_indexes": indexes, "verdict": verdict, "reason": reason})
+    return rows
 
 
 def _page(items, offset):

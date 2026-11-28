@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import logging
 import os
@@ -33,7 +34,7 @@ import threading
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
@@ -1168,49 +1169,124 @@ def _entity_identity(kind: str, entity: Dict[str, Any]) -> Any:
     return (kind, "hash", hashlib.sha256(canon.encode("utf-8")).hexdigest())
 
 
+_HISTORY_DELTA_KINDS = ("polylines", "inserts", "faces3d")
+_HISTORY_LAYOUT_KINDS = (
+    *_HISTORY_DELTA_KINDS, "texts", "circles", "arcs", "dimensions", "splines", "mleaders",
+)
+
+
 def _entity_map(intake: Dict[str, Any]) -> Dict[Any, Dict[str, Any]]:
     out: Dict[Any, Dict[str, Any]] = {}
-    for kind in ("polylines", "inserts", "faces3d"):
+    for kind in _HISTORY_DELTA_KINDS:
         for entity in (intake.get(kind) or []):
             if isinstance(entity, dict):
                 out[_entity_identity(kind, entity)] = entity
     return out
 
 
-def _version_delta(parent_intake: Dict[str, Any], child_intake: Dict[str, Any]) -> Dict[str, int]:
-    """`{added, modified, deleted}` entity counts between two STORED intake
-    payloads (parent vs child), computed fresh on every read — never stamped at
-    write time (CONTRACT-ADDENDUM: the write path is owned elsewhere and is not
-    touched by this route)."""
+def _entity_location(entity: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    if entity.get("space") != "paper":
+        return "model", None
+    layout = entity.get("layout")
+    return "paper", layout if isinstance(layout, str) and layout else None
+
+
+def _layout_entities(intake: Dict[str, Any]) -> Iterator[Tuple[str, Dict[str, Any]]]:
+    for kind in _HISTORY_LAYOUT_KINDS:
+        entities = intake.get(kind)
+        if isinstance(entities, list):
+            for entity in entities:
+                if isinstance(entity, dict):
+                    yield kind, entity
+
+
+def _paper_layouts(intake: Dict[str, Any]) -> List[Optional[str]]:
+    names = {
+        _entity_location(entity)[1]
+        for _, entity in _layout_entities(intake)
+        if entity.get("space") == "paper"
+    }
+    return sorted(names, key=lambda name: (name is None, name or ""))
+
+
+def _entity_locations(intake: Dict[str, Any]) -> Dict[Tuple[str, str], Tuple[str, Optional[str]]]:
+    locations = {}
+    for kind, entity in _layout_entities(intake):
+        handle = entity.get("handle")
+        if isinstance(handle, str) and handle:
+            locations[kind, handle] = _entity_location(entity)
+    return locations
+
+
+def _layout_changes(parent: Dict[str, Any], child: Dict[str, Any]) -> List[Dict[str, Any]]:
+    prior_locations = _entity_locations(parent)
+    changes = []
+    for (kind, handle), (to_space, to_layout) in _entity_locations(child).items():
+        prior = prior_locations.get((kind, handle))
+        if prior is not None and prior != (to_space, to_layout):
+            from_space, from_layout = prior
+            changes.append({
+                "kind": kind, "handle": handle,
+                "from_space": from_space, "from_layout": from_layout,
+                "to_space": to_space, "to_layout": to_layout,
+            })
+    return changes
+
+
+def _version_comparison(parent_intake: Dict[str, Any], child_intake: Dict[str, Any],
+                        include_layer_changes: bool, include_layout_changes: bool) -> Dict[str, Any]:
+    """Compare stored intake entities by stable identity."""
     parent_map = _entity_map(parent_intake or {})
     child_map = _entity_map(child_intake or {})
     added = modified = deleted = 0
+    layer_changes = []
     for ident, entity in child_map.items():
         prior = parent_map.get(ident)
         if prior is None:
             added += 1
         elif prior != entity:
             modified += 1
+            if include_layer_changes and ident[1] == "handle":
+                from_layer = prior.get("layer")
+                to_layer = entity.get("layer")
+                if (isinstance(from_layer, str) and isinstance(to_layer, str)
+                        and from_layer != to_layer):
+                    layer_changes.append({
+                        "kind": ident[0], "handle": ident[2],
+                        "from_layer": from_layer, "to_layer": to_layer,
+                    })
     for ident in parent_map:
         if ident not in child_map:
             deleted += 1
-    return {"added": added, "modified": modified, "deleted": deleted}
+    comparison: Dict[str, Any] = {
+        "delta": {"added": added, "modified": modified, "deleted": deleted},
+    }
+    if include_layer_changes:
+        comparison["layer_changes"] = layer_changes
+    if include_layout_changes:
+        comparison["layout_changes"] = _layout_changes(parent_intake, child_intake)
+    return comparison
 
 
-def _version_deltas(backend: Any, tenant_id: str, drawing_id: str,
-                    entries: List[Dict[str, Any]]) -> Dict[int, Optional[Dict[str, int]]]:
-    """Per-version delta, keyed by `v`. `None` where a delta cannot be derived:
-    the root version (no parent to diff against) or a payload that fails to
-    parse (`write_loop.read_intake` raises `KeyError`/`ValueError` — a missing
-    blob or a non-JSON one). Ships only what IS derivable from the stored
-    payloads rather than guessing at either end."""
+def _version_comparisons(
+    backend: Any, tenant_id: str, drawing_id: str,
+    entries: List[Dict[str, Any]], include_layer_changes: bool, include_layout_changes: bool,
+) -> Tuple[Dict[int, Dict[str, Any]], Dict[int, str], Dict[int, List[Optional[str]]]]:
+    """Return available comparisons, observed mismatches and paper-space inventory."""
     cache: Dict[int, Optional[Dict[str, Any]]] = {}
+    expected = {int(e["v"]): e.get("sha256") for e in entries}
+    mismatches: Dict[int, str] = {}
 
     def _load(v: int) -> Optional[Dict[str, Any]]:
         if v not in cache:
             try:
-                _, intake = write_loop.read_intake(backend, tenant_id, drawing_id, v)
+                _, intake = write_loop.read_intake(
+                    backend, tenant_id, drawing_id, v, expected_source_sha256=expected.get(v),
+                )
                 intake = intake if isinstance(intake, dict) else None
+            except write_loop.IntakeSourceDigestMismatch as exc:
+                mismatches[v] = exc.observed_sha256
+                intake = None
             except (KeyError, ValueError, TypeError,
                     write_loop.ProofStateUnreadable):
                 # Unreadable proof state degrades this ROW's delta to null;
@@ -1219,30 +1295,35 @@ def _version_deltas(backend: Any, tenant_id: str, drawing_id: str,
             cache[v] = intake
         return cache[v]
 
-    out: Dict[int, Optional[Dict[str, int]]] = {}
+    out: Dict[int, Dict[str, Any]] = {}
+    layouts: Dict[int, List[Optional[str]]] = {}
     for e in entries:
         v = int(e["v"])
         parent = e.get("parent")
+        child_intake = _load(v)
+        if include_layout_changes and child_intake is not None:
+            layouts[v] = _paper_layouts(child_intake)
         if parent is None:
-            out[v] = None
             continue
         parent_intake = _load(int(parent))
-        child_intake = _load(v)
         if parent_intake is None or child_intake is None:
-            out[v] = None
             continue
         try:
-            out[v] = _version_delta(parent_intake, child_intake)
+            out[v] = _version_comparison(
+                parent_intake, child_intake, include_layer_changes, include_layout_changes,
+            )
         except (KeyError, ValueError, TypeError):
             # Expected malformed-data failures only: a programming defect must
             # surface as a 500, not vanish into a delta:null row.
-            out[v] = None
-    return out
+            continue
+    return out, mismatches, layouts
 
 
 @router.get("/api/drawings/{drawing_id}/versions")
 def get_versions(drawing_id: str, include_deltas: bool = False,
-                 tenant_id: str = Depends(deps.require_active_tenant)) -> Dict[str, Any]:
+                 include_layer_changes: bool = False,
+                 tenant_id: str = Depends(deps.require_active_tenant),
+                 include_layout_changes: bool = False) -> Dict[str, Any]:
     """Full version-history chain straight from the store manifest — the read the
     UI's version-chain popover needs (undo/redo only stepped head one hop).
 
@@ -1251,9 +1332,20 @@ def get_versions(drawing_id: str, include_deltas: bool = False,
     expires}|null}` (§14: `checkout` is the single-writer lock from the
     manifest, read-only — no acquire/release this wave). `delta` is
     `{added, modified, deleted}` computed HERE, at read time, by diffing this
-    version's stored payload against its parent's (see `_version_deltas`); it
-    is `null` where that is not derivable (the root version, or an unparseable
-    payload on either side). Same 404 pattern as the intake route for
+    version's stored payload against its parent's (see `_version_comparisons`); it
+    is `null` for the root or an unavailable, unreadable or mismatched source
+    on either side. With `include_deltas=1`, a mismatch also adds
+    `observed_sha256` beside the recorded `sha256` on the affected row.
+    `include_layer_changes=1` requests the delta plus `layer_changes`, a list of
+    stable entity handles, kinds and exact before/after layer names for this
+    parent comparison. An available comparison with no moves has an empty
+    list. The root and unavailable comparisons have `layer_changes: null`.
+    `include_layout_changes=1` also requests each revision's `paper_layouts`,
+    the exact names of paper spaces represented in its saved intake and skipped
+    by model-space tools. A null list item denotes unnamed paper space. An
+    unreadable intake has a null inventory. `layout_changes` describes moves
+    for the delta's stable handles, with null layout names in model space.
+    Same 404 pattern as the intake route for
     an unknown drawing (the well-known `demo` bootstraps on first read at
     APS_LIVE=0; any other unknown drawing → BAD_PARAMS 404)."""
     import store  # da/store.py; importable via write_loop's sys.path setup (imported above)
@@ -1281,11 +1373,23 @@ def get_versions(drawing_id: str, include_deltas: bool = False,
     # tab, slice 6a), and the default response shape stays exactly what it
     # was before this feature.
     rows = []
-    if include_deltas:
-        deltas = _version_deltas(backend, str(tenant_id), drawing_id, entries)
+    if include_deltas or include_layer_changes or include_layout_changes:
+        comparisons, mismatches, layouts = _version_comparisons(
+            backend, str(tenant_id), drawing_id, entries,
+            include_layer_changes, include_layout_changes,
+        )
+        unavailable: Dict[str, Any] = {"delta": None}
+        if include_layer_changes:
+            unavailable["layer_changes"] = None
+        if include_layout_changes:
+            unavailable["layout_changes"] = None
         for e in entries:
             row = _version_row(e)
-            row["delta"] = deltas.get(row["v"])
+            row.update(comparisons.get(row["v"], unavailable))
+            if include_layout_changes:
+                row["paper_layouts"] = layouts.get(row["v"])
+            if row["v"] in mismatches:
+                row["observed_sha256"] = mismatches[row["v"]]
             rows.append(row)
     else:
         rows = [_version_row(e) for e in entries]
@@ -1561,6 +1665,54 @@ def _carry_solar_state(backend, tenant_id: str, drawing_id: str, parent_version:
     return merged, None
 
 
+def _complete_edited_dxf(data: bytes) -> bool:
+    """Check record framing before a parsed upload can become a revision."""
+    section = None
+    awaiting_section_name = False
+    inside_block = False
+    seen_section = False
+    with io.TextIOWrapper(io.BytesIO(data), encoding="utf-8-sig", errors="replace") as lines:
+        for code_line in lines:
+            value_line = next(lines, None)
+            if value_line is None:
+                return False
+            try:
+                code = int(code_line)
+            except ValueError:
+                return False
+            value = value_line.strip()
+            if code == 999:
+                continue
+            if awaiting_section_name:
+                if code != 2 or not value:
+                    return False
+                section = value.upper()
+                awaiting_section_name = False
+                seen_section = True
+            elif (code, value) == (0, "SECTION"):
+                if section is not None:
+                    return False
+                awaiting_section_name = True
+            elif (code, value) == (0, "EOF"):
+                return seen_section and section is None and all(not line.strip() for line in lines)
+            elif section is None:
+                return False
+            elif (code, value) == (0, "ENDSEC"):
+                if inside_block:
+                    return False
+                section = None
+            elif section == "BLOCKS" and code == 0:
+                if value == "BLOCK":
+                    if inside_block:
+                        return False
+                    inside_block = True
+                elif value == "ENDBLK":
+                    if not inside_block:
+                        return False
+                    inside_block = False
+    return False
+
+
 def _receive_edited_dxf(file: UploadFile, source_digest: str):
     """The integrity half every browser-edit save shares (F-3 and the W4g-3
     plan route): read the body under the upload cap, refuse a non-.dxf name,
@@ -1591,7 +1743,13 @@ def _receive_edited_dxf(file: UploadFile, source_digest: str):
             "version a payload that differs from what was edited",
             retryable=False, status_code=400)
     try:
-        intake = dxf_intake.parse_dxf_bytes(data, source_name=file.filename or "edited.dxf")
+        intake = dxf_intake.parse_dxf_bytes(
+            data, source_name=file.filename or "edited.dxf", include_model_entity_counts=True
+        )
+        # Intake recovers partial drawings for viewing. A save must not make
+        # recovered geometry the active revision when the upload is incomplete.
+        if not _complete_edited_dxf(data):
+            raise dxf_intake.DxfParseError("incomplete or invalid DXF framing")
     except dxf_intake.DxfParseError as exc:
         return error_response(ErrorCode.BAD_PARAMS,
                               f"edited document does not parse: {exc}",

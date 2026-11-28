@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import urllib.parse
+from datetime import datetime
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -153,6 +154,17 @@ def _status_body(harness_json: Dict[str, Any]) -> Dict[str, Any]:
                 "cooldown_until": account.get("cooldown_until")
                 if isinstance(account.get("cooldown_until"), str) else None,
             })
+            code = account.get("auth_refused_code")
+            if isinstance(code, str) and code in {"authentication_failed", "oauth_org_not_allowed"}:
+                safe_accounts[-1]["auth_refused_code"] = code
+                stamp = account.get("auth_refused_at")
+                if isinstance(stamp, str) and len(stamp) <= 40 and any(separator in stamp for separator in ("T", "t", " ")):
+                    try:
+                        datetime.fromisoformat(stamp[:-1] + "+00:00" if stamp.endswith("Z") else stamp)
+                    except ValueError:
+                        pass
+                    else:
+                        safe_accounts[-1]["auth_refused_at"] = stamp
     return with_envelope_fields({
         "linked": bool(harness_json.get("linked", False)),
         "linked_at": harness_json.get("linked_at"),

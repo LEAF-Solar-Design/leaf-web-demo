@@ -3,8 +3,8 @@
   "upstream": "LEAF-Solar-Design/mushy-code",
   "package": "assistant-react",
   "path": "packages/assistant-react",
-  "commit": "2cd51758cba309e49dbf80bdd0cc8e5d66a75a48",
-  "tree_sha256": "45fec3673ac0abf5bbbd106d51dc1b094bc81a407699d86be4903292c6df62d8",
+  "commit": "6404c05335e25842eeadc52798a7e1f5d1fb798b",
+  "tree_sha256": "938193fbd4bc10c23ea5b92ed5abd33352fb97396d1620309a046f2134e72667",
   "files": {
     "README.md": "7c1a2fd83b3a404d7d4d8938a40d0f80aec4e70e9617084ec31072f31df64dfd",
     "package-lock.json": "3c57eb9973d8ff32122cd52d03d27b00a758dc229b116da607a73121924c0671",
@@ -32,9 +32,9 @@
     "src/components/ReasonBanner.tsx": "602bb9e862e116f7b18b70e72a1d4d4c568e8c717612543c829c111178481b06",
     "src/components/StateCards.tsx": "97665cae37988bc971e350ada42d4cb8ae2b3d85e1c6235cb80dc8de354b1764",
     "src/datasets/DataTableCore.tsx": "2bc36140af02c940ef6c3257ac0ef7dfd5b0e85f204763f40bc8ce75e9690925",
-    "src/datasets/DatasetElement.tsx": "1d76fe4f9b563fd9361e0430ade3410c7981445cb68d60558fd30eb84a71a163",
+    "src/datasets/DatasetElement.tsx": "bc8e383c4588ae21cfa01dbbc891fe0692da6c24d706741b9036bd949256f12d",
     "src/datasets/LineChartCore.tsx": "117afda586b658d547f8cca4c2f1def9c6eaf3bfd177837d153885a8bb18e3b2",
-    "src/datasets/ProviderPairTable.tsx": "26a67f80fda5513a39bb5b29637a182f34784c674d71897fc2163c80eb2e507e",
+    "src/datasets/ProviderPairTable.tsx": "98451db3670e2179419fbac14adce4ff58625a20edd45736555c03493c76fc4c",
     "src/datasets/formatting.ts": "de02ed0d6eda299e4f6c029a01ee393a954e3503f695aac3a6bc37a7acd5cbe5",
     "src/datasets/index.ts": "3556b05487659e8720d4cc97b25a7f667815c63870ebab28e72a1d96c91cb8e3",
     "src/index.ts": "0742a70a5cbc0ee096ebecaab963f4975a53f0bba28299152a572089c7b7046c",
@@ -48,7 +48,7 @@
     "test/dataset-rendered-line.test.tsx": "07beebc68b09888c7c82d51252596a0f888051fd8f6aff71cfb2ea4a00484a49",
     "test/datasets.test.tsx": "0a6730d4d35df8d1f7a51beb2737a856ef6b26c9a20158ce5ba23bcee24afe00",
     "test/manual-workflow-status.test.tsx": "21980eecd68fdda156ce689059e98294da22ea1d04783b93b222a3802444ca59",
-    "test/provider-pair-table.test.tsx": "7f6335a7b355b7f76dcce9013df1f1cf71d1b686a61ee7aeaae57830760faf7f",
+    "test/provider-pair-table.test.tsx": "3504e92479ce59fd899a0224d5bf02dba0bb8b67199986cfa07c04d5dbef4d9b",
     "test/self-contained.test.ts": "14e3c635d2a9e8df43524e25b0639acd44ff0356921a05c009bc8e845096488a",
     "test/setup.ts": "3b4fb51b7c8aa9783fc960c2f852dacb6d202533f43ffcb24724094f4093371a",
     "test/states.test.tsx": "f18a2bf0733f27e4021f89f462feb1687f91bf1828ef0864d06c342e4899dada",
@@ -63,9 +63,9 @@
   "synced_by": "scripts/sync-assistant-kit.py",
   "downstream_overlays": {
     "src/datasets/DatasetElement.tsx": {
-      "sha256": "d1acf24b040ba60f46418afe3d29c8b155b9bca18185c175ef2210d3b4e17f96",
+      "sha256": "26a0311557dceebd908321ca6f56f4fdbd996616515e37d7732401e7b3543bfd",
       "reason": "Preserve reviewed consumer HTTPS source-link behavior/assertions/instructions alongside canonical O01 display183",
-      "upstream_commit": "2cd51758cba309e49dbf80bdd0cc8e5d66a75a48"
+      "upstream_commit": "6404c05335e25842eeadc52798a7e1f5d1fb798b"
     },
     "test/datasets.test.tsx": {
       "sha256": "a9377bbc32eca3ebd79e40bf804b92b2a3abdc878f7eb520a071fa99bf0a3c15",
@@ -77,6 +77,5 @@
       "reason": "Preserve reviewed consumer HTTPS source-link behavior/assertions/instructions alongside canonical O01 display183",
       "upstream_commit": "2cd51758cba309e49dbf80bdd0cc8e5d66a75a48"
     }
-  },
-  "adoption_scope": "assistant-react only; canonical paired-row PR184 merged; preserve separately pinned assistant-contract and three consumer source-link overlays"
+  }
 }

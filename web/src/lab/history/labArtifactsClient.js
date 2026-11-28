@@ -50,6 +50,90 @@ export function verifyLabBundle(bundle) {
   return bundle
 }
 
+function uploadedResultSpans(source) {
+  // The source already passed JSON.parse. Walk only the producer result path,
+  // skipping other values iteratively so nested report data cannot grow the call stack.
+  const path = ['parts', 'evaluations', null, 'complete_results', null, 'result']
+  const token = /[ \t\r\n]*([{}\[\]:,"]|[^{}\[\]:," \t\r\n]+)/y
+  let offset = 0
+
+  function next() {
+    token.lastIndex = offset
+    const match = token.exec(source)
+    const symbol = match[1]
+    offset = token.lastIndex
+    const start = offset - symbol.length
+    if (symbol === '"') {
+      while (source[offset] !== '"') {
+        offset += source[offset] === '\\' ? 2 : 1
+      }
+      offset++
+    }
+    return { symbol, start }
+  }
+
+  function skip(symbol) {
+    let nesting = symbol === '{' || symbol === '[' ? 1 : 0
+    while (nesting) {
+      const { symbol: current } = next()
+      if (current === '{' || current === '[') nesting++
+      if (current === '}' || current === ']') nesting--
+    }
+  }
+
+  function read(depth) {
+    const { symbol, start } = next()
+    if (depth === path.length) {
+      skip(symbol)
+      return [start, offset]
+    }
+    const array = depth === 2
+    if (symbol !== (array ? '[' : '{')) {
+      skip(symbol)
+      return null
+    }
+    const fields = new Map()
+    let index = 0
+    let entry = next()
+    while (entry.symbol !== (array ? ']' : '}')) {
+      let key = index++
+      if (!array) {
+        key = JSON.parse(source.slice(entry.start, offset))
+        next() // Colon
+      } else {
+        offset = entry.start
+      }
+      if (path[depth] === null || key === path[depth]) {
+        fields.set(key, read(depth + 1))
+      } else {
+        skip(next().symbol)
+      }
+      entry = next()
+      if (entry.symbol === ',') entry = next()
+    }
+    return fields
+  }
+
+  return read(0)?.get('parts')?.get('evaluations')
+}
+
+function uploadedResultMatches(source, evaluations) {
+  const spans = uploadedResultSpans(source)
+  return evaluations.map(({ complete_results }, index) => {
+    const jobs = spans?.get(index)?.get('complete_results')
+    const matches = new Map()
+    for (const [job, producer] of Object.entries(complete_results)) {
+      const span = jobs?.get(job)?.get('result')
+      if (span && typeof producer?.result_sha256 === 'string' && /^[a-f0-9]{64}$/.test(producer.result_sha256)) {
+        const [start, end] = span
+        // The producer hashes its serialized result followed by a newline.
+        matches.set(job, sha256Hex(source.slice(start, end) + '\n') === producer.result_sha256)
+      }
+    }
+    return matches
+  })
+}
+
 export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.fetch(...args), now = Date.now, storage = null } = {}) {
   let remembered = null
   if (storage) try {
@@ -108,6 +192,24 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       if (current(token)) update({ requestTimes: [...state.requestTimes, Math.max(0, now() - started)].slice(-20) })
     }
   }
+  async function readBundle(id, revision, token, { preserveText = false } = {}) {
+    const scope = authority()
+    let text
+    const readBody = preserveText ? async response => {
+      text = await response.text()
+      return JSON.parse(text)
+    } : null
+    const result = await request(id, `revisions/${encodeURIComponent(revision)}/export`,
+      undefined, false, token, 'GET', readBody)
+    if (!result.ok) return result
+    if (!current(token) || scope !== authority()) return { ok: false, detail: 'Document or account changed. Try exporting again.' }
+    try {
+      const { ok: unused, ...bundle } = result
+      verifyLabBundle(bundle)
+      if (bundle.parts.identity.doc_id !== id || bundle.parts.identity.revision !== Number(revision)) throw new Error(bundleError)
+      return preserveText ? { ok: true, bundle, text } : { ok: true, bundle }
+    } catch { return { ok: false, detail: bundleError } }
+  }
   async function getLayout(id, sha256) {
     try {
       const result = await request(id, `layout/${encodeURIComponent(sha256)}`, undefined, false)
@@ -161,6 +263,32 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       return { state: 'ready', docId: remembered, revision: head.revision, graph: row.graph, token }
     },
     currentGeneration: () => generation,
+    captureBundleScope() {
+      const token = capture(docId), scope = authority()
+      return () => current(token) && scope === authority()
+    },
+    async inspectBundle(bytes, isCurrent) {
+      const stale = { ok: false, detail: 'Document or account changed. Choose the file again.' }
+      if (!isCurrent()) return stale
+      if (bytes.byteLength > 64 * 1024 * 1024) return { ok: false, detail: 'Bundle is too large.' }
+      let bundle, source
+      try {
+        source = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+        bundle = verifyLabBundle(JSON.parse(source))
+      } catch { return { ok: false, detail: 'Bundle integrity check failed.' } }
+      const identity = bundle.parts.identity
+      const allowed = await readBundle(identity.doc_id, identity.revision, capture(docId))
+      if (!isCurrent()) return stale
+      if (!allowed.ok) return allowed
+      if (canonicalJSON(allowed.bundle.parts.identity) !== canonicalJSON(identity)) {
+        return { ok: false, detail: 'Bundle identity does not match the saved revision.' }
+      }
+      const digest = await crypto.subtle.digest('SHA-256', bytes)
+      if (!isCurrent()) return stale
+      const fileDigest = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+      return { ok: true, bundle, fileDigest, authorizedEvaluations: allowed.bundle.parts.evaluations,
+        uploadedMatches: uploadedResultMatches(source, bundle.parts.evaluations) }
+    },
     beginGraphOperation: () => ({ ...capture(docId), operation: ++operation }),
     isCurrentOperation: token => current(token) && token.operation === operation,
     captureMine(graph) { if (state.conflict && !state.conflict.captured) update({ conflict: { ...state.conflict, mine: JSON.parse(JSON.stringify(graph)), captured: true } }) },
@@ -203,24 +331,7 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       return result
     },
     revision: (id, n) => request(id, `revisions/${encodeURIComponent(n)}`),
-    async exportBundle(id, revision, { preserveText = false } = {}) {
-      const token = capture(id), scope = authority()
-      let text
-      const readBody = preserveText ? async response => {
-        text = await response.text()
-        return JSON.parse(text)
-      } : null
-      const result = await request(id, `revisions/${encodeURIComponent(revision)}/export`,
-        undefined, false, token, 'GET', readBody)
-      if (!result.ok) return result
-      if (!current(token) || scope !== authority()) return { ok: false, detail: 'Document or account changed. Try exporting again.' }
-      try {
-        const { ok: unused, ...bundle } = result
-        verifyLabBundle(bundle)
-        if (bundle.parts.identity.doc_id !== id || bundle.parts.identity.revision !== Number(revision)) throw new Error(bundleError)
-        return preserveText ? { ok: true, bundle, text } : { ok: true, bundle }
-      } catch { return { ok: false, detail: bundleError } }
-    },
+    exportBundle: (id, revision, options) => readBundle(id, revision, capture(id), options),
     async reopenBundle(text) {
       const token = this.beginGraphOperation(), scope = authority()
       let bundle

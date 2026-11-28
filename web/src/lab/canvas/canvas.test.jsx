@@ -27,10 +27,13 @@ vi.mock('elkjs/lib/elk.bundled.js', () => {
 })
 
 // Exercise our UI and callbacks independently of browser geometry.
+const flowProps = vi.hoisted(() => vi.fn())
 vi.mock('@xyflow/react', () => ({
   ReactFlowProvider: ({ children }) => children,
   useReactFlow: () => ({ screenToFlowPosition: point => point, getNodes: () => [], fitView: () => {} }),
-  ReactFlow: ({ nodes, edges, nodeTypes, edgeTypes, onNodeClick, onNodesChange, onConnect, onEdgesChange, children }) => <div data-testid="flow">
+  ReactFlow: ({ nodes, edges, nodeTypes, edgeTypes, onNodeClick, onNodesChange, onConnect, onConnectEnd, onEdgesChange, children }) => {
+    flowProps(onConnectEnd)
+    return <div data-testid="flow">
     {nodes.length > 1 && <button onClick={() => onConnect({ source: nodes[0].id, sourceHandle: 'result', target: nodes[1].id, targetHandle: 'value' })}>Connect first pair</button>}
     {edges.length > 0 && <button onClick={() => onEdgesChange([{ type: 'remove', id: edges[0].id }])}>Delete first pipe</button>}
     {nodes.map(node => { const Card = nodeTypes[node.type]; return <div key={node.id} data-testid={node.id} data-position={JSON.stringify(node.position)}>
@@ -41,7 +44,8 @@ vi.mock('@xyflow/react', () => ({
     {edges.map(edge => { const Pipe = edgeTypes[edge.type]; return <div key={edge.id} data-testid={`budget-${edge.id}`}>
       {JSON.stringify(edge.data.budget)}<Pipe {...edge} />
     </div> })}{children}
-  </div>,
+    </div>
+  },
   Background: () => null, Controls: () => null, Handle: props => <span data-testid="handle" aria-label={props['aria-label']} />,
   Position: { Top: 'top', Bottom: 'bottom' }, BaseEdge: () => null,
   EdgeLabelRenderer: ({ children }) => children, getBezierPath: () => ['', 0, 0],
@@ -691,6 +695,56 @@ describe('canvas authoring', () => {
     expect(changed.mock.calls.at(-1)[0].document.pipes).toEqual([edge(1, 2)])
     fireEvent.click(screen.getByRole('button', { name: 'Delete first pipe' }))
     expect(changed.mock.calls.at(-1)[0].document.pipes).toEqual([])
+  })
+
+  it.each([
+    ['forward cycle', 1, 1, false, 'Cycles are refused', null, 'adjust-none-2'],
+    ['occupied input', 3, 2, false, 'Input already connected; disconnect it first'],
+    ['reverse cycle', 1, 1, true, 'Cycles are refused', null, 'adjust-none-2'],
+    ['typed mismatch', 1, 2, false, 'Scalar and stream modes differ', null, 'stream-source-1'],
+    ['output-to-output', 1, 2, false, 'Connect an output to an input', 'source'],
+    ['input-to-input', 1, 2, false, 'Connect an output to an input', 'target'],
+  ])('offers a safe recovery from a refused %s drop when a source exists', (variant, from, to, reverse, reason, sameType, alternative) => {
+    let initial = variant === 'occupied input' ? connectPipe(documentOf(3), edge(1, 2)) : documentOf(3)
+    const incompatible = { ...manifest, inputs: { ...manifest.inputs, value: { ...manifest.inputs.value, mode: 'stream' } } }
+    const streamSource = { ...manifest, id: 'stream-source',
+      outputs: { result: { ...manifest.outputs.result, mode: 'stream' } } }
+    const entries = variant === 'typed mismatch' ? entriesOf(incompatible, streamSource) : entriesOf(manifest)
+    if (variant === 'typed mismatch') initial = addBlock(initial, streamSource)
+    initial = setOutput(initial, 'existing', edge(3, 2).from, entries)
+    const changed = vi.fn()
+    const { container } = render(<LabCanvas initialDocument={initial} entries={entries} onChange={changed} />)
+    changed.mockClear()
+    const pipe = edge(from, to)
+    const source = { nodeId: pipe.from.node, id: pipe.from.port, type: 'source' }
+    const target = { nodeId: pipe.to.node, id: pipe.to.port, type: 'target' }
+    const [fromHandle, toHandle] = sameType === 'source'
+      ? [source, { ...source, nodeId: target.nodeId }]
+      : sameType === 'target'
+        ? [{ ...target, nodeId: source.nodeId }, target]
+        : reverse ? [target, source] : [source, target]
+    const [endConnection] = flowProps.mock.calls.at(-1)
+    act(() => endConnection(null, { fromHandle, toHandle, isValid: false }))
+    expect(container.querySelector('footer [role="status"]')).toHaveTextContent(reason)
+    expect(screen.getByTestId('pipe-count')).toHaveTextContent(String(initial.pipes.length))
+    expect(changed).not.toHaveBeenCalled()
+    const picker = screen.queryByRole('combobox', { name: `Compatible sources for ${pipe.to.node} / ${pipe.to.port}` })
+    if (!alternative) {
+      expect(picker).not.toBeInTheDocument()
+      return
+    }
+    expect([...picker.options].map(option => option.text)).toEqual(variant === 'typed mismatch'
+      ? ['Choose output', 'stream-source-1 / result']
+      : ['Choose output', 'adjust-none-2 / result', 'adjust-none-3 / result'])
+    const apply = screen.getByRole('button', { name: 'Connect pipe' })
+    expect(apply).toBeDisabled()
+    const replacement = { from: { node: alternative, port: 'result' }, to: pipe.to }
+    fireEvent.change(picker, { target: { value: JSON.stringify(replacement.from) } })
+    expect(changed).not.toHaveBeenCalled()
+    fireEvent.click(apply)
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect(changed.mock.calls[0][0].document).toEqual({ ...initial, pipes: [...initial.pipes, replacement] })
+    expect(picker).not.toBeInTheDocument()
   })
 
   it.each(['React Flow', 'inspector'])('delivers the latest not-ready draft after a required pipe is disconnected through %s', path => {

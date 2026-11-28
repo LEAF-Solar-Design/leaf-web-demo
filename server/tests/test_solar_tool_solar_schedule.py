@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import math
 import re
 import sys
 import uuid
@@ -24,8 +25,10 @@ import write_loop
 from product_capability_availability import is_cloud_proposal, is_local_graph_commit
 from solar_design_graph import GraphValidationError, validate_graph
 from solar_graph_context import resolve_graph_context
+from solar_joint_homerun_routing import route_together
 from solar_sizing_client import digest
 from solar_wiring_client import local_routes
+from test_solar_tool_solar_homeruns import _box, _save, assigned, dispatch as dispatch_homeruns  # noqa: F401
 from test_w1_design_graph import app_id, graph  # noqa: F401
 from test_w1_equipment import case, equipment, licensed as licensed_equipment  # noqa: F401
 from test_w1_graph_versions import drawing, commit, request_for, TENANT, DRAWING  # noqa: F401
@@ -58,10 +61,101 @@ def builtin():
     return solar_local_graph._load_builtin(TOOL)
 
 
-def dispatch(backend, fence, request):
+def dispatch(backend, fence, request, *, version=1, job_id="schedule-job"):
     return solar_local_graph.run_local_graph_commit(
-        backend, INTAKE_TENANT, TOOL, request, drawing_id="solar", source_version=1,
-        holder="fixture-owner", fence=fence, job_id="schedule-job")
+        backend, INTAKE_TENANT, TOOL, request, drawing_id="solar", source_version=version,
+        holder="fixture-owner", fence=fence, job_id=job_id)
+
+
+@pytest.mark.parametrize("height", [1, -1, 2], ids=["repeat", "mirrored", "longer"])
+def test_dispatch_refreshes_schedule_after_saved_keepout_reroute(
+        assigned, no_network, monkeypatch, tmp_path, height):
+    keepout = _box(assigned, 3.5, 4.0)
+    backend = _save(assigned, monkeypatch, tmp_path, [keepout])
+
+    def read(version):
+        _, key, _ = store.resolve_version_entry(backend, INTAKE_TENANT, "solar", version)
+        saved = json.loads(backend.get(key))
+        assert saved["polylines"] == [keepout]
+        return saved["solar_design_graph"]
+
+    previous = assigned
+    route_ids = []
+    schedules = []
+    for version, aisle_height in zip((1, 3), (1, height)):
+        aisle = [[3, aisle_height, 0], [4.5, aisle_height, 0]]
+        with held(backend) as fence:
+            dispatch_homeruns(backend, fence, {
+                "drawing_id": "solar", "expected_rev": previous["rev"],
+                "routing_constraints": {"keep_outs": [], "aisles": [{
+                    "name": "Detour", "lead_capacity": 4, "points": aisle,
+                }]},
+            }, version=version, job_id=f"keepout-{version}")
+        routed = read(version + 1)
+        assert len(routed["routes"]) == 4
+        assert all(route["points"][1:3] == aisle for route in routed["routes"])
+        assert all(s["validity"]["state"] == "stale" for s in routed["schedules"])
+        with held(backend) as fence:
+            dispatch(backend, fence, {
+                "drawing_id": "solar", "expected_rev": routed["rev"],
+                "insertion_point": [10, 20],
+            }, version=version + 1, job_id=f"keepout-schedule-{version}")
+        assert availability.w1_graph_readiness(routed)[TOOL]["input_ready"]
+        current = read(version + 2)
+        solar_solve_results.require_current_export(current)
+        assert current["routes"] == routed["routes"]
+        table, = current["schedules"]
+        ids = [route["id"] for route in routed["routes"]]
+        assert set(ids) <= set(table["source_refs"])
+        assert len(table["rows"]) == len(current["strings"])
+        for string, row in zip(current["strings"], table["rows"]):
+            lengths = []
+            for kind in ("start homerun", "end homerun"):
+                lead = next(r for r in routed["routes"]
+                            if r["from_ref"] == string["id"] and r["route_kind"] == kind)
+                points = lead["points"]
+                lengths.append(sum(math.dist(a, b) for a, b in zip(points, points[1:])) / .3048)
+            assert row[3:] == pytest.approx([*lengths, sum(lengths)])
+        route_ids.append(ids)
+        schedules.append(table)
+        previous = current
+
+    assert route_ids[0] == route_ids[1]
+    assert read(3)["schedules"] == [schedules[0]]
+    first, latest = (table["rows"][0][-1] for table in schedules)
+    if height == 2:
+        assert latest > first
+    else:
+        assert latest == pytest.approx(first)
+
+
+@pytest.mark.parametrize("defect", ["length", "endpoint", "policy", "binding", "missing", "duplicate"])
+def test_schedule_refuses_inconsistent_shared_aisle_homeruns(assigned, defect):
+    expected = local_routes(assigned)
+    assigned["routes"] = route_together(copy.deepcopy(expected), {
+        "keep_outs": [{"name": "Obstacle", "min_xy": [3.5, -0.5], "max_xy": [4, 0.5]}],
+        "aisles": [{"name": "Detour", "lead_capacity": 4, "points": [[3, 1, 0], [4.5, 1, 0]]}],
+    })
+    lead = assigned["routes"][0]
+    assert lead["points"] != expected[0]["points"]
+    if defect == "length":
+        lead["length_ft"] += 1
+    elif defect == "endpoint":
+        lead["points"][0][2] += 1
+        points = lead["points"]
+        lead["length_ft"] = math.fsum(math.dist(a, b) for a, b in zip(points, points[1:])) / .3048
+    elif defect == "policy":
+        lead["extra"]["routing_policy"] = "direct-terminal-lead-v1"
+    elif defect == "binding":
+        lead["extra"]["input_number"] += 1
+    elif defect == "missing":
+        assigned["routes"].pop()
+    elif defect == "duplicate":
+        assigned["routes"].append(dict(lead, id=f"leaf:route:{uuid.uuid4()}"))
+
+    assert not availability.w1_graph_readiness(assigned)[TOOL]["input_ready"]
+    with pytest.raises(GraphValidationError, match="COMPLETE_ROUTING_REQUIRED"):
+        builtin().run(assigned, {"expected_rev": assigned["rev"], "insertion_point": [10, 20]})
 
 
 def test_declaration_is_local_graph_commit():

@@ -130,8 +130,13 @@ def _tenant_missing(detail: str = "tool_not_published") -> Response:
 def tenant_tools(tenant=Depends(deps.require_active_tenant)) -> Response:
     if not _plugin_builder_visible(tenant):
         return _tenant_missing()
-    entries = tenant_catalog.list_versions(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant))
-    return JSONResponse({"tools": entries}, headers=_TENANT_CACHE)
+    entries = tenant_catalog.list_latest_versions(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant))
+    try:
+        tenant_catalog.record_plugin_check(
+            os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant), datetime.now(timezone.utc))
+    except Exception:
+        pass
+    return JSONResponse({"tools": entries, "workspace_id": str(tenant)}, headers=_TENANT_CACHE)
 
 
 @router.get("/api/tool-envelopes/tenant/revocations")
@@ -151,6 +156,19 @@ def tenant_revocations(tenant=Depends(deps.require_active_tenant)) -> Response:
             tenant_catalog.TenantCatalogError, OSError, ValueError, KeyError, TypeError, AttributeError):
         pass  # Serve the last signed list if refresh is unavailable.
     return Response(raw, media_type="application/json", headers=_TENANT_CACHE)
+
+
+@router.get("/api/tool-envelopes/tenant/status")
+def tenant_status(tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _plugin_builder_visible(tenant):
+        return _tenant_missing()
+    workspace = deps.workspace_view(tenant)
+    return JSONResponse({
+        "workspace_id": str(tenant),
+        "workspace_name": workspace.get("name") if isinstance(workspace, dict) else None,
+        "last_plugin_check_at": tenant_catalog.plugin_check_at(
+            os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant)),
+    }, headers=_TENANT_CACHE)
 
 
 @router.get("/api/tool-envelopes/tenant/{name:path}/{version}/envelope")

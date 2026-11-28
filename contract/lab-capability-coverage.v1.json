@@ -212,6 +212,12 @@
       "host": "production"
     },
     {
+      "source": "studio-tool:solar-combiner-comparison",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
       "source": "studio-tool:solar-combiners",
       "status": "explicit-handoff",
       "adapter_owner": "solar_tools",

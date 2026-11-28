@@ -68,12 +68,17 @@
         "type": "object",
         "properties": {
           "layer_shares": {"type": "boolean", "description": "Return each layer share of the selected physical module total."},
+          "layer_share_above": {"type": "number", "minimum": 0, "maximum": 100, "description": "With group_by layer, report and highlight each selected layer strictly above this percent of the selection. If ranked highlights are also requested, highlight only layers that meet both criteria."},
+          "layer_count_at_least": {"type": "integer", "minimum": 0, "description": "With group_by layer, highlight only selected layers at or above this physical module count. Apply other highlight filters to the same selection."},
           "layer_names": {"type": ["array", "null"], "default": null, "minItems": 1, "items": {"type": "string"}, "description": "Exact layer names for named panel selection."},
           "cumulative_shares": {"type": "boolean", "description": "Return running physical fractions in descending count order, ties by literal layer name."},
           "coverage_percent": {"type": "number", "minimum": 0, "description": "List every minimum-size layer set reaching this percentage of the selected module total."},
-          "rank_windows": {"type": ["array", "null"], "default": null, "minItems": 2, "maxItems": 2, "items": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "number"}}, "description": "Compare competition ranks within two world-XY windows using the same selected module sets."},
+          "coverage_excluded_layers": {"type": ["array", "null"], "default": null, "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Named selected layers to omit from both the coverage candidates and the total used for coverage_percent."},
+          "rank_windows": {"type": ["array", "null"], "default": null, "minItems": 2, "maxItems": 8, "items": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "number"}}, "description": "Compare competition ranks in two to eight ordered world-XY windows using the same selected module sets. In series of three or more, list layers with a strictly improving rank at every step."},
+          "exclude_highest_count_tiers": {"type": ["integer", "null"], "default": null, "minimum": 1, "description": "Drop this many highest distinct physical module count tiers separately in each rank window before reranking the survivors."},
           "compare_selections": {"type": ["object", "null"], "default": null, "properties": {"by": {"type": "string", "enum": ["block", "set_id"]}, "before": {"type": "array", "items": {"type": "string"}}, "after": {"type": "array", "items": {"type": "string"}}}, "required": ["by", "before", "after"], "additionalProperties": false, "description": "Compare exact block names or selected set IDs across two selections. Empty denominators yield undefined deltas."},
           "top_layers": {"type": "integer", "minimum": 1, "description": "Rank layers by selected physical module count. Include ties at the requested cutoff."},
+          "highlight_ranked_layers": {"type": "boolean", "description": "With top_layers, highlight only the ranked layers, including ties. Totals still cover the full selection."},
           "panel_scope": {"type": "string", "enum": ["all_layers", "roof_layers"], "description": "For a layer breakdown, select explicitly panel-named blocks in this scope. Unknown candidate roles require a pick."},
           "group_by": {"type": "string", "enum": ["layer"], "description": "Break the selected physical module count down by drawing layer."},
           "set_id": {"type": "string", "description": "Single set identity from this drawing's listing. Omit to list sets."},
@@ -125,14 +130,31 @@
     {
       "name": "measure-panel-area",
       "version": "1.0.0",
-      "description": "Sums closed-polyline area (total + per layer) in square feet; assumes 1 drawing unit = 1 inch.",
+      "description": "Measures closed-polyline area on a layer. Use area_mode=net to subtract nested holes. Use output_units=ft2 for square feet with DXF insertion-unit provenance.",
       "kind": "script",
       "engine_op": "measure_panel_area",
       "script": "engine/tools/measure_panel_area.lsp",
-      "params": { "type": "object", "properties": {}, "required": [] },
+      "params": {
+        "type": "object",
+        "properties": {
+          "layer": { "type": "string", "default": "Panels" },
+          "output_units": { "type": "string", "enum": ["drawing", "ft2"], "default": "drawing" },
+          "area_mode": { "type": "string", "enum": ["gross", "net"], "default": "gross" },
+          "include_contributors": { "type": "boolean", "description": "Report each polyline handle and signed area in the requested unit, plus handles excluded from the total." }
+        },
+        "required": []
+      },
       "returns": {
         "type": "object",
         "properties": {
+          "total_area": { "type": "number" },
+          "avg_area": { "type": "number" },
+          "units": { "enum": ["drawing", "ft2"] },
+          "unit_conversion": { "type": "object" },
+          "area_mode": { "enum": ["net"] },
+          "hole_count": { "type": "integer" },
+          "contributors": { "type": "array", "items": { "type": "object" } },
+          "excluded": { "type": "array", "items": { "type": "object" } },
           "area_sqft": { "type": "number" },
           "by_layer_sqft": { "type": "object", "additionalProperties": { "type": "number" } },
           "units_assumption": { "type": "string" }

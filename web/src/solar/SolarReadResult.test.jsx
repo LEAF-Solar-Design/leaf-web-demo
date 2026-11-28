@@ -485,7 +485,109 @@ const projectButton = () => screen.getByRole('button', { name: 'Download Electri
 const clickProject = () => fireEvent.click(projectButton())
 const flushProject = async () => { for (let index = 0; index < 12; index += 1) await Promise.resolve() }
 
+const olderAcceptedVersion = '55555555-5555-4555-8555-555555555555'
+const olderReportSource = '66666666-6666-4666-8666-666666666666'
+const newerReportSource = '77777777-7777-4777-8777-777777777777'
+function trackingRevision(versionId, sourceId, artifactId) {
+  const base = projectRef()
+  return { version_id: versionId, report_download_available: true,
+    report: projectRef({ source_version_id: sourceId, artifact_id: artifactId, filename: 'solaredge-report.json',
+      download: `${base.download.slice(0, -64)}${artifactId}` }) }
+}
+const olderTracking = trackingRevision(olderAcceptedVersion, olderReportSource, 'a'.repeat(64))
+const newerTracking = trackingRevision(projectBinding.input_version_id, newerReportSource, 'b'.repeat(64))
+
+function comparisonProps(before, after, fetchImpl) {
+  const binding = { ...projectBinding, input_version_id: after.version_id }
+  const data = projectResult({ tool: 'solar-solaredge-tracking-read', current_required: false,
+    input_version_id: after.version_id, is_head: after.version_id === projectBinding.input_version_id,
+    output: { schema: 'leaf.solar-project-solaredge-tracking-read.v1', section: 'saved_assignment_changes',
+      before, after, items: Array.from({ length: 250 }, (_, index) => ({ panel: index + 1 })) } })
+  const projectClient = createSolarProjectClient({ fetchImpl })
+  projectClient.setScope(binding, 'epoch-1')
+  return { data, solarBinding: binding, projectCurrent: false, authorityKey: 'epoch-1', projectClient, catalogDigest, save: vi.fn() }
+}
+
+function comparisonFile(url) {
+  const artifactId = new URL(url, 'https://test.invalid').pathname.split('/').at(-1)
+  return new Response('{}', { headers: { 'Content-Type': 'application/json', 'Content-Length': '2',
+    ETag: '"' + bodyHash + '"', 'X-Leaf-Artifact-Id': artifactId } })
+}
+
+describe('saved tracking comparison reports', () => {
+  it.each([
+    ['forward', olderTracking, newerTracking], ['reverse', newerTracking, olderTracking], ['same', newerTracking, newerTracking],
+  ])('downloads both verified report files in a %s comparison', async (_label, before, after) => {
+    installDigest()
+    const requests = [deferred(), deferred()]
+    const fetchImpl = vi.fn()
+      .mockReturnValueOnce(requests[0].promise)
+      .mockReturnValueOnce(requests[1].promise)
+    const props = comparisonProps(before, after, fetchImpl)
+    render(<SolarReadResult {...props} />)
+    expect(within(screen.getByRole('region', { name: 'Items' })).getAllByRole('row')).toHaveLength(251)
+    for (const [index, side, otherSide, revision] of [[0, 'before', 'after', before], [1, 'after', 'before', after]]) {
+      const otherButton = screen.getByRole('button', { name: `Download ${otherSide} report (2 bytes)` })
+      fireEvent.click(screen.getByRole('button', { name: `Download ${side} report (2 bytes)` }))
+      expect(screen.getByRole('button', { name: `Downloading ${side} report` })).toBeDisabled()
+      expect(otherButton).toBeDisabled()
+      fireEvent.click(otherButton)
+      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(index + 1))
+      const [url] = fetchImpl.mock.calls[index]
+      expect(url).toBe(revision.report.download + '?current=false')
+      await act(async () => requests[index].resolve(comparisonFile(url)))
+      expect(props.save).toHaveBeenCalledTimes(index + 1)
+    }
+    expect(props.save).toHaveBeenLastCalledWith(new Uint8Array([123, 125]), 'application/json', 'solaredge-report.json')
+    props.projectClient.dispose()
+  })
+
+  it('omits a foreign reference and an unavailable report', () => {
+    const before = { ...olderTracking, report: { ...olderTracking.report, drawing_id: olderAcceptedVersion } }
+    const after = { ...newerTracking, report_download_available: false }
+    const fetchImpl = vi.fn()
+    const props = comparisonProps(before, after, fetchImpl)
+    render(<SolarReadResult {...props} />)
+    expect(screen.getByText('Before report is unavailable.')).toBeInTheDocument()
+    expect(screen.getByText('After report is unavailable.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /download.*report/i })).not.toBeInTheDocument()
+    expect(fetchImpl).not.toHaveBeenCalled()
+    props.projectClient.dispose()
+  })
+
+  it('discards a comparison download when the selected version changes', async () => {
+    installDigest()
+    const pending = deferred()
+    const fetchImpl = vi.fn(() => pending.promise)
+    const props = comparisonProps(olderTracking, newerTracking, fetchImpl)
+    render(<SolarReadResult {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Download before report (2 bytes)' }))
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
+    act(() => props.projectClient.setScope({ ...projectBinding, input_version_id: olderAcceptedVersion }, 'epoch-1'))
+    await act(async () => pending.resolve(comparisonFile(olderTracking.report.download)))
+    expect(props.save).not.toHaveBeenCalled()
+    expect(screen.getByRole('status')).toHaveTextContent(PROJECT_READ_REASONS.scope_stale)
+    props.projectClient.dispose()
+  })
+})
+
 describe('project result downloads', () => {
+  it('shows the workbook file digest alongside the bound version and output digest', () => {
+    const { props } = projectHarness()
+    const artifact = projectRef({
+      media_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      filename: 'CableLengths.xlsx',
+    })
+    const data = projectResult({ tool: 'solar-cable-export', output: { artifact } })
+    render(<SolarReadResult {...props} data={data} />)
+    const summary = screen.getByText('Read details', { selector: 'summary' })
+    fireEvent.click(summary)
+    const details = within(summary.parentElement)
+    expect(details.getByRole('row', { name: `Version ${projectBinding.input_version_id}` })).toBeInTheDocument()
+    expect(details.getByRole('row', { name: `Output ${data.output_sha256}` })).toBeInTheDocument()
+    expect(details.getByRole('row', { name: `File SHA-256 ${bodyHash}` })).toBeInTheDocument()
+  })
+
   it('R12-04 saves exactly one verified file through the R7 project client', async () => {
     installDigest()
     const fetchImpl = vi.fn(async () => new Response('{}', { status: 200, headers: {

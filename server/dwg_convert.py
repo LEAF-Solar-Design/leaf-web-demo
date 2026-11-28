@@ -8,6 +8,7 @@ docstring overstate its own guarantees:
   * Bounds MISUSE and DoS: fixed argv (no shell), stdin closed, output confined
     to a fresh scratch directory that is always deleted, a wall-clock timeout
     that kills the child, and a size cap on the converted output.
+    The child receives a minimal allowlisted environment (no app secrets).
   * Bounds a MEMORY-CORRUPTION exploit: hard rlimits (address space, CPU, file
     size, core, fds, procs) and ``no_new_privs`` with no inheritable
     capabilities, applied by prlimit(1)/setpriv(1) around the exec. See "the
@@ -46,6 +47,21 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Iterator, Optional
+
+
+_PARSER_CHILD_PATH = "/usr/local/bin:/usr/bin:/bin"
+
+
+def parser_child_env() -> dict[str, str]:
+    # allowlist only; no app secret, LEAF_* or DATABASE_URL ever reaches the parser child
+    env = {"LANG": "C", "LC_ALL": "C"}
+    if os.name != "nt":
+        return {"PATH": _PARSER_CHILD_PATH, **env}
+    for name in ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP"):
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
+    return env
 
 
 def dwg2dxf_bin() -> Optional[str]:
@@ -225,8 +241,8 @@ def _cage_prefix() -> list[str]:
         limits.append(f"--as={mem}")
     # --no-new-privs: a corrupted child cannot gain privilege through any
     # setuid/setcap binary it manages to exec. --inh-caps=-all: it inherits no
-    # capability either. Both are unprivileged operations, so this works
-    # unchanged once the image drops root.
+    # capability either. The image runs unprivileged (uid 10003), and both
+    # are unprivileged operations.
     setpriv_argv = ["setpriv", "--no-new-privs", "--inh-caps=-all"]
     # --seccomp-filter is additive and OPTIONAL here even when the rest of the
     # cage is present: a dev host with prlimit/setpriv but no compiled filter
@@ -276,7 +292,7 @@ def converted_dxf(source: Path) -> Iterator[Path]:
             proc = subprocess.run(
                 argv, cwd=scratch, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                timeout=convert_timeout_s())
+                timeout=convert_timeout_s(), env=parser_child_env())
         except subprocess.TimeoutExpired:
             # subprocess.run kills the child before raising, so nothing keeps
             # writing into the scratch dir behind this rejection. Deterministic

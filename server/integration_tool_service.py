@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextvars import ContextVar
 import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
 import json
+import logging
 import math
 from pathlib import Path
 import re
@@ -42,7 +44,23 @@ from leaf_platform.integration_turn_grant_store import (
 REQUEST_CAP = 128 * 1024
 RESPONSE_CAP = 256 * 1024
 DATASET_ROW_BUDGET = 1000
+DATASET_ROW_BYTE_BUDGET = 64 * 1024
+DATASET_TOTAL_BYTE_BUDGET = RESPONSE_CAP
 CURSOR_BYTE_BUDGET = 1024
+_PRIVATE_CATALOG_HTTP = ContextVar("private_catalog_http", default=False)
+
+
+def _allow_wire_diagnostic(record):
+    # HTTPX logs full URLs and reason phrases, and httpcore traces headers
+    # and exception details. Only this request's transport diagnostics are private.
+    return not _PRIVATE_CATALOG_HTTP.get()
+
+
+for _wire_logger in ("httpx", "httpcore.connection", "httpcore.http11", "httpcore.http2",
+                     "httpcore.proxy", "httpcore.socks"):
+    logging.getLogger(_wire_logger).addFilter(_allow_wire_diagnostic)
+
+
 STATUS = {"invalid_input": 400, "unauthenticated": 401, "denied": 403,
           "unavailable": 503, "conflict": 409, "invalid_response": 502,
           "timeout": 504, "response_too_large": 502, "not_found": 404,
@@ -57,6 +75,10 @@ class IncompleteInventory(ReadFailure):
     def __init__(self, pages_read):
         super().__init__("incomplete_inventory")
         self.pages_read = pages_read
+
+
+class PartialResponse(ReadFailure):
+    """The provider disconnected after yielding bytes from this response."""
 
 
 class DefiniteHTTPFailure(ReadFailure):
@@ -413,10 +435,21 @@ def project_discovery(value, limit, *, include_snapshot=False):
                               or re.fullmatch(r"[A-Za-z0-9_-]+", cursor) is None):
         raise ReadFailure("invalid_response")
     datasets = []
+    page_row_bytes = 0
     identities = set()
     for record in records:
         if type(record) is not dict:
             raise ReadFailure("invalid_response")
+        if include_snapshot:
+            # Charge complete source records, including duplicates and fields
+            # that the author does not project. Formatting whitespace is free.
+            try:
+                row_bytes = len(json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            except UnicodeEncodeError:
+                raise ReadFailure("invalid_response") from None
+            if row_bytes > DATASET_ROW_BYTE_BUDGET:
+                raise ReadFailure("row_too_large")
+            page_row_bytes += row_bytes
         reference = record.get("reference")
         validate("IntegrationRefV1", reference)
         identity = (reference["id"], reference["version"], reference["digest"])
@@ -458,6 +491,8 @@ def project_discovery(value, limit, *, include_snapshot=False):
             dataset["material_context"] = context
         datasets.append(dataset)
     result = {"datasets": datasets, "next_cursor": cursor}
+    if include_snapshot:
+        result["_row_bytes"] = page_row_bytes
     if include_snapshot and "snapshotId" in value:
         result["_snapshot"] = value["snapshotId"]
     if include_snapshot and "schemaRevision" in value:
@@ -469,8 +504,48 @@ def project_discovery(value, limit, *, include_snapshot=False):
     return result
 
 
+class _DatasetResponseStream(httpx.AsyncByteStream):
+    """Keep response cleanup independent of the outcome of reading a catalog page."""
+
+    def __init__(self, stream, *, owned):
+        self.stream = stream
+        self.owned = owned
+
+    async def __aiter__(self):
+        received = False
+        try:
+            async for chunk in self.stream:
+                received = received or bool(chunk)
+                yield chunk
+        except asyncio.CancelledError:
+            # Propagate cancellation requested by our caller (including its
+            # timeout). A provider that cancels its own iterator lost the page.
+            if not received or asyncio.current_task().cancelling():
+                raise
+            raise PartialResponse("unavailable") from None
+        except Exception:
+            if received:
+                raise PartialResponse("unavailable") from None
+            raise
+
+    async def aclose(self):
+        if not self.owned:
+            return
+        try:
+            await self.stream.aclose()
+        except Exception:
+            # HTTPX marks the response closed before calling its stream. Retry
+            # the owned stream directly while the outer client still owns the pool.
+            logger = logging.getLogger(__name__)
+            logger.warning("Retrying dataset response stream close")
+            try:
+                await self.stream.aclose()
+            except Exception:
+                logger.error("Dataset stream close unconfirmed after retry")
+
+
 async def bounded_http(method, url, token, body, deadline, transport=None, *, save=False,
-                       expected_revision=None):
+                       expected_revision=None, dataset_report=False, time_left=None):
     import httpx
     headers = {"Authorization": "Bearer " + token.decode("utf-8"),
                "Accept": "application/json", "Accept-Encoding": "identity",
@@ -480,8 +555,15 @@ async def bounded_http(method, url, token, body, deadline, transport=None, *, sa
     async with asyncio.timeout(deadline):
         async with httpx.AsyncClient(verify=True, follow_redirects=False, trust_env=False,
                                     timeout=deadline, transport=transport) as client:
+            if time_left is not None:
+                time_left()
             async with client.stream(method, url, headers=headers,
                                      content=body) as response:
+                if dataset_report:
+                    # A local transport may lend a page stream. Network
+                    # response headers cannot set HTTPX transport extensions.
+                    ownership = response.extensions.get("leaf.catalog_stream_ownership", "owned")
+                    response.stream = _DatasetResponseStream(response.stream, owned=ownership != "borrowed")
                 if 300 <= response.status_code < 400:
                     raise ReadFailure("invalid_response")
                 if response.status_code != 200:
@@ -501,6 +583,8 @@ async def bounded_http(method, url, token, body, deadline, transport=None, *, sa
                 raw = bytearray()
                 try:
                     async for chunk in response.aiter_bytes():
+                        if time_left is not None:
+                            time_left()
                         if len(raw) + len(chunk) > RESPONSE_CAP:
                             raise ReadFailure("response_too_large")
                         raw.extend(chunk)
@@ -512,6 +596,10 @@ async def bounded_http(method, url, token, body, deadline, transport=None, *, sa
                     if parsed is None:
                         raise ReadFailure("invalid_response")
                     return parsed
+                except (httpx.ReadError, httpx.RemoteProtocolError) as exc:
+                    if raw:
+                        raise PartialResponse("unavailable") from exc
+                    raise
                 finally:
                     crypto._scrub(raw)
 
@@ -558,27 +646,35 @@ class IntegrationToolService:
         return self.resolve(tenant, session, turn)
 
     def _catalog_pages(self, operation, tenant, session, turn, limit, authority, *,
-                       require_snapshot=False, cancel_event=None, provider_statuses=None, require_schema=False):
+                       require_snapshot=False, cancel_event=None, provider_statuses=None, require_schema=False,
+                       time_left=None):
         visited = set()
         first_snapshot = None
         first_schema_revision = None
         schema_by_ref = {}
         rows_read = 0
+        bytes_read = 0
         dataset_ids = set()
         declared_total = None
         args = {"limit": limit}
         while True:
+            if time_left is not None:
+                time_left()
             if cancel_event is not None and cancel_event.is_set():
                 raise IncompleteInventory(len(visited))
             if self._resolve_operation(operation, tenant, session, turn).authority != authority:
                 raise ReadFailure("denied")
             reply = self._execute(operation, args, tenant, session, turn, authority,
-                                  provider_statuses=provider_statuses)
+                                  provider_statuses=provider_statuses, time_left=time_left)
+            if time_left is not None:
+                time_left()
             if self._resolve_operation(operation, tenant, session, turn).authority != authority:
                 raise ReadFailure("denied")
             if "result" not in reply:
                 code = reply.get("error", {}).get("code", "denied")
-                if operation == "datasets" and code == "cursor_too_large":
+                if operation == "datasets" and code in {
+                    "cursor_too_large", "partial_page", "row_too_large", "response_too_large"
+                }:
                     raise IncompleteInventory(len(visited))
                 if operation == "datasets" and visited and code in {"unavailable", "timeout"}:
                     raise IncompleteInventory(len(visited))
@@ -587,6 +683,9 @@ class IntegrationToolService:
             if cancel_event is not None and cancel_event.is_set():
                 raise IncompleteInventory(len(visited) + 1)
             if operation == "datasets":
+                bytes_read += page.pop("_row_bytes")
+                if bytes_read > DATASET_TOTAL_BYTE_BUDGET:
+                    raise IncompleteInventory(len(visited))
                 if provider_statuses is not None and any(row["status"] not in provider_statuses
                                                           for row in page["datasets"]):
                     raise ReadFailure("provider_filter_mismatch")
@@ -636,10 +735,11 @@ class IntegrationToolService:
             args = {"limit": limit, "after": cursor}
 
     def recover_recipe_save(self, description, original_args, tenant, session, turn, *, read_revision=None,
-                            journal_sha256=None):
+                            journal_sha256=None, journal_max_age_seconds=None, journal_adapter=None):
         from authored_recipe_retry import recover_recipe_save
         return recover_recipe_save(self, description, original_args, tenant, session, turn,
-                                   read_revision=read_revision, journal_sha256=journal_sha256)
+                                   read_revision=read_revision, journal_sha256=journal_sha256,
+                                   journal_max_age_seconds=journal_max_age_seconds, journal_adapter=journal_adapter)
 
     def edit_table_recipes(self, description, snapshots, saved_edits, tenant, session, turn):
         from authored_batch_recipe import edit_table_recipes
@@ -657,20 +757,38 @@ class IntegrationToolService:
                                       read_revision=read_revision, record_attempt=record_attempt)
 
     def run_authored_dataset_report(self, description, tenant, session, turn, *, limit=50,
-                                    page_size=None, sort="catalog", cursor=None, cancel_event=None):
+                                    page_size=None, sort="catalog", cursor=None, cancel_event=None, deadline=None):
+        """An optional absolute deadline uses the service clock's seconds."""
+        if deadline is not None and (type(deadline) not in (int, float) or not -math.inf < deadline < math.inf):
+            raise ReadFailure("invalid_input")
+
+        def remaining():
+            seconds = deadline - self.clock()
+            if seconds <= 0:
+                raise ReadFailure("timeout")
+            return seconds
+
+        time_left = remaining if deadline is not None else None
+        if time_left is not None:
+            time_left()
         if page_size is not None or sort != "catalog" or cursor is not None:
             from authored_dataset_cursor import paged_report
-            return paged_report(self, description, tenant, session, turn, limit=limit,
-                                page_size=page_size, sort=sort, cursor=cursor, cancel_event=cancel_event)
-        return self._run_catalog_report("datasets", description, tenant, session, turn, limit,
-                                        cancel_event=cancel_event)
+            report = paged_report(self, description, tenant, session, turn, limit=limit,
+                                  page_size=page_size, sort=sort, cursor=cursor, cancel_event=cancel_event,
+                                  time_left=time_left)
+        else:
+            report = self._run_catalog_report("datasets", description, tenant, session, turn, limit,
+                                              cancel_event=cancel_event, time_left=time_left)
+        if time_left is not None:
+            time_left()
+        return report
 
     def run_authored_action_report(self, description, tenant, session, turn, *, limit=50, include_form_digest=False):
         return self._run_catalog_report("action_catalog", description, tenant, session, turn, limit,
                                         include_form_digest=include_form_digest)
 
     def _run_catalog_report(self, operation, description, tenant, session, turn, limit, *, include_form_digest=False,
-                            expected_authority=None, cancel_event=None, dataset_sort="catalog"):
+                            expected_authority=None, cancel_event=None, dataset_sort="catalog", time_left=None):
         """Run authored source on bounded catalog metadata, outside the credential-holding process."""
         import tools_fallback
         import tool_loader
@@ -703,7 +821,7 @@ class IntegrationToolService:
             raise ReadFailure("invalid_input")
         for page in self._catalog_pages(operation, tenant, session, turn, limit, authority,
                                         require_snapshot=pinned, cancel_event=cancel_event,
-                                        provider_statuses=provider_statuses,
+                                        provider_statuses=provider_statuses, time_left=time_left,
                                         require_schema=operation == "datasets" and requires_schema_revision(description)):
             pages += 1
             for entry in page[collection]:
@@ -737,6 +855,8 @@ class IntegrationToolService:
         if pinned:
             catalog["snapshot_verified"] = True
         intake = {f"project_{kind}_catalog": catalog}
+        if time_left is not None:
+            time_left()
         status, payload = tool_loader._run_source_in_sandbox(source, f"{kind}_report.py", intake, {})
         if status != "ok":
             raise ReadFailure("unavailable")
@@ -750,7 +870,8 @@ class IntegrationToolService:
     def execute(self, operation, value, tenant, session, turn):
         return self._execute(operation, value, tenant, session, turn, None)
 
-    def _execute(self, operation, value, tenant, session, turn, expected_authority, *, provider_statuses=None):
+    def _execute(self, operation, value, tenant, session, turn, expected_authority, *, provider_statuses=None,
+                 time_left=None):
         result = None
         code = "unavailable"
         try:
@@ -823,10 +944,20 @@ class IntegrationToolService:
                         remaining = min(10.0, binding.expires_at - self.clock())
                         if remaining <= 0:
                             raise ReadFailure("denied")
+                        if time_left is not None:
+                            remaining = min(remaining, time_left())
                         started = True
                         if saving:
                             value = asyncio.run(bounded_http(method, url, token, body, remaining, self.transport,
                                 save=True, expected_revision=args.get("expectedRevision")))
+                        elif operation == "datasets":
+                            private_http = _PRIVATE_CATALOG_HTTP.set(True)
+                            try:
+                                value = asyncio.run(bounded_http(
+                                    method, url, token, body, remaining, self.transport,
+                                    dataset_report=expected_authority is not None, time_left=time_left))
+                            finally:
+                                _PRIVATE_CATALOG_HTTP.reset(private_http)
                         else:
                             value = asyncio.run(bounded_http(method, url, token, body, remaining, self.transport))
                         check()
@@ -851,8 +982,8 @@ class IntegrationToolService:
                                 projected = (project_discovery(value, args["limit"], include_snapshot=expected_authority is not None) if operation == "datasets"
                                              else validate_read(value, args["dataset_ref"]))
                         except ReadFailure as exc:
-                            if str(exc) == "cursor_too_large":
-                                return failure("cursor_too_large")
+                            if str(exc) in {"cursor_too_large", "row_too_large"}:
+                                return failure(str(exc))
                             if str(exc) == "response_too_large":
                                 raise
                             raise ReadFailure("invalid_response") from None
@@ -862,6 +993,15 @@ class IntegrationToolService:
                     if verdict["decision"] == "allow":
                         check()
                     return output
+                except asyncio.CancelledError:
+                    if not (saving and started):
+                        raise
+                    # Cancellation of the transport cannot recall a dispatched write.
+                    category = "outcome_unknown"
+                except PartialResponse:
+                    if operation == "datasets" and expected_authority is not None:
+                        return failure("partial_page")
+                    category = "outcome_unknown" if saving and started else "unavailable"
                 except DefiniteHTTPFailure as exc:
                     category = str(exc)
                 except httpx.ConnectError:

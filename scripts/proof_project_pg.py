@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import json
 import multiprocessing
 import os
@@ -122,9 +122,10 @@ def _docker(args):
 
 
 @contextmanager
-def _password_file(password):
+def _password_file(password, *, path=None, prefix="POSTGRES_PASSWORD="):
     """Create private at birth, including a protected owner-only DACL on Windows."""
-    path = Path(tempfile.gettempdir()) / ("leafproof-" + secrets.token_hex(16) + ".env")
+    if path is None:
+        path = Path(tempfile.gettempdir()) / ("leafproof-" + secrets.token_hex(16) + ".env")
     if os.name == "nt":
         import ctypes
         from ctypes import wintypes
@@ -154,7 +155,7 @@ def _password_file(password):
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
         with os.fdopen(fd, "wb") as stream:
-            stream.write(("POSTGRES_PASSWORD=" + password + "\n").encode())
+            stream.write((prefix + password + "\n").encode())
         yield str(path)
     finally:
         path.unlink(missing_ok=True)
@@ -474,6 +475,7 @@ class PgAuthority:
 
 NATIVE_DATA = "postgres/data"
 NATIVE_TIMEOUT = 60
+_NATIVE_WINDOWS = os.name == "nt"
 
 
 def _native_environment(environ=None):
@@ -488,8 +490,13 @@ def _native_environment(environ=None):
 
 def _native_command(argv, *, runner=None, environ=None, timeout=NATIVE_TIMEOUT + 5):
     try:
+        # The Windows postmaster can inherit pg_ctl's output handles and keep
+        # the pipes open after pg_ctl exits. Its diagnostics go to the run log.
+        output = ({"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+                  if _NATIVE_WINDOWS and len(argv) > 1 and argv[1] == "start"
+                  else {"capture_output": True})
         result = (runner or subprocess.run)(list(argv), env=_native_environment(environ),
-            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+            stdin=subprocess.DEVNULL, text=True, timeout=timeout, **output)
         if result.returncode:
             raise RuntimeError("native command failed")
         return result.stdout
@@ -507,7 +514,7 @@ def resolve_native_binaries(*, environ=None, executable=None, runner=None):
     binaries = {}
     for name in ("initdb", "pg_ctl", "postgres"):
         for directory in directories:
-            candidate = str(Path(directory) / name)
+            candidate = str(Path(directory) / (name + (".exe" if _NATIVE_WINDOWS else "")))
             if executable(candidate):
                 binaries[name] = candidate
                 break
@@ -522,8 +529,57 @@ def resolve_native_binaries(*, environ=None, executable=None, runner=None):
     return binaries
 
 
+@contextmanager
+def _windows_process(pid):
+    import ctypes
+    from ctypes import wintypes
+
+    if type(pid) is not int or not 0 < pid <= 0xffffffff:
+        raise RuntimeError("proof native database process identity unavailable")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    # Hold a reference to the process object so its PID cannot be recycled during stop.
+    handle = kernel.OpenProcess(0x1000 | 0x100000, False, pid)
+    if not handle:
+        if ctypes.get_last_error() != 87:  # ERROR_INVALID_PARAMETER for an absent PID
+            raise RuntimeError("proof native database process identity unavailable")
+        yield None
+        return
+    try:
+        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        wait = kernel.WaitForSingleObject(handle, 0)
+        if wait == 0:  # WAIT_OBJECT_0, process exited
+            yield None
+            return
+        kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.c_void_p] * 4
+        kernel.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+            wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+        name = ctypes.create_unicode_buffer(32768)
+        length = wintypes.DWORD(len(name))
+        times = [ctypes.c_uint64() for _ in range(4)]
+        if (wait != 258  # WAIT_TIMEOUT, process is live
+                or not kernel.GetProcessTimes(handle, *(ctypes.byref(t) for t in times))
+                or not kernel.QueryFullProcessImageNameW(handle, 0, name, ctypes.byref(length))
+                or Path(name.value).name.lower() != "postgres.exe"):
+            raise RuntimeError("proof native database process identity unavailable")
+        ticks = times[0].value
+        yield {"start_id": f"win:{ticks}", "started_at": (ticks - 116444736000000000) // 10000000}
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def valid_native_start_id(value):
+    return type(value) is str and re.fullmatch(r"(?:ps:[0-9]{1,12}|win:[0-9]{17,20})", value) is not None
+
+
 def native_process_identity(pid, *, runner=None, kill_probe=None):
     """Read the process table, not a PID's existence alone (UTC, fixed locale)."""
+    if _NATIVE_WINDOWS:
+        with _windows_process(pid) as identity:
+            return identity
     import calendar
     try:
         result = (runner or subprocess.run)(["/bin/ps", "-p", str(pid), "-o", "lstart=", "-o", "comm="],
@@ -556,7 +612,7 @@ def native_process_gone(ownership, *, process_table=None):
         return True
     if (type(identity) is not dict or type(identity.get("started_at")) is not int
             or identity["started_at"] <= 0
-            or not re.fullmatch(r"ps:[0-9]{1,12}", identity.get("start_id", ""))):
+            or not valid_native_start_id(identity.get("start_id"))):
         raise RuntimeError("proof native database process identity unavailable")
     return identity["start_id"] != ownership["start_id"]
 
@@ -566,6 +622,8 @@ def _stop_native_process(ownership, *, process_table=None):
     # from an unreadable process table. SIGINT is PostgreSQL's fast shutdown.
     if native_process_gone(ownership, process_table=process_table):
         return True
+    if _NATIVE_WINDOWS:
+        return False  # A live postmaster requires its validated data directory for pg_ctl stop.
     if not native_process_gone(ownership, process_table=process_table):
         try:
             os.kill(ownership["pid"], signal.SIGINT)
@@ -631,13 +689,13 @@ def native_inventory(run_id, run_root, port, *, process_table=None):
         lines = raw.splitlines()
         pid, epoch = int(lines[0]), int(lines[2])
         if (len(raw) > 4096 or pid <= 0 or epoch <= 0 or Path(lines[1]) != data
-                or int(lines[3]) != port or lines[4] != str(owned / "socket")
+                or int(lines[3]) != port or lines[4] != ("" if _NATIVE_WINDOWS else str(owned / "socket"))
                 or lines[5] != "127.0.0.1"):
             raise ValueError("postmaster mismatch")
         identity = (process_table or native_process_identity)(pid)
         if (identity is None or type(identity.get("started_at")) is not int
                 or abs(identity["started_at"] - epoch) > 2
-                or not re.fullmatch(r"ps:[0-9]{1,12}", identity.get("start_id", ""))):
+                or not valid_native_start_id(identity.get("start_id"))):
             raise ValueError("postmaster identity mismatch")
         value.update(pid=pid, start_id=identity["start_id"], started_at=epoch)
         return value
@@ -696,11 +754,15 @@ def cleanup_native(run_id, run_root, port, ownership, *, binaries=None, runner=N
         pid = observed["pid"]
         if pid:
             binaries = binaries or resolve_native_binaries(environ=environ, runner=runner)
-            # Re-read immediately before pg_ctl consumes postmaster.pid.
-            if native_inventory(run_id, run_root, port, process_table=table) != ownership:
-                return False
-            _native_command([binaries["pg_ctl"], "stop", "-D", str(data), "-m", "fast",
-                             "-w", "-t", str(NATIVE_TIMEOUT)], runner=runner, environ=environ)
+            pin = _windows_process(pid) if _NATIVE_WINDOWS else nullcontext()
+            with pin as pinned:
+                if _NATIVE_WINDOWS and (pinned is None or pinned["start_id"] != ownership["start_id"]):
+                    return False
+                # Re-read immediately before pg_ctl consumes postmaster.pid.
+                if native_inventory(run_id, run_root, port, process_table=table) != ownership:
+                    return False
+                _native_command([binaries["pg_ctl"], "stop", "-D", str(data), "-m", "fast",
+                                 "-w", "-t", str(NATIVE_TIMEOUT)], runner=runner, environ=environ)
             if not native_process_gone(ownership, process_table=table):
                 return False
         after = native_inventory(run_id, run_root, port, process_table=table)
@@ -757,18 +819,14 @@ class NativePgAuthority(PgAuthority):
                            "port": self.port}, stream, sort_keys=True)
             data.mkdir(mode=0o700)
             sockets = owned / "socket"
-            sockets.mkdir(mode=0o700)
-            password_file = owned / "password"
-            try:
-                with os.fdopen(os.open(password_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "wb") as stream:
-                    stream.write((self._password + "\n").encode())
+            if not _NATIVE_WINDOWS:
+                sockets.mkdir(mode=0o700)
+            with _password_file(self._password, path=owned / "password", prefix="") as password_file:
                 self._command([self._binaries["initdb"], "-D", str(data), "-U", "postgres",
-                    "--auth-local=scram-sha-256", "--auth-host=scram-sha-256", "--pwfile", str(password_file),
+                    "--auth-local=scram-sha-256", "--auth-host=scram-sha-256", "--pwfile", password_file,
                     "--encoding=UTF8", "--locale=C"])
-            finally:
-                password_file.unlink(missing_ok=True)
             # Config avoids pg_ctl -o's shell-like option parsing entirely.
-            socket_value = str(sockets).replace("\\", "\\\\").replace("'", "''")
+            socket_value = "" if _NATIVE_WINDOWS else str(sockets).replace("\\", "\\\\").replace("'", "''")
             with (data / "postgresql.conf").open("a", encoding="utf-8", newline="\n") as stream:
                 stream.write("\nlisten_addresses = '127.0.0.1'\nport = " + str(self.port)
                     + "\nunix_socket_directories = '" + socket_value + "'\nunix_socket_permissions = 0700\n")

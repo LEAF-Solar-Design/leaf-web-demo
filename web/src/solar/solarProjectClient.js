@@ -24,6 +24,32 @@ const utf8 = (value) => new TextEncoder().encode(value).byteLength
 const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
 const assert = (condition) => { if (!condition) throw new TypeError('Invalid Solar request') }
 
+function validSavedCablePage(data, binding, before, after, offset) {
+  const page = data?.result
+  if (page?.schema !== 'leaf.solar-project-saved-cable-length-comparison.v1' ||
+      page.organization_id !== binding.organization_id || page.project_id !== binding.project_id ||
+      page.drawing_id !== binding.drawing_id || page.offset !== offset) return false
+  const source = (receipt, version) => receipt?.source_version_id === version &&
+    edgeHash(receipt.source_intake_sha256) && edgeHash(receipt.graph_sha256)
+  const { total_changes: total, next_offset: next, changes } = page
+  const end = offset + 250
+  if (!source(page.before, before) || !source(page.after, after) ||
+      !Number.isSafeInteger(total) || total < 0 || next !== (end < total ? end : null) ||
+      !Array.isArray(changes) || changes.length !== Math.max(0, Math.min(total, end) - offset)) return false
+  const readable = (row) => row && ['feeder', 'start homerun', 'end homerun'].includes(row.route_kind) &&
+    typeof row.schedule_label === 'string' && !!row.schedule_label &&
+    Number.isFinite(row.length_ft) && row.length_ft >= 0
+  const routes = new Set()
+  return changes.every((row) => {
+    if (typeof row?.route_id !== 'string' || !row.route_id || routes.has(row.route_id)) return false
+    routes.add(row.route_id)
+    if (row.change === 'added') return row.before === null && readable(row.after)
+    if (row.change === 'removed') return readable(row.before) && row.after === null
+    return row.change === 'changed' && readable(row.before) && readable(row.after) &&
+      row.before.length_ft !== row.after.length_ft
+  })
+}
+
 async function engineeringContentHash(content) {
   // Integrity is mandatory, including on browsers without SubtleCrypto.
   assert(typeof globalThis.crypto?.subtle?.digest === 'function')
@@ -368,6 +394,63 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
     }
     if (mutation === lock) { mutation = null; pending = false; publish() }
     return current(scope) ? outcome : local('SIP_R7_SCOPE_STALE')
+  }
+
+  function downloadArtifact(ref, options, scope, sourceBinding = scope.binding) {
+    assert(plain(options))
+    const { current: required = false, ifNoneMatch, signal } = options
+    assert(plain(ref) && Reflect.ownKeys(ref).length === REF_KEYS.length && REF_KEYS.every((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(ref, key)
+      return descriptor && Object.hasOwn(descriptor, 'value')
+    }))
+    assert(ref.schema === 'leaf.solar-project-artifact-ref.v1' && matches({ ...ref, input_version_id: ref.source_version_id }, sourceBinding) &&
+      ['artifact_id', 'content_sha256', 'source_intake_sha256', 'graph_sha256'].every((key) => typeof ref[key] === 'string' && HEX.test(ref[key])) &&
+      Number.isInteger(ref.byte_length) && ref.byte_length >= 1 && ref.byte_length <= MAX_ARTIFACT &&
+      typeof ref.media_type === 'string' && ref.media_type.length > 0 && typeof ref.filename === 'string' && ref.filename.length > 0 &&
+      typeof required === 'boolean')
+    const path = `/api/projects/${sourceBinding.project_id}/drawings/${sourceBinding.drawing_id}/solar-artifacts/${ref.artifact_id}`
+    assert(ref.download === path && (ifNoneMatch === undefined || (typeof ifNoneMatch === 'string' && /^"[0-9a-f]{64}"$/.test(ifNoneMatch))))
+    return request(`${path}?current=${required}`, { scope, signal, headers: ifNoneMatch === undefined ? {} : { 'If-None-Match': ifNoneMatch },
+      consume: async (response, interrupted) => {
+        if (response.status === 304) return { notModified: true, bytes: null }
+        assert(response.status === 200)
+        const length = response.headers?.get('Content-Length')
+        assert(length === null || length === undefined || (Number.isFinite(Number(length)) && Number(length) <= MAX_ARTIFACT))
+        const chunks = []
+        let total = 0
+        if (response.body?.getReader) {
+          const reader = response.body.getReader()
+          try {
+            while (true) {
+              const { done, value } = await reader.read()
+              if (interrupted()) { await reader.cancel(); throw new TypeError('Stale artifact') }
+              if (done) break
+              assert(ArrayBuffer.isView(value))
+              const intrinsic = Object.getPrototypeOf(Uint8Array.prototype)
+              const size = Object.getOwnPropertyDescriptor(intrinsic, 'byteLength').get.call(value)
+              const offset = Object.getOwnPropertyDescriptor(intrinsic, 'byteOffset').get.call(value)
+              const buffer = Object.getOwnPropertyDescriptor(intrinsic, 'buffer').get.call(value)
+              total += size
+              assert(total <= MAX_ARTIFACT)
+              chunks.push(new Uint8Array(new Uint8Array(buffer, offset, size)))
+            }
+          } catch (failure) { await reader.cancel().catch(() => {}); throw failure }
+          finally { reader.releaseLock() }
+        } else {
+          const buffer = await response.arrayBuffer()
+          assert(buffer.byteLength <= MAX_ARTIFACT)
+          chunks.push(new Uint8Array(buffer)); total = buffer.byteLength
+        }
+        const bytes = new Uint8Array(total)
+        let offset = 0
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+        const headers = {}
+        for (const key of ['Content-Type', 'Content-Length', 'ETag', 'X-Leaf-Artifact-Id', 'Content-Disposition', 'X-Content-Type-Options']) {
+          const value = response.headers?.get(key)
+          if (typeof value === 'string' && !CONTAINS_CAPABILITY.test(value)) headers[key] = value
+        }
+        return { notModified: false, bytes, headers: Object.freeze(headers) }
+      } })
   }
 
   const client = {
@@ -767,7 +850,9 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
       assert(plain(options))
       const { tool, signal } = options
       assert(typeof jobId === 'string' && UUID.test(jobId) && typeof tool === 'string' && TOOL.test(tool))
-      return request(`/api/jobs/${jobId}`, { scope, signal, validate: (data, b) => validJob(data?.job || data, b, jobId, tool) })
+      const progress = tool === 'solar-solve-proposal' ? '?include_solve_progress=true' : ''
+      return request(`/api/jobs/${jobId}${progress}`, { scope, signal,
+        validate: (data, b) => validJob(data?.job || data, b, jobId, tool) })
     }),
     async observeJob(jobId, options = {}) {
       if (!plain(options)) return local('SIP_R7_REQUEST_INVALID')
@@ -800,6 +885,18 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
       }
       return local('SIP_R7_SCOPE_STALE')
     },
+    compareSavedCableLengths: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const { beforeVersionId, afterVersionId, offset = 0, signal } = options
+      assert(typeof beforeVersionId === 'string' && UUID.test(beforeVersionId) &&
+        typeof afterVersionId === 'string' && UUID.test(afterVersionId) &&
+        Number.isSafeInteger(offset) && offset >= 0 && offset <= 9999999999)
+      const b = scope.binding
+      const path = `/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${beforeVersionId}/solar-schedule-comparison`
+      const query = new URLSearchParams({ compare_version_id: afterVersionId, cable_offset: offset })
+      return request(`${path}?${query}`, { scope, signal,
+        validate: (data) => validSavedCablePage(data, b, beforeVersionId, afterVersionId, offset) })
+    }),
     readSolar: (options = {}) => guarded((scope) => {
       assert(plain(options))
       const { tool, params = {}, catalogDigest, current: required = false, signal } = options
@@ -813,62 +910,23 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
             result.tool === tool && result.tool_manifest_sha256 === catalogDigest && result.current_required === required && result.drawing_changed === false
         } })
     }),
-    downloadArtifact: (ref, options = {}) => guarded((scope) => {
-      assert(plain(options))
-      const { current: required = false, ifNoneMatch, signal } = options
-      assert(plain(ref) && Reflect.ownKeys(ref).length === REF_KEYS.length && REF_KEYS.every((key) => {
-        const descriptor = Object.getOwnPropertyDescriptor(ref, key)
-        return descriptor && Object.hasOwn(descriptor, 'value')
-      }))
-      assert(ref.schema === 'leaf.solar-project-artifact-ref.v1' && matches({ ...ref, input_version_id: ref.source_version_id }, binding) &&
-        ['artifact_id', 'content_sha256', 'source_intake_sha256', 'graph_sha256'].every((key) => typeof ref[key] === 'string' && HEX.test(ref[key])) &&
-        Number.isInteger(ref.byte_length) && ref.byte_length >= 1 && ref.byte_length <= MAX_ARTIFACT &&
-        typeof ref.media_type === 'string' && ref.media_type.length > 0 && typeof ref.filename === 'string' && ref.filename.length > 0 &&
-        typeof required === 'boolean')
-      const path = `/api/projects/${binding.project_id}/drawings/${binding.drawing_id}/solar-artifacts/${ref.artifact_id}`
-      assert(ref.download === path && (ifNoneMatch === undefined || (typeof ifNoneMatch === 'string' && /^"[0-9a-f]{64}"$/.test(ifNoneMatch))))
-      return request(`${path}?current=${required}`, { scope, signal, headers: ifNoneMatch === undefined ? {} : { 'If-None-Match': ifNoneMatch },
-        consume: async (response, interrupted) => {
-          if (response.status === 304) return { notModified: true, bytes: null }
-          assert(response.status === 200)
-          const length = response.headers?.get('Content-Length')
-          assert(length === null || length === undefined || (Number.isFinite(Number(length)) && Number(length) <= MAX_ARTIFACT))
-          const chunks = []
-          let total = 0
-          if (response.body?.getReader) {
-            const reader = response.body.getReader()
-            try {
-              while (true) {
-                const { done, value } = await reader.read()
-                if (interrupted()) { await reader.cancel(); throw new TypeError('Stale artifact') }
-                if (done) break
-                assert(ArrayBuffer.isView(value))
-                const intrinsic = Object.getPrototypeOf(Uint8Array.prototype)
-                const size = Object.getOwnPropertyDescriptor(intrinsic, 'byteLength').get.call(value)
-                const offset = Object.getOwnPropertyDescriptor(intrinsic, 'byteOffset').get.call(value)
-                const buffer = Object.getOwnPropertyDescriptor(intrinsic, 'buffer').get.call(value)
-                total += size
-                assert(total <= MAX_ARTIFACT)
-                chunks.push(new Uint8Array(new Uint8Array(buffer, offset, size)))
-              }
-            } catch (failure) { await reader.cancel().catch(() => {}); throw failure }
-            finally { reader.releaseLock() }
-          } else {
-            const buffer = await response.arrayBuffer()
-            assert(buffer.byteLength <= MAX_ARTIFACT)
-            chunks.push(new Uint8Array(buffer)); total = buffer.byteLength
-          }
-          const bytes = new Uint8Array(total)
-          let offset = 0
-          for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
-          const headers = {}
-          for (const key of ['Content-Type', 'Content-Length', 'ETag', 'X-Leaf-Artifact-Id', 'Content-Disposition', 'X-Content-Type-Options']) {
-            const value = response.headers?.get(key)
-            if (typeof value === 'string' && !CONTAINS_CAPABILITY.test(value)) headers[key] = value
-          }
-          return { notModified: false, bytes, headers: Object.freeze(headers) }
-        } })
-    }),
+    downloadArtifact: (ref, options = {}) => guarded((scope) => downloadArtifact(ref, options, scope)),
+    comparisonReportClient(suppliedSourceBinding) {
+      const scope = capture(false, true)
+      const sourceBinding = createSolarDrawingBinding(suppliedSourceBinding)
+      if (!current(scope) || !sameSolarCheckoutBinding(sourceBinding, scope.binding)) return null
+      return Object.freeze({
+        getSnapshot: () => ({ binding: current(scope) ? sourceBinding : null, authorityKey: scope.authorityKey }),
+        captureCatalogScope: () => () => current(scope),
+        subscribe: client.subscribe,
+        downloadArtifact: (ref, options = {}) => guarded(() => {
+          if (!current(scope)) return local('SIP_R7_SCOPE_STALE')
+          assert(plain(options) && options.current === false &&
+            Object.getOwnPropertyDescriptor(ref, 'media_type')?.value === 'application/json')
+          return downloadArtifact(ref, options, scope, sourceBinding)
+        }, false, true),
+      })
+    },
     dispose() {
       disposed = true
       bindingGeneration += 1

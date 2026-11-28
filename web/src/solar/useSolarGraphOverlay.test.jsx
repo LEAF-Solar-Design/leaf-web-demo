@@ -89,7 +89,7 @@ const roofPolylines = [
   { color: '#22c55e', pts: [[0, 0], [1, 0], [2, 0]] },
   { color: '#22c55e', pts: [[2, 1], [1, 1], [0, 1]] },
   { color: '#f59e0b', pts: [[2.75, 1.75], [3.25, 1.75], [3.25, 2.25], [2.75, 2.25], [2.75, 1.75]] },
-  { color: '#38bdf8', pts: [[2, 0], [3, 0], [3, 2]] },
+  { color: '#38bdf8', pts: [[2, 0], [3, 0], [3, 2]], route: { id: U('route', 1), kind: 'start homerun' } },
 ]
 const groundPolylines = [{ color: '#22c55e', pts: [[1, -1], [.5, -.5]] }]
 const freeze = value => {
@@ -143,6 +143,31 @@ const engine = (result, input, index = 0) => {
 }
 
 describe('unmounted Solar graph overlay hook', () => {
+  it.each([
+    ['ordinary Rooftop', () => inputFor(roofAt(.0254)), { refreshPending: true }, 'refresh_pending'],
+    ['compact Ground', () => inputFor(ground()), { sceneCurrent: false }, 'drawing_mismatch'],
+    ['engine head', () => engineFor(), { engineDirty: true }, 'drawing_mismatch'],
+  ])('keeps the %s overlay while its drawing is unchanged', (_, fixture, blocked, reason) => {
+    const input = fixture()
+    const h = mount(input)
+    const first = h.result.current.solarOverlay
+    expect(first?.polylines.length).toBeGreaterThan(0)
+    h.rerender({ ...input, engineDocument: input.engineDocument && { ...input.engineDocument } })
+    expect(h.result.current.solarOverlay).toBe(first)
+
+    h.rerender({ ...input, ...blocked })
+    expect(h.result.current).toEqual(N(reason))
+    h.rerender(input)
+    expect(h.result.current.solarOverlay).toEqual(first)
+
+    const next = input.activeIntake
+      ? { ...engineFor(input, 'D-v8.dxf'), activeVersion: 8,
+        engineDocument: { ...input.engineDocument, documentId: 'D-v8.dxf', committedVersion: 8 } }
+      : { ...input, drawingKey: 'console:E', requestedDrawingId: 'E', shown: { ...input.shown } }
+    h.rerender(next)
+    expect(h.result.current.solarOverlay).not.toBe(first)
+    expect(h.result.current.solarOverlay.intake).toBe(next.activeIntake ?? next.shown)
+  })
   it('A1B1-H01 disabled skips projection', () => {
     const throwing = Object.defineProperty({}, 'solar_design_graph', {
       get() { throw new Error('private graph message') },
@@ -470,7 +495,7 @@ describe('unmounted Solar graph overlay hook', () => {
     calls(1)
     input.shown.solar_design_graph.project.units.meters_per_unit = 2
     const scaled = roofPolylines.map(line => ({
-      color: line.color, pts: line.pts.map(([x, y]) => [x / 2, y / 2]),
+      ...line, pts: line.pts.map(([x, y]) => [x / 2, y / 2]),
     }))
     h.rerender({ ...input })
     ordinary(h.result.current, input, 1, scaled)

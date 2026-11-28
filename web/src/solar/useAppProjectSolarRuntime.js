@@ -214,7 +214,14 @@ export function useAppProjectSolarRuntime(props) {
     observe()
     const owner = { a, epoch: m.epoch, sessionGeneration: m.seen[4], abort: new AbortController() }
     owner.controller = createProjectSolarRunController({ projectClient: a.projectClient,
-      onOutcome: (outcome, meta) => onOutcome(owner, outcome, meta) })
+      onOutcome: (outcome, meta) => onOutcome(owner, outcome, meta),
+      onProgress: (outcome, meta) => {
+        const run = m.run
+        if (run?.owner !== owner || run.tool !== meta.tool || run.authorityKey !== meta.authorityKey ||
+            !sameSolarDrawingBinding(run.binding, meta.binding)) return
+        publish(() => m.run === run && !run.terminal && run.current() && current(meta.isCurrent),
+          { projectOutcome: { outcome, meta } })
+      } })
     m.owner = owner
     if (m.transition && !transitionCurrent(m.transition)) retire()
     if (!m.transition) publish(() => m.alive && m.owner === owner, resetOwnerState)
@@ -380,45 +387,59 @@ export function useAppProjectSolarRuntime(props) {
         !state.projectOutcome && !m.recovery?.pending) void recoverProposal(owner)
     return true
   }
-  async function recoverProposal(owner) {
-    // The workspace index only discovers a job ID. The scoped client and normal
-    // completion decoder must independently validate its full stored result.
+  function latestSolveJob() {
     const workspace = latest.current.workspaceController.getSnapshot().workspace
     if ((workspace?.project?.project_id || workspace?.project?.id) !== binding.project_id ||
-        !Array.isArray(workspace.jobs)) return
+        !Array.isArray(workspace.jobs)) return null
     const jobs = workspace.jobs.filter(job => job?.org_id === binding.organization_id &&
       job.project_id === binding.project_id && job.input_version_id === binding.input_version_id &&
       ['solar-solve-proposal', 'solar-commit-solve'].includes(job.tool_name))
       .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
     const job = jobs[0]
-    // Never resurrect a candidate behind a newer solve/commit, or guess between
-    // ambiguous timestamps. A newer failure or in-flight job also supersedes it.
-    if (!job || job.tool_name !== 'solar-solve-proposal' ||
-        !['succeeded', 'complete'].includes(job.status) || job.output_version_id != null ||
+    // The workspace index only discovers a job ID. Never guess between tied timestamps.
+    if (!job || job.tool_name !== 'solar-solve-proposal' || job.output_version_id != null ||
         !Number.isFinite(Date.parse(job.created_at)) ||
-        (jobs[1] && !(Date.parse(job.created_at) > Date.parse(jobs[1].created_at)))) return
+        (jobs[1] && !(Date.parse(job.created_at) > Date.parse(jobs[1].created_at)))) return null
+    return job
+  }
+  async function recoverProposal(owner) {
+    const job = latestSolveJob()
+    if (!job) return
+    const inFlight = ['submitted', 'queued', 'running'].includes(job.status)
+    if (!inFlight && !['succeeded', 'complete'].includes(job.status)) return
     const recovery = { pending: true }
     m.recovery = recovery
     const valid = () => m.recovery === recovery && ownerCurrent(owner) && !m.run
+    const observation = new AbortController()
+    const abort = () => observation.abort()
+    const ownerSignal = owner.abort.signal
+    ownerSignal.addEventListener('abort', abort, { once: true })
+    const timer = setTimeout(abort, PROJECT_SOLAR_RUN_BUDGET_MS)
+    const unknown = PROJECT_SOLAR_RUN_REASONS.outcome_unknown
+    const unreadable = PROJECT_SOLAR_RUN_REASONS.unreadable_output
     publish(valid, { busy: true, notice: null })
     try {
-      const response = await owner.a.projectClient.readJob(job.job_id,
-        { tool: 'solar-solve-proposal', signal: owner.abort.signal })
-      if (!valid()) return
+      const client = owner.a.projectClient
+      const options = { tool: 'solar-solve-proposal', signal: observation.signal }
+      const response = inFlight ? await client.observeJob(job.job_id, options) : await client.readJob(job.job_id, options)
+      if (!valid() || latestSolveJob()?.job_id !== job.job_id) return
       const outcome = response?.ok === true ? readProjectSolarCompletion({
         job: response.data?.job || response.data, jobId: job.job_id,
         binding: owner.a.scope.binding, tool: 'solar-solve-proposal',
       }) : null
       if (outcome?.state !== 'proposal') {
-        publish(valid, { notice: PROJECT_SOLAR_RUN_REASONS.unreadable_output })
+        const notice = outcome?.message ? humanizeError(outcome.message) : inFlight ? unknown : unreadable
+        publish(valid, { notice })
         return
       }
       const meta = { binding: owner.a.scope.binding, authorityKey: owner.a.scope.authorityKey,
         tool: 'solar-solve-proposal', signal: owner.abort.signal, isCurrent: valid }
       publish(valid, { projectOutcome: { outcome, meta }, projectPending: null })
     } catch {
-      publish(valid, { notice: PROJECT_SOLAR_RUN_REASONS.unreadable_output })
+      publish(valid, { notice: inFlight ? unknown : unreadable })
     } finally {
+      clearTimeout(timer)
+      ownerSignal.removeEventListener('abort', abort)
       recovery.pending = false
       publish(valid, { busy: false })
     }

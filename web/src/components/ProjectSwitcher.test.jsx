@@ -315,6 +315,48 @@ describe('recent and pinned projects', () => {
     expect(within(menu).queryByText('removed')).toBeNull()
   })
 
+  it.each([
+    ['canonical ID', { project_id: '11111111-1111-4111-8111-111111111111', id: 'legacy' }, '11111111-1111-4111-8111-111111111111'],
+    ['legacy ID', { id: 'legacy' }, 'legacy'],
+  ])('exposes the %s used to open a project', (_type, identity, expectedId) => {
+    const onOpenProject = vi.fn()
+    render(<ProjectSwitcher orgId="o1" projects={[{ ...identity, name: 'Maple' }]} onOpenProject={onOpenProject} />)
+    fireEvent.click(chip())
+
+    const group = screen.getByRole('group', { name: 'All projects', exact: true })
+    const row = within(group).getByRole('menuitem', { name: /Maple/ })
+    expect(row.getAttribute('data-project-id')).toBe(expectedId)
+    fireEvent.click(row)
+    expect(onOpenProject).toHaveBeenCalledExactlyOnceWith(expectedId)
+  })
+
+  it('finds exactly one same-named project by ID even when its history copies are visible', () => {
+    const targetId = '11111111-1111-4111-8111-111111111111'
+    const otherId = '22222222-2222-4222-8222-222222222222'
+    const sameNamedProjects = [
+      { project_id: otherId, name: 'Maple' },
+      { project_id: targetId, name: 'Maple' },
+    ]
+    const storage = storageForTest()
+    const onOpenProject = vi.fn()
+    writeRecentProjects('alice', { pinned: [targetId], recent: [targetId] }, storage)
+    render(<ProjectSwitcher orgId="o1" principalId="alice" storage={storage}
+      projects={sameNamedProjects} onOpenProject={onOpenProject} />)
+    fireEvent.click(chip())
+
+    for (const name of ['Pinned', 'Recent']) {
+      const historyRow = within(screen.getByRole('group', { name })).getByRole('menuitem', { name: /Maple/ })
+      expect(historyRow.hasAttribute('data-project-id')).toBe(false)
+      expect(historyRow).toBeEnabled()
+    }
+    const group = screen.getByRole('group', { name: 'All projects', exact: true })
+    expect(within(group).getAllByRole('menuitem', { name: /Maple/ })).toHaveLength(2)
+    const matches = group.querySelectorAll(`button[data-project-id="${targetId}"]`)
+    expect(matches).toHaveLength(1)
+    fireEvent.click(matches[0])
+    expect(onOpenProject).toHaveBeenCalledExactlyOnceWith(targetId)
+  })
+
   it('pins and unpins without opening a project or closing the menu, persisting across mounts', () => {
     const storage = storageForTest()
     const onOpenProject = vi.fn()

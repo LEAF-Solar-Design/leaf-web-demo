@@ -6,6 +6,11 @@ import { readActiveScope } from '../auth/activeScope.js'
 
 const FIELDS = ['alignment', 'description', 'headline', 'label', 'status', 'theme']
 const LIMITS = { label: 120, headline: 240, description: 1200, status: 80 }
+export const MAX_PAGE_ACTIONS = 12
+
+export function pageActions(document) {
+  return document.actions ?? (document.action ? [document.action] : [])
+}
 
 // Match the closed action grammar in platform/web_page_template.py. In
 // particular, mailto is one address, with no recipient list or headers.
@@ -27,7 +32,7 @@ export function isValidPageAction(action) {
 export function validatePageDocument(document) {
   if (document && Object.hasOwn(document, 'schema')) return validatePortfolioDocument(document)
   if (!document || typeof document !== 'object' || Array.isArray(document)
-    || Object.keys(document).filter(key => key !== 'action' && !Object.hasOwn(DESIGN_FIELDS.page, key)).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
+    || Object.keys(document).filter(key => key !== 'action' && key !== 'actions' && !Object.hasOwn(DESIGN_FIELDS.page, key)).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
   validateNodeDesign(document, 'page')
   for (const [field, limit] of Object.entries(LIMITS)) {
     const value = document[field]
@@ -41,7 +46,14 @@ export function validatePageDocument(document) {
   if (!['cream', 'light', 'dark'].includes(document.theme) || !['center', 'left'].includes(document.alignment)) {
     throw new Error('Choose one of the available page layouts.')
   }
-  if (Object.hasOwn(document, 'action') && !isValidPageAction(document.action)) {
+  if (Object.hasOwn(document, 'actions')) {
+    const actions = document.actions
+    if (Object.hasOwn(document, 'action') || !Array.isArray(actions) || !actions.length || actions.length > MAX_PAGE_ACTIONS) {
+      throw new Error(`Use 1 to ${MAX_PAGE_ACTIONS} contact links.`)
+    }
+  }
+  if ((Object.hasOwn(document, 'action') && !isValidPageAction(document.action))
+    || pageActions(document).some(action => !isValidPageAction(action))) {
     throw new Error('Enter a plain contact label and a valid HTTPS link or mailto address.')
   }
   if (new TextEncoder().encode(JSON.stringify(document)).length > 8192) throw new Error('Page exceeds 8192 bytes.')
@@ -181,6 +193,48 @@ export function portfolioTextChanges(saved, proposed) {
   } catch { return proposalInvalid() }
 }
 
+const BROWSER_TEXT = ['label', 'headline', 'description', 'status']
+
+export function pageProposalChanges(saved, proposed) {
+  if (saved.schema === 'leaf.portfolio.v1') return portfolioTextChanges(saved, proposed)
+  validatePageDocument(proposed)
+  const changes = []
+  const changed = (label, before, after) => {
+    if (before !== after) changes.push({ label, before, after })
+  }
+  for (const key of BROWSER_TEXT) changed(key, saved[key], proposed[key])
+  const before = pageActions(saved), after = pageActions(proposed)
+  for (let index = 0; index < Math.max(before.length, after.length); index++) {
+    for (const [key, name] of [['label', 'label'], ['href', 'destination']]) {
+      changed(`Contact link ${index + 1} ${name}`, before[index]?.[key] ?? '', after[index]?.[key] ?? '')
+    }
+  }
+  return changes
+}
+
+function validateBrowserProposal(saved, proposed, edits) {
+  const copy = { ...saved }
+  const original = pageActions(saved)
+  const slots = Array.from({ length: MAX_PAGE_ACTIONS }, (_, index) => ({ label: '', href: '', ...original[index] }))
+  const targets = BROWSER_TEXT.map(key => [copy, key])
+  for (const slot of slots) targets.push([slot, 'label'], [slot, 'href'])
+  for (const { id, value } of edits) {
+    const index = targets.findIndex((_, index) => id === `f${String(index + 1).padStart(4, '0')}`)
+    if (index < 0) proposalInvalid()
+    const [target, key] = targets[index]
+    target[key] = value
+  }
+  const actions = slots.filter(action => action.label || action.href)
+  if (canonical(actions) !== canonical(original)) {
+    delete copy.action
+    delete copy.actions
+    if (actions.length === 1) copy.action = actions[0]
+    else if (actions.length) copy.actions = actions
+  }
+  validatePageDocument(copy)
+  if (canonical(copy) !== canonical(proposed)) proposalInvalid()
+}
+
 async function readProposal(response, signal) {
   const max = 1024 * 1024
   let reader
@@ -223,7 +277,7 @@ export function validateProjectPageProposal(projectId, saved, value) {
   let document
   try {
     if (new TextEncoder().encode(JSON.stringify(value)).length > 1024 * 1024) proposalInvalid()
-    document = validatePortfolioDocument(saved.document)
+    document = validatePageDocument(saved.document)
   } catch { return proposalInvalid() }
   const source = { project_id: projectId, revision: saved.revision, digest: saved.digest }
   if (!closed(value, 'source proposed_document proposed_digest edits model usage')
@@ -241,6 +295,10 @@ export function validateProjectPageProposal(projectId, saved, value) {
   const usageKeys = ['input_tokens', 'output_tokens', 'cache_creation_tokens', 'cache_read_tokens', 'cost_tokens']
   for (const [key, count] of Object.entries(value.usage)) {
     if (!usageKeys.includes(key) || !Number.isSafeInteger(count) || count < 0) proposalInvalid()
+  }
+  if (document.schema !== 'leaf.portfolio.v1') {
+    validateBrowserProposal(document, value.proposed_document, value.edits)
+    return value
   }
   const changes = portfolioTextChanges(document, value.proposed_document)
   const values = value.edits.map(edit => edit.value)
@@ -309,10 +367,10 @@ export async function proposeProjectPage(projectId, saved, instruction, { signal
   const path = pagePath(projectId)
   if (!validUuid(projectId) || !Number.isSafeInteger(saved?.revision) || saved.revision < 1 || !validDigest(saved?.digest)
     || typeof instruction !== 'string' || !instruction.trim() || Array.from(instruction).length > 4000) {
-    throw new Error('Save the portfolio and enter a text change of 1 to 4000 characters.')
+    throw new Error('Save the page and enter a text change of 1 to 4000 characters.')
   }
   let document
-  try { document = validatePortfolioDocument(saved.document) } catch { return proposalInvalid() }
+  try { document = validatePageDocument(saved.document) } catch { return proposalInvalid() }
   const snapshot = { revision: saved.revision, digest: saved.digest, document }
   const source = { project_id: projectId, revision: saved.revision, digest: saved.digest }
   return request(`${path}/proposals`, { signal, proposal: true, method: 'POST',
@@ -420,9 +478,20 @@ export function validateNativePreview(value, expected = {}) {
       || Object.keys(receipt).sort().join(',') !== 'kind,receipt_id,sha256'
       || receipt.kind !== 'simulator' || !validUuid(receipt.receipt_id) || !validDigest(receipt.sha256)) nativeInvalid()
   }
+  const identity = Object.fromEntries(identityFields.map(field => [field, value[field]]))
+  const disposition = value.failure_disposition
+  const failureDisposition = !repository && value.status === 'failed'
+    && disposition?.schema === 'leaf.native-preview.failed-disposition.v1'
+    && disposition.job_id === value.job_id && disposition.status === 'failed'
+    && disposition.reason === 'execution_budget_expired' && disposition.lease_cleared === true
+    && validDigest(disposition.disposition_sha256)
+    && pageIdentity.every(field => disposition.source?.[field] === value[field])
+    ? { ...disposition, source: { ...disposition.source } }
+    : null
   return { job_id: value.job_id, status: value.status,
-    ...Object.fromEntries(identityFields.map(field => [field, value[field]])),
-    ...(value.status === 'complete' ? { receipt: { ...value.receipt }, evidence_basis: value.evidence_basis } : {}) }
+    ...identity,
+    ...(value.status === 'complete' ? { receipt: { ...value.receipt }, evidence_basis: value.evidence_basis } : {}),
+    ...(failureDisposition ? { failure_disposition: failureDisposition } : {}) }
 }
 
 export async function submitProjectSourceNativePreview(projectId, source, idempotencyKey, { signal, expectedScope } = {}) {

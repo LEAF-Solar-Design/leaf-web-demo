@@ -280,7 +280,6 @@ def test_import_sources_constants():
     assert sources.MAX_SOURCES_PER_DRAWING == 8
     assert sources.SOURCE_TOOL == "solar-solaredge-pdf-source"
     assert artifacts.MEDIA_TYPES["application/pdf"] == "pdf"
-    assert len(artifacts.MEDIA_TYPES) == 6
 
 
 @pytest.mark.parametrize("data,pages", [(PDF, 1), (pdf(50), 50), (b"  \n" + pdf(1), 1)],

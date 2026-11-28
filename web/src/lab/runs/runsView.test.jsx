@@ -26,7 +26,7 @@ const seed = () => {
   store.apply('r', { seq: 0, kind: 'value', block_id: 'count', payload: { result: { data: 3, as_of: Date.now() - 120000 } } })
   return store
 }
-const evidenceRun = (confirmation = true) => {
+const evidenceRun = (confirmation = true, confirmationOverrides = {}) => {
   const store = createValueStore()
   const digest = 'a'.repeat(64), parent = 'b'.repeat(64), rows = 'c'.repeat(64)
   const report = { schema: 'leafhft.block-suite-result.v1', suite_sha256: 'd'.repeat(64), rows_sha256: rows,
@@ -40,7 +40,8 @@ const evidenceRun = (confirmation = true) => {
         child: { n: 2, mean_claimed_prob: 0.5000000000000001, win_rate: 0 } },
       confirm_comparison: { paired_ci95_c: [null, null], child_minus_parent_mean_c: -0.0000000000001 },
       confirm_tickets: { parent: [], child: [{ market_id: 'synthetic-final-ticket' }] },
-      protocol: { draws: 10, seed: 7 }, splits: { select: { rows: 30 }, confirm: { rows: 20 } } } : null }
+      protocol: { draws: 10, seed: 7 }, splits: { select: { rows: 30 }, confirm: { rows: 20 } },
+      ...confirmationOverrides } : null }
   const evidence = { policy: { schema: 'leaf.lab-corpus-policy.v1', version: 1, digest,
     parent_suite_sha256: parent, parameters: { min_select_tickets: 0 },
     lineage: { doc_id: 'saved-composition', graph_revision: 2, graph_sha256: 'e'.repeat(64) } },
@@ -497,6 +498,33 @@ describe('Runs recovery options preview', () => {
 })
 
 describe('Runs view', () => {
+  it.each([
+    ['parent ticket shortfall', 'insufficient', 19, 37, 8, ['Parent needs 1 more qualifying confirmation ticket (19 of 20).']],
+    ['child and group shortfalls', 'insufficient', 26, 17, 1, [
+      'Child needs 3 more qualifying confirmation tickets (17 of 20).',
+      'Confirmation needs 1 more expiry group (1 of 2).',
+    ]],
+    ['interval crossing zero', 'inconclusive', 30, 37, 8, ['The paired 95% interval still crosses or touches zero.']],
+  ])('explains the evidence needed for %s while retaining the saved policy', (_, verdict, parent, child, groups, messages) => {
+    const { store, evidence } = evidenceRun(true, {
+      verdict, parent: { confirm: { n_tickets: parent } }, child: { confirm: { n_tickets: child } },
+      protocol: { min_confirm_tickets: 20, min_confirm_groups: 2 },
+      splits: { confirm: { groups } },
+      confirm_comparison: { paired_ci95_c: [-5, 8], child_minus_parent_mean_c: 1 },
+    })
+    render(<RunsView store={store} mock />)
+    const section = within(screen.getByRole('region', { name: 'Corpus evaluation evidence' }))
+    expect(section.getByRole('heading', { name: 'What would resolve confirmation' })).toBeVisible()
+    for (const message of messages) expect(section.getByText(message)).toBeVisible()
+    expect(section.getByText(/Replaying the pinned inputs adds no new confirmation evidence/)).toBeVisible()
+    expect(section.getByText(/same saved policy/)).toBeVisible()
+    expect(section.getByText(`Policy digest: ${evidence.policy_digest}`)).toBeVisible()
+  })
+  it('leaves conclusive confirmation outcomes without resolution guidance', () => {
+    const { store } = evidenceRun(true, { verdict: 'worse' })
+    render(<RunsView store={store} mock />)
+    expect(screen.queryByRole('heading', { name: 'What would resolve confirmation' })).toBeNull()
+  })
   it('displays complete policy and evaluation evidence without rounding an insufficient outcome into success', () => {
     const { store, evidence } = evidenceRun()
     render(<RunsView store={store} mock />)
@@ -529,6 +557,48 @@ describe('Runs view', () => {
       expect(section.getByRole('heading', { name: label }).nextElementSibling).toHaveTextContent('Unavailable (not evaluated)')
     }
     expect(section.queryByText('Verdict: pass')).toBeNull()
+  })
+  it('compares three retained values, including two block outputs from the same run and a failed run', async () => {
+    const { store, evidence } = evidenceRun()
+    const add = (run, block, runRevision, state, report) => {
+      const result = { ...evidence, run_id: run, evaluation: report }
+      store.upsertRun(run, { graph_revision: runRevision, state })
+      store.apply(run, { seq: store.getRun(run).lastSeq + 1, kind: 'value', block_id: block,
+        payload: { result: { data: JSON.stringify(result) } } })
+    }
+    add('evaluation', 'second-evaluator', 2, 'finished', { ...evidence.evaluation, confirm_report: null })
+    add('other-run', 'corpus', 3, 'failed', {
+      ...evidence.evaluation, verdict: 'pass', confirm_report: { verdict: 'better', reasons: ['positive interval'],
+        confirm_comparison: { paired_ci95_c: [1, 2], child_minus_parent_mean_c: 1.5 } },
+    })
+    const snapshot = store.getRuns()
+    render(<RunsView store={store} mock />)
+    screen.getByText('Compare corpus evaluations').parentElement.open = true
+    const first = await screen.findByLabelText('Report 1')
+    const second = screen.getByLabelText('Report 2')
+    const third = screen.getByLabelText('Report 3 (optional)')
+    const choose = (select, label) => fireEvent.change(select, {
+      target: { value: within(select).getByRole('option', { name: label }).value },
+    })
+    const original = /· corpus · result · revision 2 · evaluation$/
+    choose(first, original)
+    expect(within(second).getByRole('option', { name: original })).toBeDisabled()
+    expect(screen.queryByRole('table')).toBeNull()
+    choose(second, /second-evaluator.*revision 2/)
+    const table = within(screen.getByRole('table', { name: 'Corpus evaluation comparison' }))
+    expect(table.getAllByRole('columnheader')).toHaveLength(3)
+    choose(third, /revision 3 · other-run/)
+    expect(table.getAllByRole('columnheader')).toHaveLength(4)
+    const values = label => within(table.getByRole('rowheader', { name: label }).parentElement)
+      .getAllByRole('cell').map(cell => cell.textContent)
+    expect(values('Run state')).toEqual(['finished', 'finished', 'failed'])
+    expect(values('Confirmation verdict')).toEqual(['insufficient', 'Unavailable', 'better'])
+    expect(values('Paired 95% interval (cents)')).toEqual(['Unavailable', 'Unavailable', '1 to 2'])
+    expect(values('Confirmation reasons')).toEqual(['too few confirmation tickets', 'Unavailable', 'positive interval'])
+    expect(store.getRuns()).toBe(snapshot)
+    act(() => store.resetSnapshot('other-run', { state: 'failed', graph_revision: 3 }))
+    expect(third).toHaveValue('')
+    expect(table.getAllByRole('columnheader')).toHaveLength(3)
   })
   it('rejects invalid composition edits while retaining the last composition and completed evidence', () => {
     const { store, evidence } = evidenceRun()
@@ -640,5 +710,75 @@ describe('Runs view', () => {
     const store = seed(); render(<RunsView store={store} mock />)
     act(() => store.apply('r', { seq: 1, kind: 'value', block_id: 'count', payload: { result: { data: 99, as_of: Date.now() } } }))
     await waitFor(() => expect(screen.getByText(/result:.*99/)).toBeVisible())
+  })
+})
+
+describe('corpus job lineage', () => {
+  const lineage = (first = 'queued', second = 'running') => ({
+    corpus: true,
+    source: { run_id: 'r', graph_revision: 4, graph_sha256: 'a'.repeat(64), input_digest: 'b'.repeat(64) },
+    blocks: [first, second, 'not submitted'].map((status, index) => ({
+      block_id: ['first', 'second', 'third'][index], status,
+      job_id: index === 2 ? null : 'job-' + index, attempt: index === 2 ? null : index + 1,
+      inputs: { corpus_sha256: 'c'.repeat(64), suite_sha256: 'd'.repeat(64), settings_sha256: 'e'.repeat(64) },
+    })),
+  })
+  const respond = value => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } })
+  const show = () => fireEvent.click(screen.getByRole('button', { name: 'Show corpus jobs' }))
+  const panel = () => within(screen.getByRole('region', { name: 'Corpus jobs' }))
+
+  it('reads active jobs on demand and refreshes the same pinned lineage after the run finishes', async () => {
+    const store = seed()
+    const terminal = lineage('failed', 'completed')
+    terminal.blocks[2].status = 'unavailable'
+    surface.current = { worker: { workers: [] } }
+    const fetchImpl = vi.fn().mockResolvedValueOnce(respond(lineage())).mockResolvedValueOnce(respond(terminal))
+    render(<RunsView store={store} fetchImpl={fetchImpl} />)
+    expect(fetchImpl).not.toHaveBeenCalled()
+    show()
+    expect(await panel().findByText('job-0')).toBeTruthy()
+    expect(panel().getByText('first').closest('li').textContent).toContain('Queued')
+    expect(panel().getByText('second').closest('li').textContent).toContain('Running')
+    expect(panel().getByText('third').closest('li').textContent).toContain('Not submitted')
+    expect(panel().getByText('b'.repeat(64))).toBeTruthy()
+    expect(panel().getAllByText('e'.repeat(64))).toHaveLength(3)
+    act(() => store.apply('r', { seq: 1, kind: 'finished', payload: {} }))
+    fireEvent.click(panel().getByRole('button', { name: 'Refresh corpus jobs' }))
+    expect(await panel().findByText('job-1')).toBeTruthy()
+    expect(panel().getByText('first').closest('li').textContent).toContain('Failed')
+    expect(panel().getByText('second').closest('li').textContent).toContain('Completed')
+    expect(panel().getByText('third').closest('li').textContent).toContain('Unavailable')
+    expect(fetchImpl.mock.calls).toHaveLength(2)
+    for (const [url, options] of fetchImpl.mock.calls) {
+      expect(url).toMatch(/\/runs\/r\/corpus-jobs$/)
+      expect(options.method).toBe('GET')
+    }
+  })
+
+  it.each(['wrong revision', 'missing job ID', 'ordinary run'])('withholds lineage for %s', async variant => {
+    const data = lineage()
+    if (variant === 'wrong revision') data.source.graph_revision = 3
+    if (variant === 'missing job ID') data.blocks[0].job_id = null
+    surface.current = { worker: { workers: [] } }
+    const fetchImpl = vi.fn().mockResolvedValue(respond(variant === 'ordinary run' ? { corpus: false } : data))
+    render(<RunsView store={seed()} fetchImpl={fetchImpl} />)
+    show()
+    expect(await panel().findByText(variant === 'ordinary run'
+      ? 'No corpus jobs for this run.' : 'Corpus job status unavailable. Try refreshing.')).toBeTruthy()
+    expect(panel().queryByText('job-1')).toBeNull()
+  })
+
+  it('discards in-flight lineage when account scope changes', async () => {
+    surface.current = { worker: { workers: [] } }
+    let complete
+    const fetchImpl = vi.fn().mockImplementation(() => new Promise(resolve => { complete = resolve }))
+    render(<RunsView store={seed()} fetchImpl={fetchImpl} />)
+    show()
+    const signal = fetchImpl.mock.calls[0][1].signal
+    act(() => { authority.account = 'account-two'; notifyActiveScopeChanged() })
+    expect(signal.aborted).toBe(true)
+    await act(async () => complete(respond(lineage())))
+    expect(panel().queryByText('job-0')).toBeNull()
+    expect(panel().getByRole('button', { name: 'Show corpus jobs' }).disabled).toBe(false)
   })
 })

@@ -72,6 +72,55 @@ from solar_authored_graph import reads_graph
 
 
 CONTRACT = "leaf.customization.v1"
+CUSTOMIZATION_ERROR_MESSAGES = {
+    "customization_stage_queue_full": "Tool builds are busy right now. This request was not queued and was not counted against your daily builds. Try again in a few minutes.",
+    "customization_stage_queue_unavailable": "Tool builds are temporarily unavailable. This request was not queued and was not counted against your daily builds.",
+    "revision_target_missing": "This Branch tool has no published version to revise. Publish a version first, or create a new tool.",
+    "invalid_stage_source_request": "Invalid staged source request.",
+    "stage_source_not_available": "Staged source is not available.",
+    "stage_source_failed": "Staged source could not be read.",
+    "customization_stage_disabled": (
+        "Tool authoring is not enabled for this workspace in this environment. "
+        "The approved request was not executed."
+    ),
+    "customization_publish_disabled": (
+        "Tool publication is not enabled for this workspace in this environment. "
+        "The approved request was not executed."
+    ),
+    "invalid_stage_request": (
+        "The requested authoring mode is not supported by the protected authoring path. "
+        "Use build mode."
+    ),
+    "builder_entitlement_missing": (
+        "This workspace does not have the builder entitlement required for tool authoring."
+    ),
+    "customization_harness_unavailable": (
+        "Protected tool authoring is temporarily unavailable. "
+        "The approved request was not executed."
+    ),
+    "idempotency_key_required": (
+        "Tool authoring requires a request identity. The approved request was not executed."
+    ),
+    "tenant_identity_binding_unavailable": (
+        "Tool authoring requires a verified workspace identity for the requester. "
+        "The approved request was not executed."
+    ),
+    "stage_authority_invalid": (
+        "Studio could not confirm this build came from your current conversation, so it was not started. Ask for it again."
+    ),
+    "stage_grant_expired": "This build waited too long and was not started. Ask for it again.",
+    "stage_grant_exhausted": (
+        "This build was tried twice and could not be finished. Ask for it again. "
+        "This build waited in line, so it ran without connected services. "
+        "If it needs one, ask again when the line is short."
+    ),
+    "stage_grant_turn_open": "The conversation that asked for this build was stopped, so it was not started. Ask for it again.",
+    "stage_grant_refused": "Your access changed while this request waited. It was not started.",
+    "stage_grant_unavailable": "This build could not be checked and was not started. Ask for it again.",
+    "stage_grant_withdrawn": "This build was withdrawn before it started.",
+    "stage_grant_cancelled": "This build was stopped from the conversation before it started.",
+}
+
 MAX_STAGED_SOURCE_BYTES = 256 * 1024
 DEFAULT_DB = Path(__file__).resolve().parent / "customization.db"
 _configured_lock = threading.Lock()
@@ -153,7 +202,26 @@ _DIAGNOSTIC_CODES = frozenset({
 })
 
 
+def refund_unstarted_build(
+    tenant_id: str, change_set_id: str, *, log: logging.Logger | None = None,
+) -> None:
+    log = _LOG if log is None else log
+    try:
+        refunded = author_quota.refund_unstarted(tenant_id, change_set_id)
+        log.info(
+            "author_quota_refund_unstarted: change_set=%s refunded=%s",
+            change_set_id, refunded,
+        )
+    except Exception as exc:  # noqa: BLE001 - terminal state wins
+        log.warning(
+            "author_quota_refund_unstarted_failed: exception=%s",
+            type(exc).__name__,
+        )
+
+
 class CustomizationServiceError(RuntimeError):
+    harness_not_called = False
+
     def __init__(
         self, code: str, status_code: int = 409, detail: str = "", *,
         diagnostic_code: str | None = None, cause: BaseException | None = None,
@@ -161,6 +229,7 @@ class CustomizationServiceError(RuntimeError):
     ) -> None:
         super().__init__(code)
         self.code, self.status_code = code, status_code
+        self.harness_not_called = code == "stage_grant_cancelled"
         selected = detail if diagnostic_code is None else diagnostic_code
         self.diagnostic_code = (
             selected if type(selected) is str and selected in _DIAGNOSTIC_CODES
@@ -193,13 +262,24 @@ def _valid_compile_attempts(attempts: Any) -> bool:
         return False
     previous = 0
     for attempt in attempts:
-        if not isinstance(attempt, dict) or attempt.keys() != {"n", "decision", "errors", "diagnostics"}:
+        if not isinstance(attempt, dict) or attempt.keys() not in (
+                {"n", "decision", "errors", "diagnostics"},
+                {"n", "decision", "errors", "diagnostics", "source_decoded"}):
             return False
         if (not integer(attempt["n"], previous + 1, 8)
                 or attempt["decision"] not in ("accept", "compile_failed", "malformed", "unavailable")
                 or not integer(attempt["errors"], 0, 10000)):
             return False
         previous = attempt["n"]
+        if "source_decoded" in attempt:
+            decoded = attempt["source_decoded"]
+            if (attempt["decision"] != "accept" or not isinstance(decoded, dict)
+                    or decoded.keys() != {"entities", "original_sha256", "compiled_sha256"}
+                    or not integer(decoded["entities"], 1, 10000)
+                    or any(not isinstance(decoded[key], str) or not re.fullmatch(r"[0-9a-f]{64}", decoded[key])
+                           for key in ("original_sha256", "compiled_sha256"))
+                    or decoded["original_sha256"] == decoded["compiled_sha256"]):
+                return False
         diagnostics = attempt["diagnostics"]
         if not isinstance(diagnostics, list) or len(diagnostics) > 10:
             return False
@@ -374,6 +454,37 @@ def _harness_config() -> tuple[str, str]:
     so the two can never diverge on what "configured" means."""
     return (os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").strip().rstrip("/"),
             os.environ.get("LEAF_HARNESS_SECRET", "").strip())
+
+
+def _stage_queue_limit() -> int:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_MAX_QUEUED", "").strip()
+    try:
+        limit = int(value) if value.isascii() and value.isdecimal() else 0
+    except ValueError:
+        return 0
+    return limit if 1 <= limit <= 10000 else 0
+
+
+def _stage_queue_status_enabled() -> bool:
+    return os.environ.get("LEAF_CUSTOMIZATION_STAGE_QUEUE_STATUS", "").strip() == "1"
+
+
+def _stage_estimate_s() -> int:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_ESTIMATE_S", "").strip()
+    try:
+        estimate = int(value) if value.isascii() and value.isdecimal() else 0
+    except ValueError:
+        return 0
+    return estimate if 1 <= estimate <= 3600 else 0
+
+
+def _stage_worker_count() -> int:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_WORKERS", "").strip()
+    try:
+        workers = int(value) if value.isascii() and value.isdecimal() else 1
+    except ValueError:
+        return 1
+    return workers if 1 <= workers <= 4 else 1
 
 
 def _harness_stage_timeout_s() -> float:
@@ -1248,6 +1359,24 @@ class CustomizationService:
         )
         if target == "branch" and target_tool_name:
             self._branch_revision_base(tenant_id, base, target_tool_name)
+        limit = _stage_queue_limit()
+        if limit > 0:
+            # The cap is soft: concurrent admissions between this check and the
+            # staging transition can exceed it by their number.
+            try:
+                try:
+                    self.store.get_change_set_by_idempotency(
+                        tenant_id=tenant_id, idempotency_key=idempotency_key
+                    )
+                except ChangeSetNotFoundError:
+                    if self.store.stage_queue_depth() >= limit:
+                        raise CustomizationServiceError("customization_stage_queue_full", 503)
+            except ToolRecordFieldError as exc:
+                raise CustomizationServiceError("record_fields_invalid", 503) from exc
+            except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+                if isinstance(exc, CustomizationServiceError):
+                    raise
+                raise CustomizationServiceError("customization_stage_queue_unavailable", 503) from exc
         fingerprint = _stage_request_fingerprint(description, target)
         change = self._reserve_stage(
             tenant_id=tenant_id, idempotency_key=idempotency_key,
@@ -1287,6 +1416,9 @@ class CustomizationService:
                 idempotency_key=f"stage:{idempotency_key}",
                 expected_state=ChangeState.CREATED,
             )
+            import customization_stage_grants
+            if customization_stage_grants.ttl_s() is not None:
+                customization_stage_grants.issue(self, change)
         return self.stage_status_change(change)
 
     def stage_removal(
@@ -1747,7 +1879,20 @@ class CustomizationService:
             )
         except ToolRecordFieldError as exc:
             raise CustomizationServiceError("record_fields_invalid", 503) from exc
-        return self.stage_status_change(change)
+        result = self.stage_status_change(change)
+        import customization_stage_grants
+
+        if (customization_stage_grants.ttl_s() is not None
+                and result["status"] == "queued"
+                and change.tool_target == "branch"
+                and getattr(tenant, "subject", None) == change.author_subject):
+            try:
+                grant = self.store.get_stage_grant(change.tenant_id, change.change_set_id)
+                if grant is not None and grant["revoked_ms"] is None:
+                    result["withdrawable"] = True
+            except Exception:
+                pass
+        return result
 
     def stage_source(self, *, tenant: Any, change_set_id: str) -> tuple[bytes, dict[str, str]]:
         """Read only the original author's active, receipt-bound tool source."""
@@ -1904,6 +2049,23 @@ class CustomizationService:
             "poll_url": f"/api/author/stages/{change.change_set_id}",
             "retry_after_ms": 1000,
         }
+        if isinstance(change.stage_started_at, str) and change.stage_started_at:
+            result["stage_started_at"] = change.stage_started_at
+        if (_stage_queue_status_enabled() and status == "queued"
+                and change.state is ChangeState.STAGING):
+            # FIFO-order hint: retries or fair queuing can start in another order.
+            try:
+                ahead = self.store.stage_queue_ahead(change)
+            except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+                if isinstance(exc, CustomizationServiceError):
+                    raise
+            else:
+                queue = {"ahead": ahead, "position": ahead + 1}
+                estimate = _stage_estimate_s()
+                if estimate > 0:
+                    workers = _stage_worker_count()
+                    queue["estimated_wait_s"] = ((ahead + workers - 1) // workers) * estimate
+                result["queue"] = queue
         if change.target_tool_name:
             result["target_tool_name"] = change.target_tool_name
         if change.plan_json and change.plan_digest:
@@ -1925,6 +2087,14 @@ class CustomizationService:
                 )}
             if change.state is ChangeState.PUBLISHED:
                 result["publication"] = {"state": "published", "published_at": change.updated_at}
+                if change.tool_target == "branch":
+                    try:
+                        published = self._published_branch_result(change)
+                        result["publication"].update({
+                            field: published[field] for field in ("package_digest", "name", "version")
+                        })
+                    except Exception:
+                        _LOG.warning("publication_digest_unavailable: change_set=%s", change.change_set_id)
             elif change.state in (ChangeState.PUBLISHING, ChangeState.SUPERSEDED, ChangeState.ROLLED_BACK):
                 result["publication"] = {"state": change.state.value}
             else:
@@ -1953,14 +2123,14 @@ class CustomizationService:
             else:
                 result["result"] = {"tool": self._decorate_stage_tool(change, self._staged_tool(change))}
         elif status == "failed":
+            reason_code = change.stage_error_code or "customization_stage_failed"
+            message = change.stage_error_message
+            if not isinstance(message, str) or not message:
+                message = CUSTOMIZATION_ERROR_MESSAGES.get(reason_code)
             result["error"] = {
-                "reason_code": change.stage_error_code or "customization_stage_failed",
+                "reason_code": reason_code,
                 "retryable": bool(change.stage_error_retryable),
-                # The terminal reason a tenant can act on ("Agent SDK auth
-                # failure: ..."), persisted from the harness's own error body.
-                # Additive: absent when no reason was captured.
-                **({"message": change.stage_error_message}
-                   if change.stage_error_message else {}),
+                **({"message": message} if isinstance(message, str) and message else {}),
             }
         return result
 
@@ -2111,25 +2281,51 @@ class CustomizationService:
             change.authority_session_id,
             change.authority_turn_id,
         )
+        without_services = False
         if (
             tenant_id != change.tenant_id
             or not active_subject
             or active_subject != change.author_subject
         ):
-            raise CustomizationServiceError("stage_authority_invalid", 409)
+            import customization_stage_grants
+            if (tenant_id == change.tenant_id and not active_subject and self is not None
+                    and customization_stage_grants.ttl_s() is not None):
+                without_services = True
+            else:
+                exc = CustomizationServiceError("stage_authority_invalid", 409)
+                exc.harness_not_called = True
+                raise exc
         url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)
         revision_base = None
         if getattr(change, "tool_target", None) == "branch" and change.target_tool_name:
             revision_base = self._branch_revision_base(change.tenant_id, change.base_commit, change.target_tool_name)
+        # Last read before the request: a Stop or withdraw that landed during
+        # the URL and revision-base work still refuses this build.
+        import customization_stage_grants
+        if (self is not None and change.tool_target == "branch"
+                and customization_stage_grants.ttl_s() is not None):
+            try:
+                grant = self.store.get_stage_grant(tenant_id, change.change_set_id)
+            except Exception as exc:
+                refusal = CustomizationServiceError("stage_grant_refused", 409)
+                refusal.harness_not_called = True
+                raise refusal from exc
+            if grant is not None and grant["revoked_ms"] is not None:
+                code = "stage_grant_cancelled" if grant["revoked_reason"] == "cancelled" else "stage_grant_withdrawn"
+                refusal = CustomizationServiceError(code, 409)
+                refusal.harness_not_called = True
+                raise refusal
+        if without_services:
+            customization_stage_grants.admit(self, change, change.stage_lease_owner)
         try:
             import requests
             response = requests.post(
                 f"{url}/author/stage", timeout=_harness_stage_timeout_s(),
                 headers={
                     "X-Harness-Secret": secret,
-                    **({
+                    **({"X-Author-Services": "none"} if without_services else {
                         "X-Authority-Session-Id": change.authority_session_id,
                         "X-Authority-Turn-Id": change.authority_turn_id,
                     } if change.authority_session_id and change.authority_turn_id else {}),
@@ -2167,6 +2363,13 @@ class CustomizationService:
                     "customization_author_job_failed", 502,
                     diagnostic_code="harness_stage_job_failed", cause=exc,
                 )
+                if without_services:
+                    notice = (
+                        "This build waited in line, so it ran without connected services. "
+                        "If it needs one, ask again when the line is short."
+                    )
+                    prefix = (reason or "")[:500 - len(notice) - 1].rstrip()
+                    reason = f"{prefix} {notice}" if prefix else notice
                 error.harness_reason = reason
                 if getattr(change, "tool_target", None) == "branch" and response.status_code == 422:
                     refusal = response.json().get("error")
@@ -3283,7 +3486,9 @@ class CustomizationService:
                     os.environ["LEAF_TENANT_TOOLS_DIR"], change.tenant_id,
                     name, checked.manifest["version"])
                 if result.package_digest != checked.package_digest:
-                    raise tenant_publish.TenantPublishError("branch_version_conflict", 409)
+                    _, legacy_checked = tenant_publish.reviewed_package(files, name, timeout_cap_ms=None)
+                    if result.package_digest != legacy_checked.package_digest:
+                        raise tenant_publish.TenantPublishError("branch_version_conflict", 409)
             except (tenant_publish.TenantPublishError, OSError) as exc:
                 raise CustomizationServiceError("publish_not_available", 409) from exc
             return self._branch_publish_result(change, result)

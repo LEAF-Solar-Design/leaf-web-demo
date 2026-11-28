@@ -230,7 +230,10 @@ export function savedReconciliationValues(graph) {
   values[4] = dcValid && covered.size === panels.size ? available(total)
     : unavailable('DC needs complete, unique frame coverage and positive supported module watts for every panel.')
   const optimizers = savedOptimizerMeasurement(graph)
-  if (optimizers) values[1] = available(BigInt(optimizers.total_count) * SCALE)
+  if (optimizers) values[1] = {
+    ...available(BigInt(optimizers.total_count) * SCALE),
+    reportDigest: graph.extra.solaredge_import.report.content_sha256,
+  }
   return values
 }
 
@@ -251,9 +254,17 @@ export function reconciliationRowsFromValues(studio, drafts = []) {
   })
 }
 
-export function reconciliationCsv(rows) {
+export function reconciliationCsv(rows, provenance) {
   const quote = (value) => '"' + value.replace(/"/g, '""') + '"'
   const metrics = ['panels', 'optimizers', 'inverters', 'strings', 'kw_dc']
-  return 'metric,studio,oracle,delta,verdict\r\n' + rows.map((row, index) =>
-    [metrics[index], row.studio, row.oracle, row.delta, row.verdict].map(quote).join(',')).join('\r\n') + '\r\n'
+  const header = 'metric,studio,oracle,delta,verdict' +
+    (provenance ? ',design_revision,engineering_totals_revision,oracle_source' : '')
+  const lines = rows.map((row, index) => {
+    const values = [metrics[index], row.studio, row.oracle, row.delta, row.verdict]
+    if (provenance) {
+      values.push(String(provenance.designRevision), String(provenance.totalsRevision ?? ''), provenance.oracleSources[index])
+    }
+    return values.map(quote).join(',')
+  })
+  return [header, ...lines, ''].join('\r\n')
 }

@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -27,9 +28,12 @@ import solar_local_read
 import solar_tools
 import store
 from solar_design_graph import GraphValidationError, entities, validate_graph
+from solar_equipment import equipment_candidate
+from solar_equipment_rebalance import minimum_direct_moves
 from solar_sizing_client import sizing_basis
 from solar_solve_results import sync_assignments, upstream_basis
 from test_w1_design_graph import app_id, entity, graph  # noqa: F401
+from test_w1_equipment import case as equipment_case  # noqa: F401
 from test_w1_local_graph_adapter import held
 from test_w1_local_graph_jobs import isolated_jobs, no_network  # noqa: F401
 import test_w1_local_graph_rail as rail
@@ -37,6 +41,7 @@ from test_w1_solve_commit import seed
 from test_solar_w2_registration import dispatch, head_graph, latest
 import test_solar_ground_topology as topo
 import test_solar_pvcase_solve as pv_tests
+from test_solar_tool_guardrails_read import g1, passing, service  # noqa: F401
 
 TOOL = "solar-assign-strings"
 TENANT = "fixture-tenant"
@@ -401,6 +406,80 @@ def test_assignment_report_read_adapter_pins_version_and_preserves_store(graph, 
         assignment_report(g, expected_rev=1)
 
 
+@pytest.mark.parametrize(
+    ("case", "capacity", "unassigned"),
+    [("A", [(4, 2, 2)], 0), ("P", [(4, 1, 3)], 1), ("CB", [(3, 0, 3), (4, 0, 4)], 6)],
+)
+def test_assignment_report_reads_saved_state_without_preview(graph, tmp_path, monkeypatch, case, capacity, unassigned):
+    g = variant(graph, case)
+    if case in ("A", "P"):
+        _declined_total(g)
+    g = validate_graph(g)
+    backend, _ = seed(tmp_path, monkeypatch, g)
+    before = store.load_manifest(backend, TENANT, "solar")
+    params = {"mode": "saved", "expected_rev": g["rev"]}
+    result = solar_local_read.run_local_graph_read(
+        backend, TENANT, "solar-assignment-report", params,
+        drawing_id="solar", source_version=1, job_id="saved-assignment-report")
+    report = result["output"]
+    assert report["status"] == "saved" and report["committed"] is False
+    assert "candidate_assignments" not in report
+    assert report["electrical_suitability"] == {
+        "status": "unknown", "reason": "mppt_voltage_current_limits_not_verified"}
+    saved = report["saved_state"]
+    assert len(saved["unassigned_string_refs"]) == unassigned
+    assert len(saved["assignments"]) == len(g["strings"]) - unassigned
+    assert [(c["total_dc_inputs"], c["occupied_inputs"], c["spare_inputs"])
+            for c in saved["collector_capacity"]] == capacity
+    assert result["source_version"] == 1 and result["graph_sha256"] == sha(g)
+    assert result["drawing_changed"] is False
+    assert store.load_manifest(backend, TENANT, "solar") == before
+    assert head_graph(backend) == g
+    if case == "A":
+        assert solar_local_read._load_builtin("solar-assignment-report").input_readiness(g)["input_ready"]
+        complete = assignment_report(g)
+        assert complete["status"] == "complete"
+        assert complete["commit_refusal_code"] == "NO_UNASSIGNED_STRINGS"
+        assert complete["saved_state"] == saved
+        assert complete["candidate_assignments"] == []
+        with pytest.raises(GraphValidationError, match="STALE_GRAPH_REVISION"):
+            assignment_report(g, mode="saved", expected_rev=g["rev"] + 1)
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_capacity"),
+    [("U", [(4, 0, 4)]), ("P", [(4, 1, 3)]), ("CB", [(3, 0, 3), (4, 0, 4)])],
+)
+def test_assignment_report_separates_saved_capacity_from_candidate_plan(graph, case, expected_capacity):
+    g = variant(graph, case)
+    if case in ("U", "P"):
+        _declined_total(g)
+    g = validate_graph(g)
+    before = copy.deepcopy(g)
+    report = assignment_report(g)
+    saved = report["saved_state"]
+    collectors = sorted(g["inverters"], key=lambda inverter: inverter["id"])
+    assert saved["collector_capacity"] == [
+        {"inverter_ref": collector["id"], "total_dc_inputs": total,
+         "occupied_inputs": occupied, "spare_inputs": spare}
+        for collector, (total, occupied, spare) in zip(collectors, expected_capacity)
+    ]
+    expected_unassigned = {string["id"] for string in g["strings"]}
+    if case == "P":
+        (input_assignment,) = g["inverters"][0]["input_assignments"]
+        assert input_assignment["string_ref"] == S1
+        assert saved["assignments"] == [
+            {**input_assignment, "inverter_ref": g["inverters"][0]["id"],
+             "circuit_tag": next(string["circuit_tag"] for string in g["strings"] if string["id"] == S1)}
+        ]
+        expected_unassigned.remove(S1)
+    else:
+        assert saved["assignments"] == []
+    assert saved["unassigned_string_refs"] == sorted(expected_unassigned)
+    assert {item["string_ref"] for item in report["candidate_assignments"]} == expected_unassigned
+    assert report["committed"] is False and g == before
+
+
 def test_assignment_report_preserves_occupied_inputs_and_names_declined_remainder(graph):
     g = variant(graph, "P")
     before = copy.deepcopy(g)
@@ -419,6 +498,99 @@ def test_assignment_report_preserves_occupied_inputs_and_names_declined_remainde
     assert report["remaining_string_refs"] == sorted(string["id"] for string in g["strings"])
     assert report["commit_refusal_code"] == "EXCESS_CAPACITY_DECLINED"
     assert g == before
+
+
+@pytest.mark.parametrize(("second_capacity", "limits", "cold_status", "least"), [
+    (4, (600, 600), ("pass", "pass"), (1, 2)),
+    (8, (600, 600), ("pass", "pass"), (2,)),
+    (4, (75, 600), ("fail", "unverified"), (1, 2)),
+])
+def test_saved_inverter_comparison_uses_pinned_capacity_and_voltage(
+        g1, tmp_path, monkeypatch, second_capacity, limits, cold_status, least):
+    first = g1["inverters"][0]
+    second_ref = app_id("inverter", 2)
+    sending, moving = first["input_assignments"]
+    first.update(input_assignments=[sending], total_dc_inputs=4, max_dc_voltage=limits[0])
+    g1["inverters"].append({
+        **copy.deepcopy(first), "id": second_ref, "number": 2, "position": [10.0, 0.0],
+        "input_assignments": [moving], "total_dc_inputs": second_capacity, "max_dc_voltage": limits[1],
+    })
+    moved = next(string for string in g1["strings"] if string["id"] == moving["string_ref"])
+    moved.update(to_ref=second_ref, inverter_ref=second_ref)
+    if cold_status[1] == "unverified":
+        moved["validity"] = {"state": "stale", "reasons": ["source_changed"]}
+    sync_assignments(g1)
+    graph = validate_graph(g1)
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    before = store.load_manifest(backend, TENANT, "solar")
+    name = "solar-assignment-report"
+    base_params = {"mode": "saved", "expected_rev": graph["rev"]}
+    params = {**base_params, "inverter_refs": [second_ref, INV1]}
+    record = solar_tools.trusted_record(name)
+    Draft7Validator(record["params"]).validate(params)
+    result = solar_local_read.run_local_graph_read(
+        backend, TENANT, name, params, drawing_id="solar", source_version=1, job_id="saved-inverter-comparison")
+    output = result["output"]
+    Draft7Validator(record["returns"]).validate(output)
+    report = output["inverter_comparison"]
+    assert report["least_utilized_inverter_refs"] == [app_id("inverter", n) for n in least]
+    assert report["design_min_temp_c"] == pytest.approx(-2.7)
+    groups = {item["capacity"]["inverter_ref"]: item for item in report["groups"]}
+    assert list(groups) == ([second_ref, INV1] if least == (2,) else [INV1, second_ref])
+    for ref, total, assignment, status in zip((INV1, second_ref), (4, second_capacity), (sending, moving), cold_status):
+        group = groups[ref]
+        assert group["capacity"] == {
+            "inverter_ref": ref, "total_dc_inputs": total, "occupied_inputs": 1, "spare_inputs": total - 1,
+        }
+        (voltage,) = group["strings"]
+        assert voltage["string_ref"] == assignment["string_ref"]
+        assert voltage["circuit_tag"] == next(
+            row["circuit_tag"] for row in output["saved_state"]["assignments"] if row["string_ref"] == voltage["string_ref"]
+        )
+        assert voltage["cold_dc_limit"]["status"] == status
+        assert voltage["hot_mppt_window"] == {"status": "unverified", "reason": "vmp_temperature_model_required"}
+    if cold_status[1] == "unverified":
+        assert groups[second_ref]["strings"][0]["cold_dc_limit"] == {
+            "status": "unverified", "reason": "valid_circuit_and_inverter_required",
+        }
+    assert {key: value for key, value in output.items() if key != "inverter_comparison"} == assignment_report(
+        graph, **base_params,
+    )
+    assert result["drawing_changed"] is False and result["source_version"] == 1
+    assert result["graph_sha256"] == sha(graph)
+    assert store.load_manifest(backend, TENANT, "solar") == before and head_graph(backend) == graph
+
+
+@pytest.mark.parametrize("refs", [[], [INV1, INV1], [INV1, app_id("inverter", 50)], [INV1, {}]])
+def test_saved_inverter_comparison_rejects_invalid_selections(graph, refs):
+    with pytest.raises(GraphValidationError, match="INVALID_STRING_ASSIGNMENT_REQUEST"):
+        assignment_report(graph, mode="saved", inverter_refs=refs)
+
+
+@pytest.mark.parametrize("numbers", [(1, 2), (1, 3), (2, 3)])
+def test_saved_inverter_comparison_refuses_combiner_chains(graph, numbers):
+    source = variant(graph, "CB")
+    request = {"mode": "saved", "expected_rev": source["rev"],
+               "inverter_refs": [app_id("inverter", number) for number in numbers]}
+    with pytest.raises(GraphValidationError, match="INVERTER_COMPARISON_REQUIRES_DIRECT_INPUTS"):
+        solar_local_read._read_output("solar-assignment-report", source, request)
+
+
+def test_saved_inverter_comparison_is_saved_mode_only(graph):
+    refs = [INV1, app_id("inverter", 2)]
+    params = {"expected_rev": graph["rev"], "accept_excess_capacity": True, "inverter_refs": refs}
+    record = solar_tools.trusted_record("solar-assignment-report")
+    assert not Draft7Validator(record["params"]).is_valid(params)
+    with pytest.raises(GraphValidationError, match="INVALID_STRING_ASSIGNMENT_REQUEST"):
+        assignment_report(graph, inverter_refs=refs)
+
+
+def test_saved_assignment_report_rejects_preview_balance_option(graph):
+    name = "solar-assignment-report"
+    request = {"mode": "saved", "expected_rev": graph["rev"], "balance_whole_strings": True}
+    assert not Draft7Validator(solar_tools.trusted_record(name)["params"]).is_valid(request)
+    with pytest.raises(GraphValidationError, match="INVALID_STRING_ASSIGNMENT_REQUEST"):
+        solar_local_read._read_output(name, graph, request)
 
 
 @pytest.mark.parametrize("patch", [{"unexpected": 1}, {"accept_excess_capacity": "Yes"},
@@ -674,6 +846,89 @@ def test_assign_strings_repeat_has_nothing_to_assign(graph):
         call(once)
 
 
+@pytest.mark.parametrize(("name", "positions", "capacity", "expected"), [
+    ("all-routes-near-first", (0, 10, 20, 30, 40, 45), 4, [3, 3]),
+    ("routes-split-between-collectors", (0, 10, 20, 80, 90, 100), 4, [3, 3]),
+    ("exact-three-slots-per-collector", (0, 10, 20, 80, 90, 100), 3, [3, 3]),
+    ("four-slots-for-six-strings", (0, 10, 20, 80, 90, 100), 2, []),
+])
+def test_saved_whole_string_assignment(graph, monkeypatch, tmp_path, name, positions, capacity, expected):
+    drawing = variant(graph, "L2")
+    template = copy.deepcopy(graph["panels"][0])
+    frame = copy.deepcopy(graph["frames"][0])
+    frame.update(electrical_zone_ref=None, panel_refs=[], sequences=[], panel_assignments=[],
+                 matrix=[[]], module_columns=9, module_slots=9)
+    drawing["frames"] = [frame]
+    for index, (string, x) in enumerate(zip(drawing["strings"], positions, strict=True)):
+        string["route"] = [du(x, 20), du(x, 25)]
+        for sequence in range(1 + index % 2):
+            column = len(drawing["panels"])
+            panel = copy.deepcopy(template)
+            panel.update(id=app_id("panel", column + 1), centre=du(x, 20 + sequence),
+                         matrix_cell={"row": 0, "col": column})
+            panel["assignment"] = {"string_ref": string["id"], "seq": sequence}
+            drawing["panels"].append(panel)
+            frame["panel_refs"].append(panel["id"])
+            frame["matrix"][0].append({
+                "code": "panel", "panel_ref": panel["id"], "x": panel["centre"][0],
+                "y": panel["centre"][1], "angle": 0, "seq": sequence,
+                "inverter_id": None, "string_input_number": None,
+            })
+            frame["panel_assignments"].append({
+                "panel_ref": panel["id"], **panel["assignment"],
+                "inverter_id": None, "string_input_number": None,
+            })
+            string["ordered_panel_refs"].append(panel["id"])
+        string["module_count"] = len(string["ordered_panel_refs"])
+        string["from_ref"] = string["ordered_panel_refs"][0]
+        frame["sequences"].append({
+            "string_ref": string["id"], "ordered_panel_refs": string["ordered_panel_refs"][:],
+        })
+    for inverter in drawing["inverters"]:
+        inverter.update(total_dc_inputs=capacity, mppt_count=1)
+    sync_assignments(drawing)
+    drawing = validate_graph(drawing)
+    membership = {string["id"]: string["ordered_panel_refs"] for string in drawing["strings"]}
+    backend, _ = seed(tmp_path, monkeypatch, drawing)
+    response = solar_local_read.run_local_graph_read(
+        backend, TENANT, "solar-assignment-report",
+        {"expected_rev": 0, "accept_excess_capacity": True, "balance_whole_strings": True},
+        drawing_id="solar", source_version=1, job_id=f"ask14-{name}",
+    )
+    assert response["drawing_changed"] is False
+    assert latest(backend) == 1
+    assert head_graph(backend) == drawing
+
+    report = response["output"]
+    assert all(group["total_dc_inputs"] == capacity for group in report["saved_state"]["collector_capacity"])
+    assert bool(report["balance_lines"]) == bool(expected)
+    assignments = report["candidate_assignments"]
+    loads = Counter(item["inverter_ref"] for item in assignments)
+    assert sorted(loads.values()) == expected
+    assigned = [item["string_ref"] for item in assignments]
+    remaining = report["remaining_string_refs"]
+    assert Counter(assigned + remaining) == Counter(membership.keys())
+    assert len({(a["inverter_ref"], a["mppt_letter"], a["input_number"]) for a in assignments}) == len(assigned)
+
+    with held(backend) as fence:
+        if remaining:
+            assert len(remaining) == len(membership)
+            assert report["status"] == "unassigned"
+            assert report["commit_refusal_code"] == "STRING_CAPACITY_INSUFFICIENT"
+            with pytest.raises(GraphValidationError, match=report["commit_refusal_code"]):
+                dispatch(backend, fence, TOOL, dict(ASSIGN, expected_rev=0, balance_whole_strings=True))
+        else:
+            assert report["commit_refusal_code"] is None
+            dispatch(backend, fence, TOOL, dict(ASSIGN, expected_rev=0, balance_whole_strings=True))
+    assert latest(backend) == (1 if remaining else 2)
+    saved = head_graph(backend)
+    assert {string["id"]: string["ordered_panel_refs"] for string in saved["strings"]} == membership
+    if not remaining:
+        assert Counter((item["string_ref"], inverter["id"], item["mppt_letter"], item["input_number"])
+                       for inverter in saved["inverters"] for item in inverter["input_assignments"]) == Counter(
+            (a["string_ref"], a["inverter_ref"], a["mppt_letter"], a["input_number"]) for a in assignments)
+
+
 def test_assign_strings_kernel_refusals_are_named(graph, monkeypatch):
     module = builtin()
     for error, code in ((module.kernel.InverterStringNotPortedError("manual"), "STRING_ASSIGNMENT_NOT_PORTED"),
@@ -686,7 +941,7 @@ def test_assign_strings_kernel_refusals_are_named(graph, monkeypatch):
                 call(variant(graph, "U"))
             assert raised.value.code == code
     with monkeypatch.context() as patch:
-        patch.setattr(module.kernel, "assign_strings", lambda state, host, forms: (state, ["surprise"]))
+        patch.setattr(module.kernel, "assign_strings", lambda state, host, forms, **options: (state, ["surprise"]))
         with pytest.raises(GraphValidationError, match="STRING_ASSIGNMENT_MAPPING_FAILED"):
             call(variant(graph, "U"))
 
@@ -696,9 +951,10 @@ def test_assign_strings_host_inputs(graph, monkeypatch):
     seen = []
     real = module.kernel.assign_strings
 
-    def spy(state, host, forms):
+    def spy(state, host, forms, *, balance_whole_strings):
+        assert balance_whole_strings is False
         seen.append((host, forms))
-        return real(state, host, forms)
+        return real(state, host, forms, balance_whole_strings=balance_whole_strings)
 
     with monkeypatch.context() as patch:
         patch.setattr(module.kernel, "assign_strings", spy)
@@ -733,6 +989,7 @@ def test_assign_strings_host_inputs(graph, monkeypatch):
     dict(ASSIGN, expected_rev=0, accept_excess_capacity="Yes"),
     dict(ASSIGN, expected_rev=0, accept_excess_capacity=1),
     dict(ASSIGN, expected_rev=0, accept_excess_capacity=None),
+    dict(ASSIGN, expected_rev=0, balance_whole_strings="Yes"),
     dict(ASSIGN, expected_rev="0"), dict(ASSIGN, expected_rev=0.0), dict(ASSIGN, expected_rev=True),
     dict(ASSIGN, expected_rev=0, mode="Manual"), dict(ASSIGN, expected_rev=0, drawing_id="solar"),
 ])
@@ -762,6 +1019,7 @@ DECLARATION = {
                 "operation": {"type": "string", "enum": ["assign-strings"]},
                 "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
                 "accept_excess_capacity": {"type": "boolean"},
+                "balance_whole_strings": {"type": "boolean"},
             },
             "required": ["operation", "expected_rev", "accept_excess_capacity"],
             "additionalProperties": False,
@@ -908,3 +1166,83 @@ def test_assign_strings_dispatch_replays_and_refuses_stale(graph, tmp_path, monk
                 source_version=2, holder="fixture-owner", fence=fence, job_id="assign-strings-stale")
     assert latest(backend) == 2
     assert head_graph(backend) == call(variant(graph, "L2"))["graph"]
+
+
+@pytest.mark.parametrize(("sending_kw", "receiving_v", "inputs", "status", "minimum", "probes"), [
+    (1.2, 75, 1, "already_balanced", 0, 0),
+    (.9, 75, 1, "proposed", 1, 2),
+    (.3, 100, 2, "proposed", 2, 3),
+    (.9, 49, 1, "no_direct_solution", None, 2),
+    (.3, 100, 1, "no_direct_solution", None, 2),
+])
+def test_saved_inverter_rebalance(
+        equipment_case, sending_kw, receiving_v, inputs, status, minimum, probes):
+    graph, params, _ = equipment_case
+    first = params["equipment"][0]
+    first["max_dc_power_kw"] = sending_kw
+    receiving_ref = app_id("inverter", 2)
+    params["equipment"].append({
+        **first, "id": receiving_ref, "number": 2, "position": [8, 0, 0],
+        "mppt_inputs": {"A": inputs}, "total_dc_inputs": inputs,
+        "max_dc_voltage": receiving_v, "max_dc_power_kw": 1.2,
+    })
+    source = equipment_candidate(graph, params)
+    before = copy.deepcopy(source)
+    request = {"mode": "saved", "expected_rev": source["rev"], "suggest_minimum_moves": True}
+    name = "solar-assignment-report"
+    record = solar_tools.trusted_record(name)
+    Draft7Validator(record["params"]).validate(request)
+    output, _ = solar_local_read._read_output(name, source, request)
+    Draft7Validator(record["returns"]).validate(output)
+    assert output["committed"] is False
+    report = output["rebalance"]
+    assert report == minimum_direct_moves(source)
+    assert report["source_rev"] == source["rev"]
+    assert report["status"] == status
+    assert report["minimum_moves"] == minimum
+    assert report["probe_limit"] == 64
+    assert report["probes_examined"] == probes
+    assert source == before
+    moves = {row["string_ref"]: row for row in report["moves"]}
+    assert len(moves) == (minimum or 0)
+    if minimum == 1:
+        assert set(moves) == {params["assignments"][1]["string_ref"]}
+    if moves:
+        pinned = params["assignments"]
+        trial = [{**row, "inverter_ref": move["to_inverter_ref"], "mppt_letter": move["mppt_letter"],
+                  "input_number": move["input_number"]}
+                 if (move := moves.get(row["string_ref"])) else row for row in pinned]
+        reopened = equipment_candidate(source, {
+            **params, "expected_rev": source["rev"], "assignments": trial,
+        })
+        assert all(item["validity"]["state"] == "valid" for item in reopened["inverters"] + reopened["strings"])
+        assert [s["ordered_panel_refs"] for s in reopened["strings"]] == [
+            s["ordered_panel_refs"] for s in before["strings"]]
+
+
+@pytest.mark.parametrize(("receiver_count", "status", "probes"), [
+    (6, "no_direct_solution", 48),
+    (7, "no_direct_solution", 63),
+    (8, "search_limit", 64),
+])
+def test_saved_inverter_rebalance_uses_production_probe_budget(equipment_case, receiver_count, status, probes):
+    graph, params, _ = equipment_case
+    sender = params["equipment"][0]
+    sender["max_dc_power_kw"] = .3
+    for number in range(2, receiver_count + 2):
+        params["equipment"].append({
+            **sender, "id": app_id("inverter", number), "number": number,
+            "position": [8 + number, 0, 0], "mppt_inputs": {"A": 2},
+            "total_dc_inputs": 2, "max_dc_voltage": 49, "max_dc_power_kw": 1.2,
+        })
+    source = equipment_candidate(graph, params)
+    before = copy.deepcopy(source)
+    request = {"mode": "saved", "expected_rev": source["rev"], "suggest_minimum_moves": True}
+    output, _ = solar_local_read._read_output("solar-assignment-report", source, request)
+    Draft7Validator(solar_tools.trusted_record("solar-assignment-report")["returns"]).validate(output)
+    assert output["committed"] is False
+    assert output["rebalance"] == {
+        "source_rev": source["rev"], "status": status, "minimum_moves": None,
+        "moves": [], "probe_limit": 64, "probes_examined": probes,
+    }
+    assert source == before

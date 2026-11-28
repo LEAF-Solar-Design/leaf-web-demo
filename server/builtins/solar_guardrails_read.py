@@ -11,17 +11,20 @@ import math
 import solar_guardrails
 import solar_sizing_client
 from solar_design_graph import GraphValidationError
+from solar_string_voltage import string_voltage_report
 
 SCHEMA = "leaf.solar-guardrails.v1"
 LIST_MODE = "drawing"
 WINDOW_KEY = "mppt_voltage_window"
+STRING_VOLTAGE_KEY = "per_string_voltage"
 WINDOW_FIELDS = frozenset(("min_v", "max_v"))
 WINDOW_MAX_V = 100000
 INVERTER_CONFIG = ("model", "mppt_count", "total_dc_inputs", "max_dc_voltage", "max_ac_power_kw", "is_solaredge")
 
 
 def _window(params):
-    if type(params) is not dict or set(params) - {WINDOW_KEY}:
+    if (type(params) is not dict or set(params) - {WINDOW_KEY, STRING_VOLTAGE_KEY}
+            or type(params.get(STRING_VOLTAGE_KEY, False)) is not bool):
         raise GraphValidationError("INVALID_GUARDRAILS_REQUEST")
     if WINDOW_KEY not in params:
         return None
@@ -108,6 +111,8 @@ def rows_for_intake(intake):
 
 def run(graph, params):
     window = _window(params)
+    if params.get(STRING_VOLTAGE_KEY):
+        return string_voltage_report(graph, window)
     intake, mode = graph_intake(graph, window)
     try:
         snapshot = solar_guardrails.build_snapshot(intake, LIST_MODE)

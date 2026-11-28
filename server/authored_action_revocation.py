@@ -9,6 +9,7 @@ import json
 import math
 import re
 from threading import RLock
+from urllib.parse import quote, unquote, urljoin
 
 from integration_tool_service import ReadFailure, validate_action_catalog
 
@@ -25,11 +26,11 @@ _REPEATED_PATTERN = re.compile(rf"\^{_PATTERN_ATOM}+(?:[+*?]|\{{[0-9]{{1,2}}(?:,
 
 
 @cache
-def _pinned_validator_type():
+def _pinned_validator_type(base_validator):
     from attrs import evolve
-    from jsonschema import Draft202012Validator, validators
+    from jsonschema import validators
 
-    validator_type = validators.extend(Draft202012Validator)
+    validator_type = validators.extend(base_validator)
     # Local graph admission already verifies the dialect at every resource.
     # Retain this validator and its resolver when entering an explicit $schema.
     validator_type.evolve = evolve
@@ -95,19 +96,82 @@ def form_digest(form):
 
 
 _EMPTY_FORM = {"fields": [], "submit_label": "Submit"}
+_ASSERTED_FORMATS = ("date", "ipv4", "ipv6", "uuid")
 
 
-def _check_local_schema_refs(schema, registry):
+@dataclass(frozen=True)
+class _LocalFragmentResolver:
+    """Apply identical URI and pointer rules during preflight and validation."""
+
+    resolver: object
+
+    def in_subresource(self, resource):
+        return _LocalFragmentResolver(self.resolver.in_subresource(resource))
+
+    def lookup(self, reference):
+        from attrs import evolve
+
+        if not isinstance(reference, str) or not reference.startswith("#"):
+            raise ValueError("Action schema references must be local")
+        if re.search(r"%(?![0-9A-Fa-f]{2})", reference):
+            raise ValueError("Malformed action schema fragment escape")
+        fragment = unquote(reference[1:], errors="strict")
+        if fragment.startswith("/"):
+            if re.search(r"~(?![01])", fragment):
+                raise ValueError("Malformed action schema pointer escape")
+            # referencing decodes pointer bytes, but takes named anchors as-is.
+            fragment = quote(fragment, safe="/~")
+        result = self.resolver.lookup("#" + fragment)
+        return evolve(result, resolver=_LocalFragmentResolver(result.resolver))
+
+
+def _check_local_schema_refs(schema, registry, format_policy, base_validator, specification):
     """Preflight the pinned draft's schema graph without retrieving other resources."""
-    from jsonschema import Draft202012Validator
     from jsonschema.exceptions import SchemaError
     from referencing.exceptions import Unresolvable
-    from referencing.jsonschema import DRAFT202012
+    from referencing.jsonschema import DRAFT7
 
     remaining = 4096
     has_patterns = False
     active = set()
-    dialect = Draft202012Validator.META_SCHEMA["$id"]
+    dialect = base_validator.META_SCHEMA["$id"]
+    vocabularies = base_validator.META_SCHEMA.get("$vocabulary", {})
+
+    def children(node):
+        # Draft-07 allows property-name lists and schemas together in dependencies.
+        if specification is DRAFT7 and isinstance(node, dict) and "dependencies" in node:
+            other = node.copy()
+            dependencies = other.pop("dependencies")
+            yield from specification.subresources_of(other)
+            yield from (value for value in dependencies.values() if not isinstance(value, list))
+        else:
+            yield from specification.subresources_of(node)
+
+    # Index lexical declarations before lookup: registry crawling can silently
+    # choose one of two declarations. Following references in this pass would
+    # count legitimate repeated uses of the same declaration as collisions.
+    resource_uris = set()
+    anchors = set()
+    declarations_left = remaining
+
+    def index(resource, base, depth):
+        nonlocal declarations_left
+        declarations_left -= 1
+        if declarations_left < 0 or depth >= 64:
+            raise ValueError("Action schema resolution budget exceeded")
+        identifier = resource.id()
+        if depth == 0 or identifier is not None:
+            base = urljoin(base, identifier or "")
+            if base in resource_uris:
+                raise ValueError("Ambiguous local schema resource ID")
+            resource_uris.add(base)
+        for anchor in resource.anchors():
+            key = (base, anchor.name)
+            if key in anchors:
+                raise ValueError("Ambiguous local schema anchor")
+            anchors.add(key)
+        for child in children(resource.contents):
+            index(specification.create_resource(child), base, depth + 1)
 
     def visit(node, resolver):
         nonlocal remaining, has_patterns
@@ -122,6 +186,13 @@ def _check_local_schema_refs(schema, registry):
             raise ValueError("Cyclic action schema reference")
         if node.get("$schema", dialect) != dialect:
             raise ValueError("Unsupported action schema dialect")
+        if any(required and uri not in vocabularies
+               for uri, required in node.get("$vocabulary", {}).items()):
+            raise ValueError("Unsupported required action vocabulary")
+        if node.get("x-leaf-format-policy", format_policy) != format_policy:
+            raise ValueError("Conflicting action format policy")
+        if format_policy == "assertion" and "format" in node and node["format"] not in _ASSERTED_FORMATS:
+            raise ValueError("Unsupported asserted action format")
         if "$dynamicRef" in node or "$recursiveRef" in node:
             raise ValueError("Action schemas require static draft 2020-12 references")
         patterns = list(node.get("patternProperties", {}))
@@ -135,19 +206,20 @@ def _check_local_schema_refs(schema, registry):
         active.add(id(node))
         if "$ref" in node:
             ref = node["$ref"]
-            if not isinstance(ref, str) or not ref.startswith("#"):
-                raise ValueError("Action schema references must be local")
             try:
                 target = resolver.lookup(ref)
             except Unresolvable as exc:
                 raise ValueError("Unresolved action schema reference") from exc
             visit(target.contents, target.resolver)
-        for child in DRAFT202012.subresources_of(node):
-            visit(child, resolver.in_subresource(DRAFT202012.create_resource(child)))
+        for child in children(node):
+            visit(child, resolver.in_subresource(specification.create_resource(child)))
         active.remove(id(node))
 
-    visit(schema, registry.resolver_with_root(DRAFT202012.create_resource(schema)))
-    return has_patterns
+    root = specification.create_resource(schema)
+    index(root, "", 0)
+    resolver = _LocalFragmentResolver(registry.resolver_with_root(root))
+    visit(schema, resolver)
+    return has_patterns, resolver
 
 
 def _valid_value(field, value):
@@ -216,23 +288,37 @@ class AuthorizedLocalActions:
             # A structured local operation advertises the digest of its JSON
             # argument schema in its operation reference. The wire form holds
             # presentation hints for any scalar fields the host also displays.
-            from jsonschema import Draft202012Validator
+            from jsonschema import Draft7Validator, Draft202012Validator, FormatChecker
             from referencing import Registry
+
+            from referencing.jsonschema import DRAFT7, DRAFT202012
 
             encoded = _identity(argument_schema)
             if sha256(encoded.encode("utf-8")).hexdigest() != reference["operation_ref"]["digest"]:
                 raise ValueError("Argument schema differs from the pinned operation digest")
             schema = json.loads(encoded, parse_float=_exact_json_number, parse_constant=_exact_json_number)
+            base_validator, specification = Draft202012Validator, DRAFT202012
+            if isinstance(schema, dict) and schema.get("$schema") == Draft7Validator.META_SCHEMA["$id"]:
+                base_validator, specification = Draft7Validator, DRAFT7
+                # Draft-07 ignores $ref siblings and has no unevaluatedProperties.
+                if "$ref" in schema or schema.get("additionalProperties") is not False:
+                    raise ValueError("Structured draft-07 action arguments require a closed object schema")
             if not isinstance(schema, bool) and (
                 not isinstance(schema, dict) or schema.get("type") != "object"
                 or (schema.get("additionalProperties") is not False
                     and schema.get("unevaluatedProperties") is not False)
             ):
                 raise ValueError("Structured action arguments require a boolean or closed object schema")
-            Draft202012Validator.check_schema(schema)
+            base_validator.check_schema(schema)
             registry = Registry()
-            has_patterns = _check_local_schema_refs(schema, registry)
-            validator = _pinned_validator_type()(schema, registry=registry)
+            policy = schema.get("x-leaf-format-policy", "annotation") if isinstance(schema, dict) else "annotation"
+            if policy not in ("annotation", "assertion"):
+                raise ValueError("Unsupported action format policy")
+            has_patterns, resolver = _check_local_schema_refs(
+                schema, registry, policy, base_validator, specification)
+            checker = FormatChecker(formats=_ASSERTED_FORMATS) if policy == "assertion" else None
+            validator = _pinned_validator_type(base_validator)(
+                schema, registry=registry, _resolver=resolver, format_checker=checker)
         with self._lock:
             self._handlers[slot] = _Registration(
                 _identity(reference), form_digest(registered_form), registered_form["fields"],

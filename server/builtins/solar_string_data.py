@@ -20,6 +20,7 @@ from pathlib import Path
 from leaf_cloud_client import canonical_bytes
 import solar_artifacts
 import solar_rooftop_chain as chain
+import solar_string_edge_clearance as edge_clearance
 from solar_design_graph import GraphValidationError, _bounded_json
 from solar_sizing_client import units_resolved
 
@@ -28,6 +29,12 @@ MAX_REF = 128
 MAX_SELECTED = 10000
 FILENAME = "StringData.json"
 MEDIA_TYPE = "application/json"
+GAP_REPORTS = {
+    "continuity-json": ("max_panel_pitch_m", "consecutive-panel-centre-distance",
+                        "leaf.solar-string-continuity.v1", "StringContinuity.json"),
+    "edge-clearance-json": ("max_panel_edge_gap_m", "consecutive-panel-edge-clearance",
+                            "leaf.solar-string-edge-clearance.v1", "StringEdgeClearance.json"),
+}
 
 
 def _load_single_add():
@@ -77,15 +84,71 @@ def _design_export(graph):
                                          canonical_bytes(payload))
 
 
-def run(graph, params):
+def _gap_report(graph, selected, mode, maximum, source_intake):
+    """Audit consecutive saved panels in their declared string order."""
+    if sum(len(string["ordered_panel_refs"]) for string in selected) > 100_000:
+        raise GraphValidationError("STRING_EDIT_BOUNDS_EXCEEDED")
+    if mode == "edge-clearance-json":
+        refs = {ref for string in selected for ref in string["ordered_panel_refs"]}
+        positions = edge_clearance.panel_outlines(graph, refs, source_intake)
+        measure = edge_clearance.distance
+        scale = graph["project"]["units"]["meters_per_unit"]
+    else:
+        positions = {panel["id"]: panel["centre"] for panel in single.panel_views(graph)}
+        measure = math.dist
+        scale = 1
+    reports = []
+    total_gaps = 0
+    for string in selected:
+        refs = string["ordered_panel_refs"]
+        gaps = []
+        for index, (before, after) in enumerate(zip(refs, refs[1:]), 1):
+            try:
+                distance = measure(positions[before], positions[after]) * scale
+            except KeyError:
+                raise GraphValidationError("STRING_EDIT_MAPPING_FAILED") from None
+            if not math.isfinite(distance):
+                raise GraphValidationError("STRING_EDIT_BOUNDS_EXCEEDED")
+            if distance > maximum:
+                total_gaps += 1
+                if total_gaps > 2_048:
+                    raise GraphValidationError("STRING_EDIT_BOUNDS_EXCEEDED")
+                gaps.append({"before": before, "after": after, "distance_m": distance,
+                             "split_index": index})
+        splits = [0, *(gap["split_index"] for gap in gaps), len(refs)]
+        runs = [{"first": refs[a], "last": refs[b - 1], "panel_count": b - a}
+                for a, b in zip(splits, splits[1:]) if a < b]
+        reports.append({"string_ref": string["id"], "panel_count": len(refs),
+                        "gaps": gaps, "ordered_runs": runs})
+    threshold, rule, schema, filename = GAP_REPORTS[mode]
+    report = {"schema": schema, "rule": rule, threshold: maximum, "strings": reports}
+    summary = {"status": "written", "format": mode,
+               "strings": len(selected), "gap_count": total_gaps,
+               threshold: maximum}
+    return solar_artifacts.ArtifactOutput(summary, MEDIA_TYPE, filename,
+                                         canonical_bytes(report))
+
+
+def run(graph, params, *, source_intake=None):
     _bounded_json(params)
-    if (type(params) is not dict or not set(params) <= {"string_refs", "format"}
-            or type(params.get("format", "string-data")) is not str
-            or params.get("format", "string-data") not in ("string-data", "design-json")
-            or ("string_refs" in params and not _refs(params["string_refs"]))
-            or (params.get("format") == "design-json" and "string_refs" in params)):
+    if type(params) is not dict:
         raise GraphValidationError("INVALID_STRING_DATA_REQUEST")
-    if params.get("format") == "design-json":
+    mode = params.get("format", "string-data")
+    if (type(mode) is not str or mode not in ("string-data", "design-json", *GAP_REPORTS)
+            or ("string_refs" in params and not _refs(params["string_refs"]))
+            or (mode == "design-json" and "string_refs" in params)):
+        raise GraphValidationError("INVALID_STRING_DATA_REQUEST")
+    allowed = {"format", "string_refs"}
+    if mode in GAP_REPORTS:
+        threshold = GAP_REPORTS[mode][0]
+        maximum = params.get(threshold)
+        if (type(maximum) not in (int, float) or not math.isfinite(maximum) or maximum < 0
+                or (mode == "continuity-json" and maximum == 0)):
+            raise GraphValidationError("INVALID_STRING_DATA_REQUEST")
+        allowed.add(threshold)
+    if set(params) - allowed:
+        raise GraphValidationError("INVALID_STRING_DATA_REQUEST")
+    if mode == "design-json":
         return _design_export(graph)
     if not units_resolved(graph):
         raise GraphValidationError("UNRESOLVED_UNITS")
@@ -98,6 +161,8 @@ def run(graph, params):
         selected = list(graph["strings"])
         if len(selected) > MAX_SELECTED:
             raise GraphValidationError("STRING_EDIT_BOUNDS_EXCEEDED")
+    if mode in GAP_REPORTS:
+        return _gap_report(graph, selected, mode, maximum, source_intake)
     scale = graph["project"]["units"]["meters_per_unit"]
     tables = single.slot_tables(graph)
     # Ids only, in panel_views order: no view is built for a slot panel.

@@ -38,7 +38,7 @@ function deferred() {
 }
 async function drain() { for (let i = 0; i < 40; i += 1) await Promise.resolve() }
 const cleanups = []
-function setup({ isCurrent = () => true, signal, onOutcome = vi.fn() } = {}) {
+function setup({ isCurrent = () => true, signal, onOutcome = vi.fn(), onProgress = vi.fn() } = {}) {
   let snapshot = { binding: B, authorityKey }
   const listeners = new Set()
   const projectClient = {
@@ -47,7 +47,7 @@ function setup({ isCurrent = () => true, signal, onOutcome = vi.fn() } = {}) {
     getSnapshot: vi.fn(() => snapshot),
     subscribe: vi.fn((listener) => { listeners.add(listener); return () => listeners.delete(listener) }),
   }
-  const controller = createProjectSolarRunController({ projectClient, onOutcome })
+  const controller = createProjectSolarRunController({ projectClient, onOutcome, onProgress })
   cleanups.push(() => controller.dispose())
   const preparedIntent = Object.freeze({ binding: B, authorityKey, tool: T,
     params: Object.freeze({ drawing_id: D, expected_rev: 0 }), catalogDigest: digest, idempotencyKey: 'request-1' })
@@ -170,6 +170,40 @@ describe('bounded project Solar run controller', () => {
     await drain()
     expect(await run.settled()).toEqual(success)
     expect(run.projectClient.submitRun.mock.calls.map(([intent]) => intent)).toEqual([solve, commit])
+  })
+  it('opts only proposal job reads into split progress', async () => {
+    const fetchImpl = vi.fn(async (url) => http(job({
+      tool_name: String(url).includes('?') ? 'solar-solve-proposal' : T, status: 'running',
+    })))
+    const client = realClient(fetchImpl)
+    expect((await client.readJob(J, { tool: T })).ok).toBe(true)
+    expect((await client.readJob(J, { tool: 'solar-solve-proposal' })).ok).toBe(true)
+    expect(String(fetchImpl.mock.calls[0][0])).toMatch(new RegExp(`/api/jobs/${J}$`))
+    expect(String(fetchImpl.mock.calls[1][0])).toContain('?include_solve_progress=true')
+  })
+  it('reports only increasing valid progress for the bound running solve', async () => {
+    const onProgress = vi.fn()
+    const run = setup({ onProgress })
+    const solve = { ...run.preparedIntent, tool: 'solar-solve-proposal',
+      solveContext: { frame_ref: 'frame-1', expected_rev: 0, phase: 'initial' } }
+    for (const [completed, total] of [[0, 3], [1, 3], [1, 3], [2, 4], [2, 3], [1, 3], [3, 3]]) {
+      run.projectClient.readJob.mockResolvedValueOnce(readResponse(job({ tool_name: solve.tool,
+        status: 'running', solve_progress: { completed_pieces: completed, total_pieces: total } })))
+    }
+    expect(await run.controller.onProjectSubmit(solve, run.options)).toEqual(accepted)
+    await drain()
+    await vi.advanceTimersByTimeAsync(6 * PROJECT_SOLAR_RUN_POLL_MS)
+    expect(onProgress.mock.calls.map(([result]) => result.message)).toEqual([
+      'Solved 1 of 3 pieces.', 'Solved 2 of 3 pieces.', 'Solved 3 of 3 pieces.',
+    ])
+    expect(onProgress.mock.calls.every(([result, meta]) =>
+      result.jobId === J && result.state === 'pending' && meta.binding.input_version_id === V &&
+      meta.authorityKey === authorityKey)).toBe(true)
+    expect(run.onOutcome).not.toHaveBeenCalled()
+    run.change({ ...B, input_version_id: X })
+    await drain()
+    expect(onProgress.mock.calls.at(-1)[1].isCurrent()).toBe(false)
+    expect(run.onOutcome).not.toHaveBeenCalled()
   })
   it('W1C5 enforces the closed tool-matched extra-field rules before dispatch', async () => {
     const run = setup()

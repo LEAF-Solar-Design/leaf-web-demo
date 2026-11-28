@@ -263,4 +263,16 @@ describe("author_stage_status joined read capability", () => {
     expect(SPINE_SYSTEM_PROMPT).toContain("Do not call author_tool or request_publication");
     expect(SPINE_SYSTEM_PROMPT).toContain("Never ask the user to copy a bearer token");
   });
+
+  it("directs entitlement-blocked publication to the build card before stage status guidance", () => {
+    for (const phrase of ["entitlements.deploy", "entitlement_required", "built but not published", "Deploy to AutoCAD"]) {
+      expect(SPINE_SYSTEM_PROMPT).toContain(phrase);
+    }
+    const publication = SPINE_SYSTEM_PROMPT.indexOf("- After author_tool returns a staged change_set_id");
+    const entitlement = SPINE_SYSTEM_PROMPT.indexOf("- Before request_publication, read context packet entitlements.deploy");
+    const stageStatus = SPINE_SYSTEM_PROMPT.indexOf("- A queued or running/authoring stage");
+    expect(publication).toBeGreaterThanOrEqual(0);
+    expect(entitlement).toBeGreaterThan(publication);
+    expect(stageStatus).toBeGreaterThan(entitlement);
+  });
 });

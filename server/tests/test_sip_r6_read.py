@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -40,10 +41,10 @@ NEC = {
 CALC = "solar-nec-ampacity-correction"
 
 
-def setup(monkeypatch):
+def setup(monkeypatch, *, through=chain_cases.through_equipment):
     monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
     s = tools_cases.memory.__wrapped__(monkeypatch)
-    s.ctx = chain_cases.through_equipment(s)[-1][2]
+    s.ctx = through(s)[-1][2]
     s.tenant = deps.TenantContext(str(s.org), org_id=str(s.org), tier="hosted_pro", subject="reader")
     monkeypatch.setattr(deps, "find_tool", lambda name, tenant: solar_tools.trusted_record(name))
     monkeypatch.setattr(read.stored, "stored_job_entitlement_verdict", lambda org, kind: (None, None))
@@ -680,6 +681,42 @@ def test_project_assignment_report_uses_real_kernel_without_mutation(lane, monke
     assert lane.calls == calls_before
 
 
+@pytest.mark.parametrize("topology", ["U", "L2", "CB"])
+def test_project_assignment_report_reads_completed_saved_inputs(lane, monkeypatch, graph, topology):
+    import test_solar_tool_solar_assign_strings as assignment_cases
+
+    source = (assignment_cases.four_input_graph(graph) if topology == "U"
+              else assignment_cases.variant(graph, topology))
+    g = assignment_cases.call(source)["graph"]
+    lane.set_parent(tools_cases.embedded(g))
+    before = deepcopy((lane.versions, lane.blobs, lane.writes, lane.head))
+    monkeypatch.setattr(project.graph_store(), "publish_version", blocked)
+    monkeypatch.setattr(read.native, "_canonical_state", blocked)
+
+    tool = "solar-assignment-report"
+    params = {"expected_rev": g["rev"], "accept_excess_capacity": False}
+    result = run(lane, tool, params, version=lane.parent.version_id)["result"]
+    assert result["input_version_id"] == str(lane.parent.version_id)
+    assert result["drawing_changed"] is False
+    report = result["output"]
+    assert report["status"] == "complete"
+    assert report["commit_refusal_code"] == "NO_UNASSIGNED_STRINGS"
+    assert report["candidate_assignments"] == report["remaining_string_refs"] == []
+    assert report["counts"] == {"eligible": 0, "candidate_assigned": 0, "remaining": 0}
+    assignments = report["saved_state"]["assignments"]
+    assert report["saved_state"]["unassigned_string_refs"] == []
+    assert {row["string_ref"]: row["inverter_ref"] for row in assignments} == {
+        string["id"]: string["inverter_ref"] for string in g["strings"]}
+    assert len({(row["inverter_ref"], row["mppt_letter"], row["input_number"])
+                for row in assignments}) == len(g["strings"])
+    assert local._load_builtin(tool).input_readiness(g) == {"input_ready": True, "input_reason": None}
+    with pytest.raises(read.GraphValidationError, match="NO_UNASSIGNED_STRINGS"):
+        assignment_cases.call(g)
+    refused("STALE_GRAPH_REVISION", lambda: run(lane, tool, dict(params, expected_rev=g["rev"] + 1),
+                                               version=lane.parent.version_id))
+    assert (lane.versions, lane.blobs, lane.writes, lane.head) == before
+
+
 def test_project_assignment_report_catalog_has_synchronous_read_authority(catalog_lane, monkeypatch, graph):
     import entitlements
     s = catalog_lane
@@ -712,6 +749,11 @@ def test_project_assignment_report_catalog_has_synchronous_read_authority(catalo
     assert states["solar-assignment-report"]["runnable"] is False
     assert states["solar-settings"] == baseline
 
+    s.s.set_parent(tools_cases.embedded(assignment_cases.variant(graph, "A")))
+    response = s.client.get("/api/capabilities", params=query, headers=catalog_cases.headers(s))
+    state = catalog_cases.states(response)["solar-assignment-report"]
+    assert state["runnable"] is True and state["project_read"] is True
+
 
 def test_assignment_report_catalog_refuses_missing_version_metadata(lane, monkeypatch):
     from types import SimpleNamespace
@@ -729,3 +771,71 @@ def test_assignment_report_catalog_refuses_missing_version_metadata(lane, monkey
     assert state["runnable"] is False and state["input_ready"] is False
     assert state["input_reason"] == "invalid_drawing_context"
     assert state["refusal_reasons"] == ["invalid_drawing_context"]
+
+def test_sip_r6_string_continuity_read(lane):
+    params = {"format": "continuity-json", "max_panel_pitch_m": 0.001}
+    response = run(lane, "solar-string-data", params)["result"]
+    result = response["output"]
+    assert result["summary"]["max_panel_pitch_m"] == params["max_panel_pitch_m"]
+    assert result["summary"]["strings"] == 1
+    assert result["artifact"]["filename"] == "StringContinuity.json"
+    assert response["input_version_id"] == str(lane.head)
+    assert response["drawing_changed"] is False
+    assert response["graph_sha256"] == lane.ctx.graph_sha256
+
+
+def clearance_lane(monkeypatch, variant):
+    intake = tools_cases.panel_intake()
+    for index, panel in enumerate(intake["polylines"]):
+        points = panel["pts"]
+        if variant == "rotated":
+            panel["pts"] = [[-y, x + (23 if x > 100 * index else 0)] for x, y in points]
+        elif variant == "resized" and index < 2:
+            panel["pts"] = [[x + (-11.5 if x == 100 * index else 11.5), y] for x, y in points]
+        elif variant == "curved" and index == 0:
+            panel["bulges"] = [0.1, 0, 0, 0]
+    monkeypatch.setattr(tools_cases, "panel_intake", lambda: intake)
+
+    def through(s):
+        ctx = tools_cases.chain(s)[-1][2]
+        panels = sorted(ctx.graph["panels"], key=lambda panel: panel["provenance"]["source_handle"])
+        refs = [panel["id"] for panel in panels]
+        params = {"expected_rev": ctx.graph["rev"], "operation": "add-string", "ordered_panel_refs": refs}
+        return [tools_cases.commit(s, "solar-string-add", params, ctx)]
+
+    return setup(monkeypatch, through=through)
+
+
+@pytest.mark.parametrize(("variant", "expected_drawing_gaps"), [
+    ("separated", [23, 23]),
+    ("rotated", []),
+    ("resized", [11.5]),
+])
+def test_sip_r6_string_edge_clearance(monkeypatch, variant, expected_drawing_gaps):
+    s = clearance_lane(monkeypatch, variant)
+    scale = s.ctx.graph["project"]["units"]["meters_per_unit"]
+    params = {"format": "edge-clearance-json", "max_panel_edge_gap_m": 5 * scale}
+    response = run(s, "solar-string-data", params)["result"]
+    result = response["output"]
+    assert response["input_version_id"] == str(s.head)
+    assert response["drawing_changed"] is False
+    assert result["summary"]["gap_count"] == len(expected_drawing_gaps)
+    ref = result["artifact"]
+    assert ref["filename"] == "StringEdgeClearance.json"
+    _, content = read.artifacts.read_project_artifact(s.tenant, s.project, s.drawing, ref["artifact_id"])
+    report = json.loads(content)
+    assert report["schema"] == "leaf.solar-string-edge-clearance.v1"
+    string, = report["strings"]
+    assert [gap["distance_m"] for gap in string["gaps"]] == pytest.approx(
+        [gap * scale for gap in expected_drawing_gaps])
+    assert sum(piece["panel_count"] for piece in string["ordered_runs"]) == 3
+    center = output(s, "solar-string-data", {"format": "continuity-json", "max_panel_pitch_m": 5 * scale})
+    assert center["summary"]["gap_count"] == 2
+
+
+def test_sip_r6_string_edge_clearance_refuses_unverified_outline(monkeypatch):
+    s = clearance_lane(monkeypatch, "curved")
+    before = list(s.writes)
+    refused("STRING_EDGE_OUTLINE_UNAVAILABLE", lambda: run(s, "solar-string-data",
+        {"format": "edge-clearance-json", "max_panel_edge_gap_m": 0}))
+    assert s.writes == before

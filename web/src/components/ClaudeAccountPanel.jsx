@@ -8,15 +8,7 @@ import useRelativeNow from '../lib/useRelativeNow.js'
 import { isCompositionKey } from '../lib/keyComposition.js'
 import { humanizeError } from '../errorHumanize.js'
 
-export const SETUP_TOKEN_COMMAND = 'claude setup-token'
-const CLAUDE_CODE_INSTALL_URL = 'https://docs.anthropic.com/en/docs/claude-code/setup'
-const ANTHROPIC_CONSOLE_KEYS_URL = 'https://console.anthropic.com/settings/keys'
-
-function detectKind(token) {
-  if (/^sk-ant-api/i.test((token || '').trim())) return 'api_key'
-  if (/^sk-ant-oat/i.test((token || '').trim())) return 'oauth'
-  return null
-}
+const ANTHROPIC_CONSOLE_KEYS_URL = 'https://platform.claude.com/settings/keys'
 
 export default function ClaudeAccountPanel({
   mock,
@@ -29,23 +21,36 @@ export default function ClaudeAccountPanel({
   onToggle,
   onLink,
   onUnlink,
+  onRefresh,
 }) {
   const now = useRelativeNow()
   const [token, setToken] = useState('')
-  const [kind, setKind] = useState('oauth')
-  const [plan, setPlan] = useState(null)
   const [label, setLabel] = useState('')
   const [confirmRemove, setConfirmRemove] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
-  const [copied, setCopied] = useState(false)
+  const pending = useRef(false)
+  const panelLifetime = useRef(0)
+  const refreshOpen = useRef(open)
+  const replacement = useRef(null)
+  const successRef = useRef(null)
+  const formErrorRef = useRef(null)
+  const errorRef = useRef(null)
+  const [success, setSuccess] = useState(null)
   const [formError, setFormError] = useState(null)
-  const copyCommand = async () => {
-    try {
-      await navigator.clipboard.writeText(SETUP_TOKEN_COMMAND)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch { /* clipboard denied: the command stays visible to copy by hand */ }
-  }
+  useEffect(() => {
+    if (open && !refreshOpen.current && !mock && !signedOut) onRefresh?.()
+    refreshOpen.current = open
+  }, [open, mock, signedOut, onRefresh])
+  useEffect(() => {
+    if (!open || signedOut || mock) {
+      panelLifetime.current += 1
+      setToken('')
+      setFormError(null)
+      setSuccess(null)
+      replacement.current = null
+    }
+  }, [open, signedOut, mock])
+  useEffect(() => () => { panelLifetime.current += 1 }, [])
   const rootRef = useRef(null)
   const triggerRef = useRef(null)
   const dialogRef = useRef(null)
@@ -104,32 +109,70 @@ export default function ClaudeAccountPanel({
       setShowAdd(false)
     } else {
       setShowAdd(true)
-      setLabel((current) => current || 'My Claude account')
+      setLabel((current) => current || 'My API key')
     }
   }, [canManage, linked, accounts.length])
 
+  useEffect(() => { if (success && canManage && linked) successRef.current?.focus() }, [success, canManage, linked])
+  useEffect(() => {
+    if (!open || signedOut) return
+    if (formError) formErrorRef.current?.scrollIntoView?.({ block: 'nearest' })
+    if (error) errorRef.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [error, formError, open, signedOut, canManage, linked, showAdd])
+
   if (mock) return null
 
-  const changeToken = (value) => {
-    setToken(value)
-    const detected = detectKind(value)
-    if (detected) setKind(detected)
-  }
-
   const submit = async () => {
-    const value = token.trim()
-    if (!canManage || !value || busy) return
-    // A click with a missing choice explains itself instead of doing nothing (rehearsal issue 24).
-    if (kind === 'oauth' && !plan) { setFormError('Choose your Claude plan above (Pro, Max, Team or Enterprise).'); return }
-    if (kind === 'oauth' && !label.trim()) { setFormError('Enter an account label.'); return }
+    let value = token.trim()
+    if (value.startsWith('sk-ant-')) value = value.replace(/\s/g, '')
+    if (!canManage || signedOut || !value || busy || pending.current) return
+    setSuccess(null)
+    if (/sk-ant-/i.test(label)) { setLabel(''); setFormError('The key goes in the key field, not the label.'); return }
+    if (/sk-ant-oat/i.test(value)) {
+      setFormError('That is not an API key. Create an API key in Claude Console and paste that instead.'); return
+    }
+    if (/[=\s]/.test(value) || value.includes('#') || /^https?:\/\//i.test(value) || /^claude /i.test(value)) {
+      setFormError('That is not an API key. Copy the key from Claude Console (it starts with sk-ant-api).'); return
+    }
     setFormError(null)
-    const result = await onLink(value, kind, label.trim(), kind === 'oauth' ? plan : undefined)
-    if (result?.linked === true) setToken('')
+    pending.current = true
+    setToken('')
+    const oldId = replacement.current
+    const lifetime = panelLifetime.current
+    try {
+      const result = await onLink(value, 'api_key', label.trim(), undefined)
+      if (result?.linked === true && lifetime === panelLifetime.current) {
+        const added = (result.active_account_id && result.accounts?.find((account) => account.id === result.active_account_id))
+          || result.accounts?.find((account) => account.active)
+        const planName = added?.kind === 'api_key' ? 'API key'
+          : ['pro', 'max', 'team', 'enterprise'].includes(added?.plan) ? added.plan[0].toUpperCase() + added.plan.slice(1) : null
+        let finalResult = result
+        let oldListed = false
+        if (oldId && result.accounts?.some((account) => account.id === oldId && account.auth_refused_code)
+            && result.accounts.some((account) => account.id !== oldId && !account.auth_refused_code)) {
+          try {
+            const removed = await onUnlink(oldId)
+            oldListed = !removed || !Array.isArray(removed.accounts) || removed.accounts.some((account) => account.id === oldId)
+            if (!oldListed) finalResult = removed
+          } catch { oldListed = true }
+        }
+        const count = finalResult.accounts?.length || 1
+        const text = count === 1 ? added?.kind === 'api_key' ? '1 API key linked.' : `1 account linked${planName ? `, ${planName}` : ''}.`
+          : `${count} accounts linked.${planName ? ` Added: ${planName}.` : ''}`
+        if (lifetime === panelLifetime.current) setSuccess(`${text} Claude checks it on your first request.${oldListed ? ' The old entry is still listed. You can unlink it.' : ''}`)
+        replacement.current = null
+      }
+    } catch {
+      if (lifetime === panelLifetime.current) setFormError('The link could not be finished. Reload and check your Claude accounts before you retry.')
+    } finally { pending.current = false }
   }
 
+  const refusedCount = shownAccounts.filter((account) => account.auth_refused_code).length
   const stateLabel = signedOut ? 'sign in' : loading ? 'checking' : restricted ? 'access restricted'
-    : !known ? 'unavailable' : linked ? `${shownAccounts.length} linked` : 'not linked'
-  const isApiKey = kind === 'api_key'
+    : !known ? 'unavailable' : linked ? refusedCount === shownAccounts.length ? 'link again needed'
+      : refusedCount ? `${shownAccounts.length - refusedCount} of ${shownAccounts.length} linked` : `${shownAccounts.length} linked` : 'not linked'
+  const addFormShown = !signedOut && canManage && (!linked || showAdd)
+  const serverError = !signedOut && error && <div ref={errorRef} className="field-err" role="alert"><span className="dot red" />{humanizeError(error)}</div>
 
   return (
     <span className="claude-acct" ref={rootRef}>
@@ -142,7 +185,7 @@ export default function ClaudeAccountPanel({
         title="Manage linked Claude accounts and API keys"
       >
         <span className="ca-k">Claude accounts</span>
-        <span className={`ca-state ${linked ? 'on' : ''}`}>{stateLabel}</span>
+        <span className={`ca-state ${linked && refusedCount < shownAccounts.length ? 'on' : ''}`}>{stateLabel}</span>
       </button>
 
       {pop.shown && (
@@ -163,6 +206,7 @@ export default function ClaudeAccountPanel({
           )}
           {!signedOut && canManage && linked && (
             <div className="ca-linked">
+              {success && <p className="ca-success" role="status" tabIndex={-1} ref={successRef}>{success}</p>}
               <div className="ca-kindline">Automatic account selection</div>
               <p className="ca-copy">Each request uses an available account in your workspace. Accounts are never shared with other workspaces.</p>
               <div className="ca-account-list">
@@ -173,19 +217,33 @@ export default function ClaudeAccountPanel({
                       <div className="ca-account-main">
                         <b>{account.label}</b>
                         <span>{account.kind === 'api_key' ? 'API key' : `${account.plan ? `${account.plan} ` : ''}subscription`}</span>
-                        {account.active && <span className="ca-route">Recently used</span>}
+                        {account.auth_refused_code ? <span className="ca-refused">Needs a new link</span>
+                          : account.active && <span className="ca-route">Recently used</span>}
                       </div>
+                      {account.auth_refused_code && <p className="ca-refused-why">{account.auth_refused_code === 'authentication_failed'
+                        ? 'Claude no longer accepts this account. It expired or was revoked.'
+                        : account.auth_refused_code === 'oauth_org_not_allowed'
+                          ? "This account's organization does not allow it here."
+                          : account.auth_refused_code === 'billing_error'
+                            ? 'This API key has no credit. Add credit in Claude Console, then resend.' : 'Claude refused this account.'}</p>}
                       <div className="ca-account-meta">
                         {typeof account.usage_tokens === 'number' && <span>{account.usage_tokens.toLocaleString()} tokens used</span>}
                         {account.cooldown_until && <span title={absoluteWithZone(Date.parse(account.cooldown_until))}>cooldown until {relativeTime(Date.parse(account.cooldown_until), now)}</span>}
                         {account.linked_at && <span title={absoluteWithZone(Date.parse(account.linked_at))}>Linked {relativeTime(Date.parse(account.linked_at), now)}</span>}
                       </div>
                       <div className="ca-account-actions">
+                        {account.auth_refused_code && <button className="chip-neutral" aria-label={account.kind === 'api_key' ? `Link again: ${account.label}` : `Add an API key instead of ${account.label}`} disabled={busy} onClick={() => {
+                          replacement.current = account.kind === 'api_key' ? account.id : null
+                          setLabel(account.kind === 'api_key' ? account.label : 'My API key')
+                          setToken('')
+                          setFormError(null)
+                          setShowAdd(true)
+                        }}>{account.kind === 'api_key' ? 'Link again' : 'Add an API key'}</button>}
                         {confirmRemove !== key ? (
-                          <button className="chip-danger" onClick={() => setConfirmRemove(key)} disabled={busy}>Unlink</button>
+                          <button className="chip-danger" onClick={() => { setSuccess(null); setConfirmRemove(key) }} disabled={busy}>Unlink</button>
                         ) : (
                           <>
-                            <button className="chip-danger-confirm" onClick={() => onUnlink(account.id || undefined)} disabled={busy}>
+                            <button className="chip-danger-confirm" onClick={() => { setSuccess(null); onUnlink(account.id || undefined) }} disabled={busy}>
                               {busy ? 'Unlinking…' : 'Unlink'}
                             </button>
                             <button className="chip-neutral" onClick={() => setConfirmRemove(null)} disabled={busy}>Keep</button>
@@ -196,55 +254,29 @@ export default function ClaudeAccountPanel({
                   )
                 })}
               </div>
-              {!showAdd && <button className="btn ca-act" onClick={() => setShowAdd(true)} disabled={busy} title={busy ? 'Please wait for the account update.' : undefined}>Link another account</button>}
+              {!showAdd && <button className="btn ca-act" onClick={() => { replacement.current = null; setToken(''); setFormError(null); setLabel('My API key'); setShowAdd(true) }} disabled={busy} title={busy ? 'Please wait for the account update.' : undefined}>Add an API key</button>}
             </div>
           )}
 
-          {!signedOut && canManage && (!linked || showAdd) && (
+          {addFormShown && (
             <div className="ca-setup">
               {!linked && (
                 <p className="ca-copy ca-empty">
-                  No Claude account is linked yet. Paste an Anthropic API key, or link your Claude
-                  subscription with a token from <code>claude setup-token</code>.
+                  No Anthropic API key is linked yet.
                 </p>
               )}
-              <div className="ca-choice" role="radiogroup" aria-label="Credential type">
-                <button type="button" role="radio" aria-checked={!isApiKey} className={`ca-opt ${!isApiKey ? 'on' : ''}`} onClick={() => { setKind('oauth'); setFormError(null) }} disabled={busy}>Claude subscription</button>
-                <button type="button" role="radio" aria-checked={isApiKey} className={`ca-opt ${isApiKey ? 'on' : ''}`} onClick={() => { setKind('api_key'); setFormError(null) }} disabled={busy}>Anthropic API key</button>
-              </div>
-
-              {!isApiKey && (
-                <>
-                  <p className="ca-copy">Link your authorized <b>Claude Pro, Max, Team, or Enterprise</b> subscription.</p>
-                  <ol className="ca-steps" aria-label="How to get a Claude setup token">
-                    <li>Install <a href={CLAUDE_CODE_INSTALL_URL} target="_blank" rel="noreferrer">Claude Code</a> (free, one time).</li>
-                    <li>
-                      Open a terminal and run <code>{SETUP_TOKEN_COMMAND}</code>
-                      {' '}<button type="button" className="chip-neutral ca-copy-cmd" onClick={copyCommand}>{copied ? 'Copied' : 'Copy'}</button>
-                    </li>
-                    <li>Approve the request in the browser window that opens.</li>
-                    <li>Copy the token it prints (it starts with <code>sk-ant-oat01-</code>) and paste it below.</li>
-                  </ol>
-                  <div className="ca-choice" role="radiogroup" aria-label="Claude workspace plan">
-                    {['pro', 'max', 'team', 'enterprise'].map((value) => (
-                      <button key={value} type="button" role="radio" aria-checked={plan === value} className={`ca-opt ${plan === value ? 'on' : ''}`} onClick={() => { setPlan(value); setFormError(null) }} disabled={busy}>{value[0].toUpperCase() + value.slice(1)}</button>
-                    ))}
-                  </div>
-                  <label className="ca-field">
-                    <span className="ca-field-k">Account label</span>
-                    <input type="text" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Design team east" maxLength={120} disabled={busy} />
-                  </label>
-                </>
-              )}
-
-              {isApiKey && (
-                <p className="ca-copy">
-                  Create a key at <a href={ANTHROPIC_CONSOLE_KEYS_URL} target="_blank" rel="noreferrer">console.anthropic.com</a> under
-                  {' '}API keys, then paste it below. Usage is billed at API rates.
-                </p>
-              )}
+              <ol className="ca-steps" aria-label="Steps to create a key">
+                <li>Sign in to <a href={ANTHROPIC_CONSOLE_KEYS_URL} target="_blank" rel="noreferrer">Claude Console</a> and open API keys.</li>
+                <li>Create a key and copy it. Console shows it only once.</li>
+                <li>Paste it below.</li>
+              </ol>
+              <p className="ca-copy">Usage bills to your Anthropic account at API rates. Add credit in Claude Console if your account has none.</p>
+              <label className="ca-field">
+                <span className="ca-field-k">Key label</span>
+                <input type="text" value={label} onChange={(event) => setLabel(event.target.value)} maxLength={120} disabled={busy} />
+              </label>
               <label className={`ca-field${error ? ' field-invalid' : ''}`}>
-                <span className="ca-field-k">{isApiKey ? 'Anthropic API key' : 'Claude setup token'}</span>
+                <span className="ca-field-k">Anthropic API key</span>
                 <input
                   // A masked text field, not type=password: Chrome offers to save a password
                   // field's value, and this token must never land in a password manager (issue 25).
@@ -255,29 +287,32 @@ export default function ClaudeAccountPanel({
                   autoCorrect="off"
                   data-1p-ignore="true"
                   data-lpignore="true"
+                  data-bwignore="true"
+                  writingsuggestions="false"
                   data-form-type="other"
                   value={token}
-                  onChange={(event) => changeToken(event.target.value)}
+                  onChange={(event) => setToken(event.target.value)}
                   onKeyDown={(event) => {
                     if (isCompositionKey(event)) return
                     if (event.key === 'Enter') submit()
                   }}
-                  placeholder={isApiKey ? 'sk-ant-api03-…' : 'sk-ant-oat01-…'}
+                  placeholder="sk-ant-api03-…"
                   autoComplete="off"
                   spellCheck={false}
                   disabled={busy}
-                  aria-label={isApiKey ? 'Anthropic API key' : 'Claude token'}
+                  aria-label="Anthropic API key"
                 />
               </label>
               <button className="btn primary ca-act" onClick={submit} disabled={busy || !token.trim()} title={busy ? 'Please wait for the account update.' : !token.trim() ? 'Enter your credential to link an account.' : undefined}>
-                {busy ? 'Linking…' : isApiKey ? 'Link API key' : 'Link Claude account'}
+                {busy ? 'Linking…' : 'Link API key'}
               </button>
-              {formError && <p className="field-err ca-form-err" role="alert">{formError}</p>}
-              {linked && <button className="chip-neutral" onClick={() => setShowAdd(false)} disabled={busy}>Cancel</button>}
+              {formError && <p ref={formErrorRef} className="field-err ca-form-err" role="alert">{formError}</p>}
+              {serverError}
+              {linked && <button className="chip-neutral" onClick={() => { replacement.current = null; setToken(''); setFormError(null); setShowAdd(false) }} disabled={busy}>Cancel</button>}
               <p className="ca-note">Credentials are stored securely for your workspace and are hidden after linking.</p>
             </div>
           )}
-          {!signedOut && error && <div className="field-err" role="alert"><span className="dot red" />{humanizeError(error)}</div>}
+          {!addFormShown && serverError}
         </div>
       )}
     </span>

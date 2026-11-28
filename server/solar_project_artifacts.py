@@ -123,15 +123,25 @@ class ProjectArtifactSink:
         if write_loop.drawing_mutations_refusal() is not None:
             _fail("ARTIFACT_WRITES_DRAINED")
         backend = self.backend if self.backend is not None else _backend(self.binding["organization_id"])
+        blob_key = _key(self.binding, prepared.meta["content_sha256"], blob=True)
         try:
-            backend.put_if_absent_or_verify(
-                _key(self.binding, prepared.meta["content_sha256"], blob=True), prepared.content)
+            backend.put_if_absent_or_verify(blob_key, prepared.content)
             backend.put_if_absent_or_verify(
                 _key(self.binding, prepared.meta["artifact_id"]), prepared.meta_bytes)
         except standalone.store.ImmutableConflict:
             _fail("ARTIFACT_CONFLICT")
         except Exception:
             _fail("ARTIFACT_STORE_UNAVAILABLE")
+        # A metadata repair can reuse a blob shared by several artifact records.
+        # Verify its bytes after metadata publication before acknowledging success.
+        try:
+            published = backend.get(blob_key)
+        except KeyError:
+            _fail("ARTIFACT_CORRUPT")
+        except Exception:
+            _fail("ARTIFACT_STORE_UNAVAILABLE")
+        if type(published) is not bytes or published != prepared.content:
+            _fail("ARTIFACT_CORRUPT")
         return prepared.ref
 
 
@@ -175,6 +185,13 @@ def _source(tenant, project_id, drawing_id, meta):
 
 
 def read_project_artifact(tenant, project_id, drawing_id, artifact_id, *, current=False):
+    meta, content, _context = read_project_artifact_with_source(
+        tenant, project_id, drawing_id, artifact_id, current=current)
+    return meta, content
+
+
+def read_project_artifact_with_source(tenant, project_id, drawing_id, artifact_id, *, current=False):
+    """Return verified bytes and the exact saved graph bound to the artifact."""
     if not policy.project_runs_enabled():
         _fail("project_execution_disabled")
     if (not isinstance(project_id, UUID) or not isinstance(drawing_id, UUID)
@@ -206,4 +223,4 @@ def read_project_artifact(tenant, project_id, drawing_id, artifact_id, *, curren
             _fail("ARTIFACT_STALE")
         if meta["tool"] in _ELECTRICAL_EXPORTS:
             require_current_export(context.graph)
-    return meta, content
+    return meta, content, context

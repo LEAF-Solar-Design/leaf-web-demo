@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import OrderedDict
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -9,6 +11,7 @@ import re
 from pathlib import Path
 import shutil
 import tempfile
+from threading import Lock
 from uuid import UUID
 
 import tool_envelopes
@@ -16,6 +19,13 @@ import tool_envelopes
 PACKAGE_LIMIT = 8 * 1024 * 1024
 ENVELOPE_LIMIT = 64 * 1024
 REVOCATIONS_LIMIT = 1024 * 1024
+VERSION_SCAN_LIMIT = 2000  # bounded per-tool scan; names only, no file reads
+PLUGIN_CHECK_FILE = ".plugin-check.json"
+PLUGIN_CHECK_INTERVAL_S = 300
+PLUGIN_CHECK_LIMIT = 1024
+_PLUGIN_CHECK_CACHE_MAX = 10000
+_PLUGIN_CHECK_CACHE: OrderedDict[str, datetime] = OrderedDict()
+_PLUGIN_CHECK_LOCK = Lock()
 _READ_ERRORS = (OSError, ValueError, UnicodeError, RecursionError)
 
 
@@ -138,6 +148,44 @@ def list_versions(root: str | Path, tenant_id: str, *, include_revoked: bool = F
         return []
 
 
+def version_count(root, tenant_id, name, limit) -> int:
+    if not tool_envelopes.valid_identity(name, "0.0.0"):
+        raise TenantCatalogError("invalid_identity")
+    path = _tenant(root, tenant_id) / name
+    _safe_path(path)
+    return sum(1 for _ in tool_envelopes._directories(path, limit))
+
+
+def _semver(version: str) -> tuple[int, int, int]:
+    major, minor, patch = version.split(".")
+    return int(major), int(minor), int(patch)
+
+
+def list_latest_versions(root: str | Path, tenant_id: str) -> list[dict]:
+    """Newest non-revoked, verifiable version per tool; bounded scan, fails closed to []."""
+    try:
+        directory = _tenant(root, tenant_id)
+        _, revoked = _revocations(directory)
+        result = []
+        for name in tool_envelopes._directories(directory, 200):
+            if not tool_envelopes.valid_identity(name.name, "0.0.0"):
+                continue
+            _safe_path(name)
+            versions = [version.name for version in tool_envelopes._directories(name, VERSION_SCAN_LIMIT)
+                        if tool_envelopes.valid_identity(name.name, version.name)]
+            for version in sorted(versions, key=_semver, reverse=True):
+                entry = _entry(root, tenant_id, name.name, version, revoked)
+                if entry is not None:
+                    value = entry[0]
+                    result.append({"name": name.name, "version": version,
+                                   "package_digest": value["package"]["package_digest"],
+                                   "signed_at": value["signed_at"]})
+                    break
+        return sorted(result, key=lambda item: item["name"])
+    except (*_READ_ERRORS, TenantCatalogError):
+        return []
+
+
 def _visible_entry(root: str | Path, tenant_id: str, name: str, version: str):
     try:
         _version(root, tenant_id, name, version)
@@ -179,6 +227,66 @@ def _sync_directory(path: Path) -> None:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+
+def plugin_check_at(root: str | Path, tenant_id: str) -> str | None:
+    try:
+        value = _json(_read(_tenant(root, tenant_id) / PLUGIN_CHECK_FILE, PLUGIN_CHECK_LIMIT))
+        if not isinstance(value, dict):
+            return None
+        stamp = value["last_plugin_check_at"]
+        if not isinstance(stamp, str) or re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", stamp) is None:
+            return None
+        datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+        return stamp
+    except (*_READ_ERRORS, TenantCatalogError, KeyError, TypeError):
+        return None
+
+
+def _cache_plugin_check(tenant_id: str, stamp: datetime) -> None:
+    with _PLUGIN_CHECK_LOCK:
+        _PLUGIN_CHECK_CACHE[tenant_id] = stamp
+        _PLUGIN_CHECK_CACHE.move_to_end(tenant_id)
+        while len(_PLUGIN_CHECK_CACHE) > _PLUGIN_CHECK_CACHE_MAX:
+            _PLUGIN_CHECK_CACHE.popitem(last=False)
+
+
+def record_plugin_check(root: str | Path, tenant_id: str, now: datetime) -> bool:
+    temporary = None
+    try:
+        with _PLUGIN_CHECK_LOCK:
+            cached = _PLUGIN_CHECK_CACHE.get(tenant_id)
+        if cached is not None and 0 <= (now - cached).total_seconds() < PLUGIN_CHECK_INTERVAL_S:
+            return False
+        stored = plugin_check_at(root, tenant_id)
+        if stored is not None:
+            stamp = datetime.strptime(stored, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            if 0 <= (now - stamp).total_seconds() < PLUGIN_CHECK_INTERVAL_S:
+                _cache_plugin_check(tenant_id, stamp)
+                return False
+        directory = _tenant(root, tenant_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        _safe_path(directory)
+        destination = directory / PLUGIN_CHECK_FILE
+        _safe_path(destination)
+        temporary = Path(tempfile.mkdtemp(prefix=".plugin-check-", dir=directory))
+        source = temporary / PLUGIN_CHECK_FILE
+        stamp = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _write(source, json.dumps({"last_plugin_check_at": stamp}).encode("utf-8"))
+        _safe_path(destination)
+        os.replace(source, destination)
+        _sync_directory(directory)
+        _cache_plugin_check(tenant_id, now)
+        return True
+    except (*_READ_ERRORS, TenantCatalogError, KeyError, TypeError):
+        return False
+    finally:
+        if temporary is not None:
+            try:
+                shutil.rmtree(temporary)
+            except _READ_ERRORS:
+                pass
 
 
 def write_version(root: str | Path, tenant_id: str, name: str, version: str,

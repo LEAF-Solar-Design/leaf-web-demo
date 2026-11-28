@@ -5,7 +5,8 @@ import { act, cleanup, renderHook } from '@testing-library/react'
 import * as bridgeModule from './createProjectSolarRunController.js'
 import { useAppProjectSolarRuntime } from './useAppProjectSolarRuntime.js'
 import { projectSolarAppReason } from './solarProjectAppModel.js'
-import { PROJECT_SOLAR_RUN_REASONS } from './solarProjectCompletion.js'
+import { PROJECT_SOLAR_RUN_REASONS, readProjectSolarCompletion } from './solarProjectCompletion.js'
+import { humanizeError } from '../errorHumanize.js'
 import { projectSizingConductorFeedback } from './SolarSizingForm.jsx'
 import { SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
 import { getDrawingIntake } from '../api.js'
@@ -123,9 +124,91 @@ it('S03 suppresses late durable proposal recovery after the drawing changes', as
   h.unmount()
 })
 
+it.each(['submitted', 'queued', 'running'])('reconnects to a %s Solve job without submitting again', async (status) => {
+  const h = await setup({ toolName: 'solar-solve-proposal' })
+  const completion = deferred()
+  h.client.observeJob = vi.fn(() => completion.promise)
+  h.ws.change({ workspace: { ...workspace(), jobs: [savedJobIndex({ status })] } })
+  await act(async () => { expect(h.result.current.onOpenTool(h.tool)).toBe(true); await drain() })
+  expect(h.client.observeJob).toHaveBeenCalledExactlyOnceWith(J,
+    expect.objectContaining({ tool: 'solar-solve-proposal' }))
+  expect(h.result.current.busy).toBe(true)
+  await act(async () => { completion.resolve(response(savedProposal())); await drain() })
+  expect(h.result.current.projectOutcome?.outcome).toMatchObject({ state: 'proposal', jobId: J })
+  expect(h.result.current.busy).toBe(false)
+  expect(h.client.submitRun).not.toHaveBeenCalled()
+  h.unmount()
+})
+
+it('shows the existing failure feedback if a reconnected Solve job fails', async () => {
+  const h = await setup({ toolName: 'solar-solve-proposal' })
+  const failed = savedProposal({ status: 'failed', result: null,
+    error: { error_code: 'INVALID_FINAL_GRID_ORDER', retryable: false } })
+  h.client.observeJob = vi.fn(async () => response(failed))
+  h.ws.change({ workspace: { ...workspace(), jobs: [savedJobIndex({ status: 'running' })] } })
+  await act(async () => { h.result.current.onOpenTool(h.tool); await drain() })
+  const outcome = readProjectSolarCompletion({ job: failed, binding: B, jobId: J, tool: 'solar-solve-proposal' })
+  expect(outcome.state).toBe('failed')
+  expect(h.result.current.notice).toBe(humanizeError(outcome.message))
+  expect(h.result.current.projectOutcome).toBeNull()
+  expect(h.result.current.busy).toBe(false)
+  expect(h.client.submitRun).not.toHaveBeenCalled()
+  h.unmount()
+})
+
+it('aborts cold Solve observation when the drawing changes', async () => {
+  const h = await setup({ toolName: 'solar-solve-proposal' })
+  const completion = deferred()
+  h.client.observeJob = vi.fn(() => completion.promise)
+  h.ws.change({ workspace: { ...workspace(), jobs: [savedJobIndex({ status: 'running' })] } })
+  await act(async () => { h.result.current.onOpenTool(h.tool); await drain() })
+  const signal = h.client.observeJob.mock.calls[0][1].signal
+  await h.install(X)
+  expect(signal.aborted).toBe(true)
+  await act(async () => { completion.resolve(response(savedProposal())); await drain() })
+  expect(h.result.current.projectOutcome).toBeNull()
+  expect(h.client.submitRun).not.toHaveBeenCalled()
+  h.unmount()
+})
+
+it('bounds the cold Solve observation and reports an unknown outcome', async () => {
+  vi.useFakeTimers()
+  try {
+    const h = await setup({ toolName: 'solar-solve-proposal' })
+    h.client.observeJob = vi.fn((_jobId, { signal }) => new Promise(resolve => {
+      signal.addEventListener('abort', () => resolve(local('SIP_R7_ABORTED')), { once: true })
+    }))
+    h.ws.change({ workspace: { ...workspace(), jobs: [savedJobIndex({ status: 'running' })] } })
+    await act(async () => { h.result.current.onOpenTool(h.tool); await drain() })
+    expect(h.result.current.busy).toBe(true)
+    await act(async () => { await vi.advanceTimersByTimeAsync(bridgeModule.PROJECT_SOLAR_RUN_BUDGET_MS) })
+    expect(h.result.current.busy).toBe(false)
+    expect(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+    expect(h.client.submitRun).not.toHaveBeenCalled()
+    h.unmount()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('ignores the observed proposal if a newer solve appears in the workspace', async () => {
+  const h = await setup({ toolName: 'solar-commit-solve' })
+  const completion = deferred()
+  h.client.observeJob = vi.fn(() => completion.promise)
+  const running = savedJobIndex({ status: 'running' })
+  h.ws.change({ workspace: { ...workspace(), jobs: [running] } })
+  await act(async () => { h.result.current.onOpenTool(h.tool); await drain() })
+  const newer = savedJobIndex({ job_id: X, status: 'running', created_at: '2026-11-15T02:00:00Z' })
+  h.ws.change({ workspace: { ...workspace(), jobs: [running, newer] } })
+  await act(async () => { completion.resolve(response(savedProposal())); await drain() })
+  expect(h.result.current.projectOutcome).toBeNull()
+  expect(h.result.current.busy).toBe(false)
+  expect(h.client.submitRun).not.toHaveBeenCalled()
+  h.unmount()
+})
+
 it('S03 does not resurrect an older proposal behind a newer solve or commit', async () => {
-  for (const newer of [savedJobIndex({ job_id: X, status: 'running' }),
-    savedJobIndex({ job_id: X, status: 'failed' }),
+  for (const newer of [savedJobIndex({ job_id: X, status: 'failed' }),
     savedJobIndex({ job_id: X, tool_name: 'solar-commit-solve', output_version_id: W })]) {
     const h = await setup({ toolName: 'solar-commit-solve' })
     h.client.readJob.mockResolvedValue(response(savedProposal()))

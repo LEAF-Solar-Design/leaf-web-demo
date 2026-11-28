@@ -161,8 +161,8 @@ function ProjectReadResult({ data, solarBinding, authorityKey, projectClient, ca
   } catch { unavailable = true }
   const refusal = state.mode === 'refused' ? state.reason : unavailable ? 'SIP_R12_CLIENT_UNAVAILABLE' : null
 
-  const startDownload = async () => {
-    if (refusal || operation.current || state.view.artifact?.state !== 'ready') return
+  const startDownload = async (artifact) => {
+    if (refusal || operation.current || artifact?.state !== 'ready') return
     const controller = new AbortController()
     const active = { controller, token, deadline: Date.now() + SOLAR_PROJECT_ARTIFACT_TIMEOUT_MS }
     operation.current = active
@@ -195,11 +195,18 @@ function ProjectReadResult({ data, solarBinding, authorityKey, projectClient, ca
       if (!current()) { stale(); return }
       unsubscribe = projectClient.subscribe(() => { if (!scopeCurrent()) stale() })
       if (!current()) { stale(); return }
-      setDownloadState({ phase: 'downloading', outcome: null, token })
-      const wrapper = createSolarProjectArtifactClient({ projectClient })
-      const outcome = await wrapper.downloadArtifact({ binding: state.binding, authorityKey,
-        ref: state.view.artifact.ref, inputIntakeSha256: state.inputIntakeSha256, graphSha256: state.graphSha256,
-        current: projectCurrent, signal: controller.signal, isCurrent: scopeCurrent })
+      const reportClient = artifact.sourceBinding ? projectClient.comparisonReportClient?.(artifact.sourceBinding) : projectClient
+      if (!reportClient) {
+        setDownloadState({ phase: 'refused', token,
+          outcome: { ok: false, status: null, reason: 'SIP_R12_CLIENT_UNAVAILABLE', envelope: null } })
+        return
+      }
+      setDownloadState({ phase: 'downloading', reportSide: artifact.side, outcome: null, token })
+      const wrapper = createSolarProjectArtifactClient({ projectClient: reportClient })
+      const outcome = await wrapper.downloadArtifact({ binding: artifact.sourceBinding ?? state.binding, authorityKey,
+        ref: artifact.ref, inputIntakeSha256: artifact.inputIntakeSha256 ?? state.inputIntakeSha256,
+        graphSha256: artifact.graphSha256 ?? state.graphSha256,
+        current: artifact.sourceBinding ? false : projectCurrent, signal: controller.signal, isCurrent: scopeCurrent })
       if (!scopeCurrent()) return
       if (Date.now() >= active.deadline) { timeout(); return }
       if (!outcome.ok) { setDownloadState({ phase: 'refused', outcome, token }); return }
@@ -245,12 +252,19 @@ function ProjectReadResult({ data, solarBinding, authorityKey, projectClient, ca
       {section.tables.map((table) => <ReadTable key={table.key} table={table} />)}
     </section>)}
     {view.artifact?.state === 'unverified' && <p className="dim" data-testid="solar-read-download-status">{projectReadReason('SIP_R12_ARTIFACT_REF_INVALID')}</p>}
-    {view.artifact?.state === 'ready' && <>
-      <button type="button" className="btn ghost" data-testid="solar-read-download" disabled={running} onClick={startDownload}>
+    {view.artifact?.state === 'ready' &&
+      <button type="button" className="btn ghost" data-testid="solar-read-download" disabled={running} onClick={() => startDownload(view.artifact)}>
         {running ? `Downloading ${view.artifact.filename}` : `Download ${view.artifact.filename} (${view.artifact.sizeText})`}
-      </button>
-      {message && <p role="status" data-testid="solar-read-download-status">{message}</p>}
-    </>}
+      </button>}
+    {view.comparisonReports && <section aria-label="Saved tracking reports">
+      <h4>Saved tracking reports</h4>
+      {view.comparisonReports.map((report) => report.state === 'ready'
+        ? <button key={report.side} type="button" className="btn ghost" disabled={running} onClick={() => startDownload(report)}>
+          {running && visible.reportSide === report.side ? `Downloading ${report.side} report` : `Download ${report.side} report (${report.sizeText})`}
+        </button>
+        : <p key={report.side} className="dim">{report.label} report is unavailable.</p>)}
+    </section>}
+    {message && <p role="status" data-testid="solar-read-download-status">{message}</p>}
     {view.details.length > 0 && <details className="solar-read-details"><summary>Read details</summary>
       <table className="kv"><tbody>{view.details.map(({ label, text }) => <tr key={label}><th scope="row">{label}</th><td>{text}</td></tr>)}</tbody></table>
     </details>}

@@ -4,6 +4,11 @@ import './drawingCameraControls.css'
 const DRAWING_CAMERA_REASONS = Object.freeze({
   viewport: 'Pan is unavailable until the drawing viewer has a visible viewport.',
 })
+const ROLLS = [
+  ['Rotate left', 'counterclockwise', 'Drawing rotated 90 degrees counterclockwise'],
+  ['Rotate right', 'clockwise', 'Drawing rotated 90 degrees clockwise'],
+  ['Reset rotation', 'reset', 'Drawing rotation reset'],
+]
 const DIRECTIONS = [['North', 0, 1], ['South', 0, -1], ['East', 1, 0], ['West', -1, 0]]
 function usable(snapshot) {
   const p = snapshot?.pose, b = snapshot?.viewport
@@ -17,6 +22,7 @@ export default function DrawingCameraControls({ viewerRef, announce }) {
   const subscription = useRef(null)
   const camera = useRef(null)
   const [ready, setReady] = useState(false)
+  const [canRoll, setCanRoll] = useState(false)
   const reasonId = useId()
   // App rerenders after delayed Viewer attachment. Snapshots update readiness,
   // but only a different imperative handle replaces the subscription.
@@ -26,12 +32,14 @@ export default function DrawingCameraControls({ viewerRef, announce }) {
     subscription.current?.off?.()
     camera.current = null
     setReady(false)
+    setCanRoll(false)
     const owner = { api, off: null }
     subscription.current = owner
     owner.off = api?.subscribeCamera?.((snapshot) => {
       if (subscription.current !== owner) return
       camera.current = usable(snapshot) ? snapshot : null
       setReady(!!camera.current && typeof api.setView === 'function')
+      setCanRoll(!!camera.current && snapshot.canRoll === true && typeof api.rollDrawing === 'function')
     })
   })
   useEffect(() => () => {
@@ -56,15 +64,29 @@ export default function DrawingCameraControls({ viewerRef, announce }) {
     if (camera.current === snapshot) camera.current = { ...snapshot, pose: { ...pose, target: [center.x, center.y, pose.target[2]] } }
     announce?.(`View centre ${coordinate(center.x)}, ${coordinate(center.y)} drawing units`)
   }
+  const roll = (direction, message) => {
+    const api = subscription.current?.api
+    if (api !== viewerRef?.current || camera.current?.canRoll !== true) return
+    if (api?.rollDrawing?.(direction) === true) announce?.(message)
+  }
   return (
-    <div className="drawing-camera-controls" role="group" aria-label="Pan drawing">
-      <div className="drawing-camera-directions">
-        {DIRECTIONS.map(([name, dx, dy]) => (
-          <button key={name} type="button" aria-disabled={!ready || undefined}
-            aria-describedby={!ready ? reasonId : undefined} onClick={() => pan(dx, dy)}>{name}</button>
-        ))}
+    <div className="drawing-camera-controls">
+      <div role="group" aria-label="Pan drawing">
+        <div className="drawing-camera-directions">
+          {DIRECTIONS.map(([name, dx, dy]) => (
+            <button key={name} type="button" aria-disabled={!ready || undefined}
+              aria-describedby={!ready ? reasonId : undefined} onClick={() => pan(dx, dy)}>{name}</button>
+          ))}
+        </div>
+        {!ready && <p id={reasonId}>{DRAWING_CAMERA_REASONS.viewport}</p>}
       </div>
-      {!ready && <p id={reasonId}>{DRAWING_CAMERA_REASONS.viewport}</p>}
+      {canRoll && (
+        <div className="drawing-camera-directions" role="group" aria-label="Rotate drawing">
+          {ROLLS.map(([name, direction, message]) => (
+            <button key={direction} type="button" onClick={() => roll(direction, message)}>{name}</button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

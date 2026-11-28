@@ -483,6 +483,18 @@ function previewList(value, limit) {
   return copy
 }
 
+function manualHomerunLeads(tool, status, error) {
+  if (tool !== 'solar-homeruns' || status !== 409
+      || previewField(error, 'reason_code') !== 'JOINT_ROUTING_INFEASIBLE') return null
+  const value = previewField(error, 'affected_leads')
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64) return null
+  const leads = previewList(value, 64)
+  return leads.every((lead) => {
+    if (typeof lead !== 'string' || lead.length > 50 || lead[36] !== '/') return false
+    return validUuid(lead.slice(0, 36)) && ['start homerun', 'end homerun'].includes(lead.slice(37))
+  }) && new Set(leads).size === leads.length ? leads : null
+}
+
 export function exactProjectSolarGraphPreview(input) {
   try {
     const { tool, catalogDigest, outcome } = input
@@ -510,6 +522,7 @@ export function exactProjectSolarGraphPreview(input) {
     }
     if (!rows.length) return fail()
     let accepted = true
+    let affectedLeads = null
     const codes = new Set()
     for (const row of rows) {
       const view = previewField(row, 'availability')
@@ -523,6 +536,10 @@ export function exactProjectSolarGraphPreview(input) {
         && listed !== null && listed.length === 0
       if (!ready) accepted = false
       const admissionCode = boundedCode(previewField(error, 'reason_code'))
+      if (rows.length === 1 && previewField(row, 'catalog_digest') === catalogDigest
+          && previewField(view, 'admission_checked') === true && previewField(view, 'runnable') === false) {
+        affectedLeads = manualHomerunLeads(tool, previewField(admission, 'status_code'), error)
+      }
       if (admissionCode) codes.add(admissionCode)
       else if (listed) {
         for (const value of listed) {
@@ -552,7 +569,8 @@ export function exactProjectSolarGraphPreview(input) {
       const code = boundedCode(previewField(outcome, 'reason'))
       if (code) codes.add(code)
     }
-    return fail(codes.size === 1 ? [...codes][0] : null)
+    const refusal = fail(codes.size === 1 ? [...codes][0] : null)
+    return affectedLeads ? { ...refusal, affectedLeads } : refusal
   } catch { return { accepted: false, reasonCode: null } }
 }
 
@@ -574,7 +592,7 @@ function feedbackSubmission(value, depth = 0) {
       ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new TypeError('Invalid submission')
   const copy = {}
   for (const key of ['ok', 'status', 'status_code', 'state', 'reason', 'reason_code', 'reasonCode', 'job_id', 'jobId',
-    'output_version_id', 'outputVersionId', 'result', 'job', 'data', 'envelope', 'error']) {
+    'output_version_id', 'outputVersionId', 'result', 'job', 'data', 'envelope', 'error', 'affected_leads']) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key)
     if (!descriptor) continue
     if (!Object.hasOwn(descriptor, 'value')) throw new TypeError('Invalid submission field')
@@ -616,7 +634,10 @@ export function projectSolarGraphFeedback(input) {
           return result('outcome_unknown', lower === 'sip_r13b_outcome_unknown' ? code : null)
         }
         if ((submission.status >= 400 && submission.status < 500) || (submission.status == null && code)) {
-          return result('refused', code)
+          const feedback = result('refused', code)
+          const leads = submission.reason == null || submission.reason === code
+            ? manualHomerunLeads(tool, submission.status, submission.envelope?.error) : null
+          return leads ? { ...feedback, text: `Route these homerun leads manually. ${leads.join(', ')}` } : feedback
         }
       }
       return result('outcome_unknown')

@@ -47,13 +47,14 @@ and saved assignment rows sort by string ID. Feeders are bounded by the validato
 the kernel's MAX_SCHEDULE_ROWS. Pure: no I/O, no clock, no network; inputs never mutated.
 """
 import json
+import math
 import re
 
 import solar_artifacts
 import solar_electrical_state_bridge as bridge
 import solar_sizing_client
 from solar_design_graph import GraphValidationError, _bounded_json
-from solar_solve_results import require_current_export
+from solar_solve_results import _slot_tables, require_current_export
 from solar_sizing_client import units_resolved
 
 kernel = bridge._load_sibling("solar_inverter_outputs")
@@ -126,6 +127,24 @@ def label_mismatches(graph):
 
 def schedule_state(graph, source):
     """The bridge's state plus panel counts, homerun and feeder cable rows (see the module docstring)."""
+    state, _ = _schedule_inputs(graph, source)
+    return state
+
+
+def _panel_power_watts(graph):
+    rated_frames = {frame["id"]: frame["module_power_watts"]
+                    for frame in graph["frames"] if frame["module_power_watts"] > 0}
+    if not rated_frames:
+        return {}
+    powers = {panel["id"]: rated_frames[panel["frame_ref"]]
+              for panel in graph["panels"] if panel["frame_ref"] in rated_frames}
+    for frame_id, slots in _slot_tables(graph).items():
+        if frame_id in rated_frames:
+            powers.update(dict.fromkeys(slots.ids, rated_frames[frame_id]))
+    return powers
+
+
+def _schedule_inputs(graph, source):
     try:
         state, binding = bridge.state_from_graph(graph)
     except bridge.ElectricalBridgeError as error:
@@ -143,11 +162,16 @@ def schedule_state(graph, source):
     handles = {bound["id"]: handle for handle, bound in binding["strings"].items()}
     numbers = {inverter["id"]: inverter["number"] for inverter in graph["inverters"]}
     circuits = {}
+    string_power_watts = {}
+    panel_power_watts = _panel_power_watts(graph) if source == "topology" else {}
     for row in state["rows"]["string-assignment"]:
         string = strings[binding["strings"][row["string"]]["id"]]
         row["_detail"]["panel_count"] = str(string["module_count"])
         if source == "labels":
             row["_detail"]["circuit"] = string["circuit_tag"]
+        panels = string["ordered_panel_refs"]
+        if string["inverter_ref"] is not None and panels and all(ref in panel_power_watts for ref in panels):
+            string_power_watts[row["string"]] = math.fsum(panel_power_watts[ref] for ref in panels)
         circuits[row["string"]] = row["_detail"]["circuit"]
     cables = []
     for k, route in enumerate(graph["routes"], 1):
@@ -175,7 +199,7 @@ def schedule_state(graph, source):
                        "_pair": f"cable:schedules-{k}"})
     state["rows"]["cable"] = cables
     try:
-        return st.validate_state(state)
+        return st.validate_state(state), string_power_watts
     except (st.InverterStateError, ValueError):
         raise GraphValidationError("SCHEDULES_MAPPING_FAILED") from None
 
@@ -232,9 +256,10 @@ def run(graph, params):
     if any(inverter["is_solaredge"] for inverter in graph["inverters"]):
         return _saved_string_schedule(graph, source, record)
     sizer = _sizer(graph)
-    state = schedule_state(graph, source)
+    state, string_power_watts = _schedule_inputs(graph, source)
     host = {"UseL2Collectors": graph["settings"]["use_l2_collectors"], "UseOptimizers": False,
             "InverterCatalogRecord": record, "ModuleCatalogRecord": None, "StringSizerStandard": sizer,
+            "StringPowerWattsByHandle": string_power_watts,
             "SessionCableIndexHasFeeders": any(row["cable_kind"] == FEEDER_KIND for row in state["rows"]["cable"])}
     try:
         records = kernel.string_records(state, host)

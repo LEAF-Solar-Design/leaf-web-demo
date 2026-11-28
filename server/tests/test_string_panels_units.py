@@ -8,6 +8,7 @@ import itertools
 import json
 import math
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -110,6 +111,42 @@ def intake():
 @pytest.fixture(scope="module")
 def baseline(intake):
     return run(intake, {})
+
+
+@pytest.mark.parametrize("minimum,maximum", [(12, 14), (11, 14), (10, 13)])
+def test_constrained_stringing_covers_full_rooftop(intake, minimum, maximum):
+    from statistics import median
+    from solar_string_partition import DEFAULT_STATE_BUDGET
+
+    panels = [panel for panel in intake["polylines"]
+              if panel.get("layer") == "Panels" and panel.get("closed") and panel.get("pts")]
+    centres = [string_panels._centroid(panel) for panel in panels]
+    rounded = [tuple(round(value, 3) for value in centre) for centre in centres]
+    expected = Counter(rounded)
+    banks = string_panels._cluster_banks(centres, string_panels.DEFAULTS["cluster_radius_factor"])
+    bank_for_point, max_step = {}, {}
+    for bank_id, bank in enumerate(banks):
+        sides = []
+        for index in bank:
+            bank_for_point[rounded[index]] = bank_id
+            points = panels[index]["pts"]
+            sides.append(max(math.dist(left[:2], right[:2])
+                             for left, right in zip(points, points[1:] + points[:1])))
+        max_step[bank_id] = 1.5 * median(sides)
+    result, _ = run(intake, {"min_modules_per_string": minimum,
+                             "max_modules_per_string": maximum})
+    assert result["planning"]["status"] == "complete"
+    assert result["planning"]["searched_states"] <= DEFAULT_STATE_BUDGET == 50_000
+    assert sum(expected.values()) == len(expected) == 2345
+    assert Counter(tuple(point) for string in result["strings"] for point in string["pts"]) == expected
+    for string in result["strings"]:
+        assert minimum <= string["modules"] == len(string["pts"]) <= maximum
+        path = [tuple(point) for point in string["pts"]]
+        bank_id = bank_for_point[path[0]]
+        assert all(bank_for_point[point] == bank_id for point in path)
+        # Allow for coordinate rounding in the output.
+        assert all(math.dist(left, right) <= max_step[bank_id] + 0.002
+                   for left, right in zip(path, path[1:]))
 
 
 def test_string_panels_units_inch_continuity_result(intake, baseline):
@@ -326,6 +363,28 @@ def test_string_panels_continuity_actual_demo_rooftop(intake):
     # Independent dimensional oracle from the repo demo's 77-inch module edge.
     assert all(math.dist(a, b) <= 1.5 * 77 + 0.002 for string in result["strings"]
                for a, b in zip(string["pts"], string["pts"][1:]))
+
+
+@pytest.mark.parametrize("faces,factor,params", [
+    ([(0, 0, (0, 80)), (120, 0, (0, 80))], 1, {}),
+    ([(240, 0.25, (0, 80)), (240, -0.25, (0, 80))], 1,
+     {"min_modules_per_string": 2, "max_modules_per_string": 2}),
+    ([(0, 0.12, (0, 80)), (200, 0.12, (20, 100))], 25.4,
+     {"meters_per_unit": 0.001}),
+])
+def test_string_panels_keeps_overlapping_roof_faces_separate(faces, factor, params):
+    panels = []
+    for elevation, slope, centres in faces:
+        for centre in centres:
+            panel = rect(centre, 77, 38.5)
+            panel["pts"] = [[x * factor, y * factor, round(elevation + slope * x, 3) * factor]
+                            for x, y in panel["pts"]]
+            panels.append(panel)
+    result, _ = run({"polylines": panels[::-1]}, params)
+    assert result["stats"]["bank_count"] == 2
+    assert sorted(tuple(sorted(round(x / factor, 3) for x, _ in string["pts"]))
+                  for string in result["strings"]) == sorted(centres for _, _, centres in faces)
+    assert [string["length_ft"] for string in result["strings"]] == [6.7, 6.7]
 
 
 @pytest.mark.parametrize("gap,modules", [(115.5, [2]), (115.501, [1, 1])])

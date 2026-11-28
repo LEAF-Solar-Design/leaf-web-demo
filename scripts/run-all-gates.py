@@ -230,8 +230,8 @@ class Result:
     vitest_selection: dict = field(default_factory=dict)
 
 
-def _py_pytest(target: str) -> List[str]:
-    return [sys.executable, "-m", "pytest", target, "-q", "--color=no",
+def _py_pytest(*targets: str) -> List[str]:
+    return [sys.executable, "-m", "pytest", *targets, "-q", "--color=no",
             "-r", "s", "-p", "no:cacheprovider"]
 
 
@@ -1035,9 +1035,10 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-tool-physical-shade", "server tests/test_solar_tool_physical_shade.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_physical_shade.py"), 22),
         Suite("server-solar-tool-physical-export",
-              "server tests/test_solar_tool_physical_export.py",
+              "server physical export and saved estimate comparison",
               "pytest", SERVER,
-              _py_pytest("tests/test_solar_tool_physical_export.py"), 24),
+              _py_pytest("tests/test_solar_tool_physical_export.py",
+                         "tests/test_project_estimate_comparison.py"), 27),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 17),  # R31b: two intake/branch cases
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",
@@ -1131,11 +1132,22 @@ def build_suites() -> List[Suite]:
         # 31 tests + 4 more parametrizations = 35.
         Suite("server-solar-design-profiles", "server tests/test_solar_design_profiles.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_design_profiles.py"), 35),
+        Suite("tools-x12-offline", "X12 CAD standards evidence comparisons",
+              "pytest", REPO, [
+                  # Load stdlib before pytest adds the repo root (which has platform/).
+                  sys.executable, "-P", "-m", "pytest", "-o", "pythonpath=.",
+                  Path("tools", "xbench", "tests", "test_x12_layers.py").as_posix(),
+                  Path("tools", "xbench", "tests", "test_x12_text_styles.py").as_posix(),
+                  Path("tools", "xbench", "tests", "test_x12_title_blocks.py").as_posix(),
+                  Path("tools", "xbench", "tests", "test_x12_plot_styles.py").as_posix(),
+                  Path("tools", "xbench", "tests", "test_x12_entity_counts.py").as_posix(),
+                  "-q", "--color=no", "-r", "s", "-p", "no:cacheprovider",
+              ], 34),
         Suite("server-x07-offline", "server X07 isolated role and customer profile checks",
               "pytest", SERVER, _py_pytest("tests/test_solar_drawing_roles.py") + [
                   "tests/test_x07_role_selection.py",
                   "tests/test_x07_customer_profile_store.py", "tests/test_x07_role_discovery_failures.py",
-                  "tests/test_x07_profile_compatibility.py", "tests/test_x07_profile_concurrency.py",
+                  "tests/test_x07_tracker_profile.py", "tests/test_x07_profile_compatibility.py", "tests/test_x07_profile_concurrency.py",
                   "tests/test_x07_profile_storage_failures.py", "tests/test_x07_profile_json_roundtrip.py",
                   "tests/test_x07_workflow_recovery.py", "tests/test_x07_workflow_scope_matrix.py",
                   "tests/test_x07_selection_metamorphic.py", "tests/test_x07_adapter_snapshot_isolation.py",
@@ -2201,7 +2213,7 @@ def build_suites() -> List[Suite]:
               ], 1934),
         Suite("server-dxf-intake-lines-text", "server DXF intake and offline drawing authoring",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py") + [
-                  "tests/test_x03_offline_drawing_author.py", "tests/test_x03_beam_author_product.py",
+                  "tests/test_x03_offline_drawing_author.py", "tests/test_x03_beam_author_product.py", "tests/test_x06_layer_subtotals.py",
                   "tests/test_x03_route_author_product.py", "tests/test_x03_nested_layer_author.py",
                   "tests/test_x03_nested_beam_author.py", "tests/test_x03_spline_beam_author.py",
                   "tests/test_x03_joined_spline_author.py",
@@ -2209,7 +2221,7 @@ def build_suites() -> List[Suite]:
                   "tests/test_x03_periodic_spline_author.py", "tests/test_x03_clip_holes_author.py",
                   "tests/test_x03_clip_components_author.py", "tests/test_x03_clip_empty_author.py", "tests/test_x03_clip_cache_author.py", "tests/test_x03_clip_collinear_author.py", "tests/test_x03_clip_origin_author.py", "tests/test_x03_oblique_clip_author.py", "tests/test_x03_clip_exclusion_union_author.py", "tests/test_x03_clip_regroup_author.py", "tests/test_x03_viewport_panel_author.py", "tests/test_x03_reflected_clip_author.py", "tests/test_x03_clip_contact_author.py", "tests/test_x03_spline_poles_author.py", "tests/test_x03_spline_cusp_author.py", "tests/test_x03_spline_fit_only_author.py", "tests/test_x03_spline_degree_author.py", "tests/test_x03_spline_weight_scale_author.py", "tests/test_x03_spline_shear_author.py", "tests/test_x03_spline_units_author.py", "tests/test_x03_spline_subdivision_author.py", "tests/test_x03_spline_budget_author.py", "tests/test_x03_reversed_spline_author.py", "tests/test_x03_spline_refinement_author.py", "tests/test_x03_spline_parameter_author.py", "tests/test_x03_coincident_beam_author.py", "tests/test_x03_large_coordinate_author.py", "tests/test_x03_discontinuous_spline_author.py", "tests/test_x03_clip_budget_author.py", "tests/test_x03_clipped_area_author.py", "tests/test_x03_state_clip_author.py", "tests/test_x03_clipped_block_author.py", "tests/test_x03_dynamic_visibility_author.py", "tests/test_x03_aisle_detour_author.py",
                   "tests/test_x03_beam_openings_author.py", "tests/test_x03_revision_panel_moves.py",
-                  "tests/test_x03_spatial_route_clearance.py", "tests/test_x03_scaled_curve_author.py",
+                  "tests/test_x03_spatial_route_clearance.py", "tests/test_x03_scaled_curve_author.py", "tests/test_x03_ocs_arc_author.py", "tests/test_x03_block_basepoint_author.py", "tests/test_x03_polyline3d_author.py", "tests/test_x03_minsert_beam_author.py", "tests/test_x03_oblique_ellipse_author.py", "tests/test_x03_bulge_beam_author.py",
                   "tests/test_x03_multibundle_author.py", "tests/test_x03_instance_openings_author.py",
                   "tests/test_x03_stepped_clearance_author.py",
               ], 91),
@@ -2952,6 +2964,8 @@ def build_suites() -> List[Suite]:
         # status). Was never registered, so none of it ran in CI.
         Suite("server-customization-async-stage", "server customization async stage", "pytest",
               SERVER, _py_pytest("tests/test_customization_async_stage.py"), 82),
+        Suite("server-customization-stage-grants", "server customization stage grants", "pytest",
+              SERVER, _py_pytest("tests/test_customization_stage_grants.py"), None),
         Suite("server-author-stage-status", "server author stage status", "pytest",
               SERVER, _py_pytest("tests/test_author_stage_status.py"), 41),
         Suite("server-customization-stage-recovery",
@@ -3791,6 +3805,9 @@ def build_suites() -> List[Suite]:
                   # harness image build runs the same four packages against the
                   # Windows goldens and fails on any mismatch.
                   ("test/branchCompileCheck.test.ts", 4),
+                  # The area-marks real-compiler case needs a built Branch checker
+                  # (LEAF_BRANCH_COMPILE_BIN/REFS), like the four parity cases above.
+                  ("test/branchTarget.test.ts", 1),
               )),
         Suite("harness-project-photo-assignment-caller", "harness trusted photo assignment caller", "vitest", HARNESS,
               [_npm(), "test", "--", "test/projectPhotoAssignmentCaller.test.ts"], 104),
@@ -4291,15 +4308,15 @@ def build_suites() -> List[Suite]:
                  "tests/test_x03_action_discovery.py", "tests/test_x03_action_discovery_author.py", "tests/test_x03_material_selection_author.py",
                   "tests/test_x03_material_revision_author.py",
                   "tests/test_x03_material_array_diff_author.py",
-                  "tests/test_x03_material_three_way_author.py", "tests/test_x03_dataset_page_alias_author.py", "tests/test_x03_dataset_schema_drift_author.py", "tests/test_x03_dataset_projection_author.py", "tests/test_x03_dataset_sort_null_author.py", "tests/test_x03_dataset_filter_author.py", "tests/test_x03_dataset_cursor_budget_author.py", "tests/test_x03_dataset_page_budget_author.py", "tests/test_x03_dataset_sort_ties_author.py", "tests/test_x03_dataset_cancel_author.py", "tests/test_x03_dataset_late_failure_author.py", "tests/test_x03_dataset_empty_page_author.py", "tests/test_x03_dataset_cursor_binding_author.py", "tests/test_x03_dataset_identity_author.py", "tests/test_x03_dataset_snapshot_author.py",
-                  "tests/test_x03_material_import_budget_author.py", "tests/test_x03_material_test_equality_author.py", "tests/test_x03_material_root_replace_author.py", "tests/test_x03_material_duplicate_keys_author.py", "tests/test_x03_material_pointer_decode_author.py", "tests/test_x03_material_index_author.py", "tests/test_x03_material_patch_budget_author.py", "tests/test_x03_material_move_cycle_author.py", "tests/test_x03_material_patch_guard_author.py", "tests/test_x03_material_copy_isolation_author.py", "tests/test_x03_material_patch_order_author.py", "tests/test_x03_material_numeric_author.py", "tests/test_x03_material_unicode_author.py", "tests/test_x03_material_null_author.py", "tests/test_x03_action_dynamic_refs_author.py", "tests/test_x03_action_annotations_author.py", "tests/test_x03_action_regex_budget_author.py", "tests/test_x03_action_dialect_author.py", "tests/test_x03_action_property_names_author.py", "tests/test_x03_action_dependent_schemas_author.py", "tests/test_x03_action_branch_budget_author.py", "tests/test_x03_action_unevaluated_items_author.py", "tests/test_x03_action_unevaluated_author.py", "tests/test_x03_action_string_length_author.py", "tests/test_x03_action_boolean_schema_author.py", "tests/test_x03_action_enum_author.py", "tests/test_x03_action_pattern_author.py", "tests/test_x03_action_decimal_schema_author.py", "tests/test_x03_action_array_schema_author.py", "tests/test_x03_action_conditional_author.py", "tests/test_x03_action_refs_author.py", "tests/test_x03_action_combinator_author.py", "tests/test_x03_action_extra_fields_author.py", "tests/test_x03_action_schema_author.py", "tests/test_x03_action_revocation_author.py", "tests/test_x03_role_action_author.py", "tests/test_x03_project_dataset_discovery.py",
+                  "tests/test_x03_material_three_way_author.py", "tests/test_x03_dataset_iterator_ownership_author.py", "tests/test_x03_dataset_async_iterator_author.py", "tests/test_x03_dataset_request_isolation_author.py", "tests/test_x03_dataset_deadline_author.py", "tests/test_x03_dataset_scan_interleave_author.py", "tests/test_x03_dataset_row_bytes_author.py", "tests/test_x03_dataset_cursor_types_author.py", "tests/test_x03_dataset_cursor_redaction_author.py", "tests/test_x03_dataset_field_collision_author.py", "tests/test_x03_dataset_close_failure_author.py", "tests/test_x03_dataset_iterator_failure_author.py", "tests/test_x03_dataset_page_alias_author.py", "tests/test_x03_dataset_schema_drift_author.py", "tests/test_x03_dataset_projection_author.py", "tests/test_x03_dataset_sort_null_author.py", "tests/test_x03_dataset_filter_author.py", "tests/test_x03_dataset_cursor_budget_author.py", "tests/test_x03_dataset_page_budget_author.py", "tests/test_x03_dataset_sort_ties_author.py", "tests/test_x03_dataset_cancel_author.py", "tests/test_x03_dataset_late_failure_author.py", "tests/test_x03_dataset_empty_page_author.py", "tests/test_x03_dataset_cursor_binding_author.py", "tests/test_x03_dataset_identity_author.py", "tests/test_x03_dataset_snapshot_author.py",
+                  "tests/test_x03_material_trailing_json_author.py", "tests/test_x03_material_noop_author.py", "tests/test_x03_material_nonfinite_author.py", "tests/test_x03_material_control_chars_author.py", "tests/test_x03_material_exponent_author.py", "tests/test_x03_material_newlines_author.py", "tests/test_x03_material_bom_author.py", "tests/test_x03_material_encoding_author.py", "tests/test_x03_material_surrogate_author.py", "tests/test_x03_material_import_budget_author.py", "tests/test_x03_material_test_equality_author.py", "tests/test_x03_material_root_replace_author.py", "tests/test_x03_material_duplicate_keys_author.py", "tests/test_x03_material_pointer_decode_author.py", "tests/test_x03_material_index_author.py", "tests/test_x03_material_patch_budget_author.py", "tests/test_x03_material_move_cycle_author.py", "tests/test_x03_material_patch_guard_author.py", "tests/test_x03_material_copy_isolation_author.py", "tests/test_x03_material_patch_order_author.py", "tests/test_x03_material_numeric_author.py", "tests/test_x03_material_unicode_author.py", "tests/test_x03_material_null_author.py", "tests/test_x03_action_schema_cache_author.py", "tests/test_x03_action_metaschema_author.py", "tests/test_x03_action_contains_bounds_author.py", "tests/test_x03_action_legacy_tuple_author.py", "tests/test_x03_action_schema_immutability_author.py", "tests/test_x03_action_error_budget_author.py", "tests/test_x03_action_base_uri_author.py", "tests/test_x03_action_integer_type_author.py", "tests/test_x03_action_vocabulary_author.py", "tests/test_x03_action_read_write_author.py", "tests/test_x03_action_format_author.py", "tests/test_x03_action_ref_uri_author.py", "tests/test_x03_action_content_author.py", "tests/test_x03_action_anchor_collision_author.py", "tests/test_x03_action_dynamic_refs_author.py", "tests/test_x03_action_annotations_author.py", "tests/test_x03_action_regex_budget_author.py", "tests/test_x03_action_dialect_author.py", "tests/test_x03_action_property_names_author.py", "tests/test_x03_action_dependent_schemas_author.py", "tests/test_x03_action_branch_budget_author.py", "tests/test_x03_action_unevaluated_items_author.py", "tests/test_x03_action_unevaluated_author.py", "tests/test_x03_action_string_length_author.py", "tests/test_x03_action_boolean_schema_author.py", "tests/test_x03_action_enum_author.py", "tests/test_x03_action_pattern_author.py", "tests/test_x03_action_decimal_schema_author.py", "tests/test_x03_action_array_schema_author.py", "tests/test_x03_action_conditional_author.py", "tests/test_x03_action_refs_author.py", "tests/test_x03_action_combinator_author.py", "tests/test_x03_action_extra_fields_author.py", "tests/test_x03_action_schema_author.py", "tests/test_x03_action_revocation_author.py", "tests/test_x03_role_action_author.py", "tests/test_x03_project_dataset_discovery.py",
                  "tests/test_x03_dataset_discovery_author.py"], 41),
         Suite("server-integration-element-save", "turn-bound native element saves", "pytest", SERVER,
               _py_pytest("tests/test_integration_element_save.py") + ["tests/test_x03_recipe_revision.py", "tests/test_x03_recipe_edit_author.py",
                   "tests/test_x03_batch_recipe_author.py",
                   "tests/test_x03_recipe_retry_author.py",
                   "tests/test_x03_recipe_aba_author.py",
-                  "tests/test_x03_recipe_journal_swap_author.py", "tests/test_x03_recipe_journal_binding_author.py", "tests/test_x03_recipe_journal_budget_author.py", "tests/test_x03_recipe_journal_version_author.py", "tests/test_x03_recipe_recovery_access_author.py", "tests/test_x03_recipe_key_order_author.py", "tests/test_x03_recipe_retry_scope_author.py", "tests/test_x03_recipe_journal_corruption_author.py", "tests/test_x03_recipe_restart_author.py", "tests/test_x03_recipe_precommit_author.py", "tests/test_x03_recipe_delete_race_author.py", "tests/test_x03_recipe_key_collision_author.py", "tests/test_x03_recipe_concurrent_author.py"], 4),
+                  "tests/test_x03_recipe_journal_links_author.py", "tests/test_x03_recipe_commit_cancel_author.py", "tests/test_x03_recipe_key_unicode_author.py", "tests/test_x03_recipe_journal_permission_author.py", "tests/test_x03_recipe_same_key_race_author.py", "tests/test_x03_recipe_journal_time_author.py", "tests/test_x03_recipe_journal_write_fault_author.py", "tests/test_x03_recipe_journal_duplicate_keys_author.py", "tests/test_x03_recipe_journal_swap_author.py", "tests/test_x03_recipe_journal_binding_author.py", "tests/test_x03_recipe_journal_budget_author.py", "tests/test_x03_recipe_journal_version_author.py", "tests/test_x03_recipe_recovery_access_author.py", "tests/test_x03_recipe_key_order_author.py", "tests/test_x03_recipe_retry_scope_author.py", "tests/test_x03_recipe_journal_corruption_author.py", "tests/test_x03_recipe_restart_author.py", "tests/test_x03_recipe_precommit_author.py", "tests/test_x03_recipe_delete_race_author.py", "tests/test_x03_recipe_key_collision_author.py", "tests/test_x03_recipe_concurrent_author.py"], 4),
         Suite("server-integration-browser", "verified browser dataset bridge", "pytest", SERVER,
               _py_pytest("tests/test_integration_browser.py"), 51),
         Suite("server-integration-browser-derivation", "finite browser derivation transport", "pytest", SERVER,
@@ -4388,6 +4405,9 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_branch_sync_receipts.py"), 37),
         Suite("server-tenant-catalog", "server tests/test_tenant_catalog.py", "pytest", SERVER,
               _py_pytest("tests/test_tenant_catalog.py"), 25),
+        Suite("server-workspace-identity-echo", "server tests/test_workspace_identity_echo.py", "pytest", SERVER,
+              _py_pytest("tests/test_workspace_identity_echo.py"), 16),
+        Suite("server-tenant-plugin-check", "server tests/test_tenant_plugin_check.py", "pytest", SERVER, _py_pytest("tests/test_tenant_plugin_check.py"), 25),
         Suite("server-tenant-publish", "server tests/test_tenant_publish.py", "pytest", SERVER,
               _py_pytest("tests/test_tenant_publish.py"), 25),
         Suite("server-search", "server tests/test_search.py", "pytest", SERVER,

@@ -1,6 +1,7 @@
 """Tenant-bound admission and control of pinned Lab runs."""
 from __future__ import annotations
 
+import json
 import os
 import uuid
 
@@ -22,6 +23,7 @@ from lab_worker import OPS_REVISION
 from routers.lab_artifacts import _actor, _admit, _body
 
 router = APIRouter(prefix="/api/lab/runs", tags=["lab_runs"])
+RECENT_RUN_LIMIT = 20
 
 
 def _corpus_actor(tenant):
@@ -185,16 +187,30 @@ def recent(doc_id: str = Query(..., min_length=1, max_length=200),
         def select(sql):
             _receipt_table(sql)
             return [dict(row) for row in sql.execute(
-                'SELECT r.run_id,r.state,r.graph_revision,r.doc_id,s.project_id,s.submission_id '
+                'SELECT r.run_id,r.state,r.graph_revision,r.doc_id,s.project_id,s.submission_id,'
+                'r.created_at,r.finished_at,r.attempt_wall_cap_seconds,'
+                'e.payload AS terminal_payload '
                 'FROM lab_run_receipts s JOIN lab_runs r ON r.tenant_id=s.tenant_id AND r.run_id=s.run_id '
+                "LEFT JOIN lab_run_events e ON r.state='failed' AND e.tenant_id=r.tenant_id "
+                "AND e.run_id=r.run_id AND e.kind='failed' AND e.block_id IS NULL "
+                "AND e.seq=(SELECT MAX(last.seq) FROM lab_run_events last "
+                "WHERE last.tenant_id=r.tenant_id AND last.run_id=r.run_id AND last.kind<>'coalesced') "
                 'WHERE s.tenant_id=? AND s.authority=? AND s.project_id=? AND s.doc_id=? '
                 "ORDER BY CASE WHEN r.state IN ('queued','running') THEN 0 ELSE 1 END,"
-                'r.created_at DESC,r.run_id DESC LIMIT 20',
-                (str(tenant), _actor(tenant), project_id, doc_id)).fetchall()]
+                'r.created_at DESC,r.run_id DESC LIMIT ?',
+                (str(tenant), _actor(tenant), project_id, doc_id, RECENT_RUN_LIMIT + 1)).fetchall()]
         rows = store._run(str(tenant), select, write=True)
-        for row in rows:
+        runs = rows[:RECENT_RUN_LIMIT]
+        for row in runs:
             _authorize_corpus_run(tenant, store.get(str(tenant), row['run_id']))
-        return {'runs': rows}
+            payload = row.pop('terminal_payload')
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    payload = None
+            row['wall_cap_hit'] = isinstance(payload, dict) and payload.get('reason') == 'run_wall_cap'
+        return {'runs': runs, 'has_more': len(rows) > RECENT_RUN_LIMIT}
     return _call(operation)
 
 
@@ -266,6 +282,16 @@ def get(run_id: str, tenant=Depends(deps.require_tenant)):
     row = _call(store.get, str(tenant), run_id)
     _call(_authorize_corpus_run, tenant, row)
     return {key: value for key, value in row.items() if key not in {"lease_owner", "lease_fence", 'corpus_authority_json'}}
+
+
+@router.get("/{run_id}/corpus-jobs")
+def corpus_jobs(run_id: str, response: Response, tenant=Depends(deps.require_tenant)):
+    _admit(tenant, "build")
+    import lab_corpus_recovery
+    result = _call(lab_corpus_recovery.inspect_jobs, str(tenant), run_id,
+                   authorize=lambda row: _authorize_corpus_run(tenant, row))
+    response.headers['Cache-Control'] = 'no-store'
+    return result
 
 
 @router.get("/{run_id}/recovery-plan")

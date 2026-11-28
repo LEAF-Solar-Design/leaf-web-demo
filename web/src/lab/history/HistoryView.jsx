@@ -1,7 +1,74 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import VersionList from '../../components/VersionList.jsx'
 import LabDiffView from './LabDiffView.jsx'
+import ExportedRevisionCompare from './ExportedRevisionCompare.jsx'
 import { labArtifactsClient, SAVED_REVISION_EVENT } from './labArtifactsClient.js'
+
+function StoredResult({ jobId, producer, blockId }) {
+  const { corpus, suite, policy } = producer?.context ?? {}
+  const report = producer?.result
+  const pins = [
+    ['Block', blockId ?? policy?.block_id],
+    ['Producer worker', producer?.worker_id],
+    ['Corpus material', corpus?.material_id],
+    ['Corpus digest', corpus?.sha256],
+    ['Suite material', suite?.material_id],
+    ['Saved suite digest', suite?.sha256],
+    ['Evaluated suite digest', producer?.evaluated_suite_sha256],
+    ['Policy digest', policy?.digest],
+    ['Result digest', producer?.result_sha256],
+  ].filter(([, value]) => typeof value === 'string' && value)
+  const reasons = Array.isArray(report?.reasons) ? report.reasons.filter(reason => typeof reason === 'string') : []
+  return <details>
+    <summary>Producer {jobId}{typeof report?.verdict === 'string' && ` · ${report.verdict}`}</summary>
+    {Number.isSafeInteger(producer?.attempt) && <p>Producer attempt {producer.attempt}</p>}
+    {reasons.length > 0 && <ul>{reasons.map((reason, index) => <li key={index}>{reason}</li>)}</ul>}
+    {pins.length ? <dl style={{ overflowWrap: 'anywhere' }}>
+      {pins.map(([label, value]) => <div key={label}><dt>{label}</dt><dd><code>{value}</code></dd></div>)}
+    </dl> : <p>This result has no stored producer input pins.</p>}
+  </details>
+}
+
+function storedResultBlocks(events, results) {
+  const blocks = new Map()
+  for (const event of events) {
+    if (event.kind !== 'value' || typeof event.block_id !== 'string') continue
+    let summary = event.payload?.result?.data
+    if (typeof summary === 'string') {
+      try { summary = JSON.parse(summary) } catch { continue }
+    }
+    if (typeof summary?.job_id === 'string' && Object.hasOwn(results, summary.job_id)) {
+      blocks.set(summary.job_id, event.block_id)
+    }
+  }
+  return blocks
+}
+
+function OpenedBundle({ bundle }) {
+  const { identity, evaluations } = bundle.parts
+  return <>
+    <p role="status">Opened bundle {identity.doc_id} r{identity.revision}
+      {' · '}{evaluations.length} stored evaluations. Graph is ready to edit.</p>
+    {evaluations.length > 0 && <section aria-label="Stored evaluation lineage">
+      <h3>Stored evaluation lineage</h3>
+      {evaluations.map(({ run, events, complete_results: results }, index) => {
+        const producers = typeof results === 'object' && !Array.isArray(results) ? Object.entries(results) : []
+        const blocks = producers.length ? storedResultBlocks(events, results) : new Map()
+        const status = typeof run.state === 'string' ? run.state : 'status unavailable'
+        const reason = events.findLast(event => ['failed', 'cancelled', 'suspended'].includes(event.kind)
+          && typeof event.payload?.reason === 'string')?.payload.reason
+        return <details key={index}>
+          <summary>Run {typeof run.run_id === 'string' ? run.run_id : 'ID unavailable'} · {status}</summary>
+          <p>Saved graph r{identity.revision} <code style={{ overflowWrap: 'anywhere' }}>{identity.sha256}</code></p>
+          {reason && <p>{reason}</p>}
+          {producers.length ? producers.map(([jobId, producer]) =>
+            <StoredResult key={jobId} jobId={jobId} producer={producer} blockId={blocks.get(jobId)} />)
+            : <p>No complete producer result was stored for this run.</p>}
+        </details>
+      })}
+    </section>}
+  </>
+}
 
 export default function HistoryView({ hidden = false, client = labArtifactsClient }) {
   const [, refresh] = useState(0)
@@ -92,6 +159,7 @@ export default function HistoryView({ hidden = false, client = labArtifactsClien
       } finally { if (valid(token)) setPending(false) }
     }}>Compare</button>
     {diff && <LabDiffView {...diff} />}
+    {!hidden && <ExportedRevisionCompare key={`export-compare-${generation}`} client={client} />}
     <label>Export revision<select aria-label="Export revision" value={exportRevision || preview || state.head || ''}
       disabled={busy} onChange={event => setExportRevision(event.target.value)}>
       <option value="">Choose revision</option>{rows.map(row => <option key={row.v} value={row.v}>r{row.v}</option>)}
@@ -139,8 +207,7 @@ export default function HistoryView({ hidden = false, client = labArtifactsClien
         } catch (error) { if (valid(token)) setStatus(`Reopen failed: ${error.message}`) }
         finally { if (valid(token)) setPending(false) }
       }} /></label>
-    {state.openedBundle && <p role="status">Opened bundle {state.openedBundle.parts.identity.doc_id} r{state.openedBundle.parts.identity.revision}
-      {' · '}{state.openedBundle.parts.evaluations.length} stored evaluations. Graph is ready to edit.</p>}
+    {state.openedBundle && <OpenedBundle key={state.openedBundle.manifest.parts.evaluations} bundle={state.openedBundle} />}
     <button type="button" disabled={busy || state.head == null} onClick={() => run(() => client.publish(docId, state.head), 'Publish')}>Publish r{state.head ?? '?'}</button>
     <p role="status">{status}</p>
     <p>History p50 {percentile(.5)} ms · p99 {percentile(.99)} ms</p>
