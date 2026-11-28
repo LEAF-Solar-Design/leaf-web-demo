@@ -73,6 +73,54 @@ def _light_web_path(pairs, start, end):
     return None
 
 
+def _dxf_int(value):
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _linetype_shape_elements(pairs, start, end):
+    # Group 49 starts each pattern element. A group 340 belongs only to
+    # that element, even when a text or another shape element follows it.
+    element_index = -1
+    flags = 0
+    shape_number = None
+    handles = {}
+    for index in range(start, end + 1):
+        code, value = pairs[index] if index < end else (49, "")
+        if code == 49:
+            if element_index >= 0 and flags & 4:
+                yield {"element_index": element_index, "shape_number": shape_number,
+                       "style_handles": list(handles)}
+            element_index += 1
+            flags = 0
+            shape_number = None
+            handles = {}
+        elif code == 74:
+            flags = _dxf_int(value) or 0
+        elif code == 75:
+            shape_number = _dxf_int(value)
+        elif code == 340 and value:
+            handles[value.upper()] = None
+
+
+def _resolve_shape_link(link, styles):
+    handles = link["style_handles"]
+    if not handles:
+        return "missing_pointer", None
+    if len(handles) > 1:
+        return "ambiguous", None
+    matches = styles.get(handles[0], [])
+    if not matches:
+        return "dangling", None
+    if len(matches) > 1:
+        return "ambiguous", None
+    if not matches[0]:
+        return "invalid_style", None
+    return "resolved", matches[0]
+
+
 def from_pairs(pairs, *, literal_text=None):
     dependencies = {}
     texture_maps = {}
@@ -80,10 +128,12 @@ def from_pairs(pairs, *, literal_text=None):
     plot_setups = {}
     plot_resource_setups = {}
     plot_layouts = []
+    linetype_shape_links = []
+    styles = {}
     # Full drawings require owning sections. Bare decoded-record fragments keep
     # their existing API behavior, but ENDSEC/EOF still close their scope.
     section = None if any(c == 0 and v.upper() == "SECTION" for c, v in pairs) else "__FRAGMENT__"
-    owners = {"BLOCK": {"BLOCKS"}, "STYLE": {"TABLES"},
+    owners = {"BLOCK": {"BLOCKS"}, "STYLE": {"TABLES"}, "LTYPE": {"TABLES"},
               "IMAGEDEF": {"OBJECTS"}, "MATERIAL": {"OBJECTS"}, "PDFDEFINITION": {"OBJECTS"},
               "DWFDEFINITION": {"OBJECTS"}, "DGNDEFINITION": {"OBJECTS"},
               "PLOTSETTINGS": {"OBJECTS"}, "LAYOUT": {"OBJECTS"},
@@ -152,14 +202,18 @@ def from_pairs(pairs, *, literal_text=None):
                 add("xref", groups.get(1) or groups.get(2), "detached",
                     reason="External drawings are not followed by the local reader.")
         elif kind == "STYLE":
-            try:
-                shape = bool(int(groups.get(70, "0")) & 1)
-            except ValueError:
-                shape = False
+            shape = bool((_dxf_int(groups.get(70, "0")) or 0) & 1)
+            if handle := groups.get(5):
+                styles.setdefault(handle.upper(), []).append(groups.get(3) if shape else None)
             for code in (3, 4):
                 name = groups.get(code, "")
                 font_kind = "shape_font" if shape or code == 4 else "font"
                 add(font_kind, name, "font remapped", remapped_to="sans-serif")
+        elif kind == "LTYPE":
+            for element in _linetype_shape_elements(pairs, i + 1, end):
+                linetype_shape_links.append({"linetype": groups.get(2) or None,
+                                             "linetype_handle": groups.get(5) or None,
+                                             **element})
         elif kind == "IMAGEDEF":
             add("image", groups.get(1) or groups.get(5), "image omitted")
         elif kind == "MATERIAL":
@@ -228,4 +282,8 @@ def from_pairs(pairs, *, literal_text=None):
         binding["setup_resources"] = matches[0] if status == "matched" else None
     if plot_layouts:
         report["plot_layout_bindings"] = plot_layouts
+    if linetype_shape_links:
+        for link in linetype_shape_links:
+            link["status"], link["font"] = _resolve_shape_link(link, styles)
+        report["linetype_shape_links"] = linetype_shape_links
     return report

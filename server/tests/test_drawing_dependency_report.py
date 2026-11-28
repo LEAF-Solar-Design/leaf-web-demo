@@ -1,4 +1,54 @@
 from drawing_dependency_report import from_pairs
+
+
+def test_complex_linetype_shape_links_resolve_per_element():
+    pairs = [
+        (0, "SECTION"), (2, "TABLES"),
+        (0, "TABLE"), (2, "LTYPE"),
+        (0, "LTYPE"), (5, "C1"), (2, "Annotation"),
+        (49, ".25"), (74, "0"),
+        (49, "0"), (74, "4"), (75, "7"), (340, "Aa"),
+        (49, "0"), (74, "2"), (340, "BB"), (9, "ANNOTATION"),
+        (49, "0"), (74, "5"), (75, "8"), (340, "bb"),
+        (49, "0"), (74, "4"), (75, "9"), (340, "FF"),
+        (49, "0"), (74, "4"), (75, "10"), (340, "AA"), (340, "BB"),
+        (49, "0"), (74, "4"), (75, "11"),
+        (49, "0"), (74, "4"), (75, "12"), (340, "CC"),
+        (49, "0"), (74, "4"), (75, "13"), (340, "DD"),
+        (0, "ENDTAB"),
+        (0, "TABLE"), (2, "STYLE"),
+        (0, "STYLE"), (5, "AA"), (70, "1"), (3, "primary.shx"),
+        (0, "STYLE"), (5, "BB"), (70, "1"), (3, "alternate.shx"),
+        (0, "STYLE"), (5, "CC"), (70, "1"), (3, "duplicate-a.shx"),
+        (0, "STYLE"), (5, "cc"), (70, "1"), (3, "duplicate-b.shx"),
+        (0, "STYLE"), (5, "DD"), (70, "0"), (3, "ordinary.shx"),
+        (0, "ENDTAB"), (0, "ENDSEC"),
+        (0, "SECTION"), (2, "ENTITIES"),
+        (0, "STYLE"), (5, "FF"), (70, "1"), (3, "out-of-section.shx"),
+        (0, "ENDSEC"), (0, "EOF"),
+    ]
+
+    report = from_pairs(pairs)
+    links = report["linetype_shape_links"]
+    assert {(row["linetype"], row["linetype_handle"]) for row in links} == {("Annotation", "C1")}
+    assert [
+        (row["element_index"], row["shape_number"], row["style_handles"], row["status"], row["font"])
+        for row in links
+    ] == [
+        (1, 7, ["AA"], "resolved", "primary.shx"),
+        (3, 8, ["BB"], "resolved", "alternate.shx"),
+        (4, 9, ["FF"], "dangling", None),
+        (5, 10, ["AA", "BB"], "ambiguous", None),
+        (6, 11, [], "missing_pointer", None),
+        (7, 12, ["CC"], "ambiguous", None),
+        (8, 13, ["DD"], "invalid_style", None),
+    ]
+    assert not report["external_files_opened"]
+
+
+def test_text_only_linetype_does_not_add_shape_diagnostics():
+    pairs = [(0, "LTYPE"), (49, "0"), (74, "2"), (340, "AA"), (9, "LABEL")]
+    assert "linetype_shape_links" not in from_pairs(pairs)
 from dxf_intake import parse_dxf_bytes
 import pytest
 
