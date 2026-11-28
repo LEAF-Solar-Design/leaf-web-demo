@@ -1,0 +1,1 @@
+Plugin Builder production release, base main 842e940b (Nov 28 2026): includes #3860 F3b stale queue narration, #3526 D11 drawing keeps its file name, #3873 R2-11 object-pick inputs (Studio half), #3841 run receipts, #3883 #3884 #3885 test fixes.
