@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, renderHook } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { parse } from '@babel/parser'
-import { projectSolarDrawingView } from './solar/solarProjectDrawingModel.js'
+import { focusProjectSolarStrings, projectSolarDrawingView } from './solar/solarProjectDrawingModel.js'
 import { useAppProjectSolarRuntime } from './solar/useAppProjectSolarRuntime.js'
 import { projectSolarAppReason } from './solar/solarProjectAppModel.js'
 import { buildDrawingObjectIndex } from './lib/drawingObjectIndex.js'
@@ -117,12 +117,13 @@ function environment(intake = graphIntake(), scene, binding = B) {
     viewerRef: { current: { getDrawingScene: () => scene ?? { intake, drawingKey: keyOf(binding), ready: true } } },
     activeIntake: legacy, shown: legacy, intake: legacy, standaloneVisibleLayers: {}, setStandaloneVisibleLayers: vi.fn(),
     consoleDrawingKey: 'console:legacy', drawingLoad: { drawingId: 'legacy' }, REQUESTED_DRAWING_ID: 'legacy',
-    useMemo: callback => callback(), projectSolarDrawingView, buildDrawingObjectIndex, withHiddenLayerDefaults }
+    useMemo: callback => callback(), projectSolarDrawingView, focusProjectSolarStrings, currentStringIds: null,
+    buildDrawingObjectIndex, withHiddenLayerDefaults }
 }
 function projection(env) {
   const scope = { ...env }
   for (const name of ['projectScene', 'projectDrawingBinding', 'projectContextView', 'projectSolvePreview', 'projectContextCurrent',
-    'projectSceneIntake', 'projectSceneKey', 'projectSceneReady', 'projectDrawing',
+    'projectSceneIntake', 'projectSceneKey', 'projectSceneReady', 'projectDrawing', 'projectStringFocusView',
     'projectEngineIntake', 'drawingIntake', 'projectDrawingName', 'projectHiddenLayers', 'visibleLayers', 'shownLayers', 'setVisibleLayers'])
     scope[name] = evaluate(decl(name).init, scope)
   return scope
@@ -380,7 +381,8 @@ it('R13G2A-07 presentation identity retires a retained Viewer override', () => {
   view.rerender(draw())
   expect(ref.current.getDrawingScene().intake).toBe(intake)
   act(() => ref.current.applyVersion(override))
-  env.projectDrawing = projection(environment(intake, undefined, { ...B, input_version_id: U(6) })).projectDrawing
+  const { projectDrawing, projectStringFocusView } = projection(environment(intake, undefined, { ...B, input_version_id: U(6) }))
+  Object.assign(env, { projectDrawing, projectStringFocusView })
   view.rerender(draw())
   expect(ref.current.getDrawingScene().intake).toBe(intake)
   expect(ref.current.getDrawingScene().drawingKey).toBe(env.projectDrawing.drawingKey)

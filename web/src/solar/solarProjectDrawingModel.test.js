@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { solarGraphOverlay } from './solarGraphOverlay.js'
 import {
-  projectSolarDrawingView, SOLAR_PROJECT_DRAWING_CODES,
+  focusProjectSolarStrings, projectSolarDrawingView, SOLAR_PROJECT_DRAWING_CODES,
 } from './solarProjectDrawingModel.js'
 
 const ids = [
@@ -304,5 +304,56 @@ describe('projectSolarDrawingView', () => {
     expect(imports).toEqual(["import { solarGraphOverlay } from './solarGraphOverlay.js'"])
     expect(/\b(?:Viewer|App|fetch|XMLHttpRequest|WebSocket|React)\b/.test(source)).toBe(false)
     expect(/\b(?:import|require)\s*\(|^export\s+.*\bfrom\s/m.test(source)).toBe(false)
+  })
+})
+
+describe('focusProjectSolarStrings', () => {
+  it.each([
+    ['same row', [[1, 1], [2, 1], [3, 1]]],
+    ['turn into an adjoining row', [[1, 1], [2, 1], [2, 2], [1, 2]]],
+    ['hop across an aisle', [[1, 1], [2, 1], [12, 1], [13, 1]]],
+  ])('shows the selected panel sequence for a %s without altering saved routes', (_, points) => {
+    const input = fixture()
+    const graph = graphOf(input)
+    graph.panels.push(...points.map(([x, y], index) => ({ id: `p${index}`, centre: [x * 2, y * 2] })))
+    graph.strings.push({
+      id: 'roof', ordered_panel_refs: graph.panels.slice(1).map(panel => panel.id),
+      route: [[60, 60], [80, 60]],
+    })
+    const view = projectSolarDrawingView(freeze(input))
+    const focus = focusProjectSolarStrings(view, new Set(['roof']))
+    expect(focus.unavailable).toBe(false)
+    expect(focus.overlay.intake).toBe(view.intake)
+    expect(focus.overlay.drawingKey).toBe(view.drawingKey)
+    expect(focus.overlay.polylines).toEqual([
+      ...view.overlay.polylines, { pts: points, color: '#facc15' },
+    ])
+    expect(view.overlay.polylines[1].pts).toEqual([[30, 30], [40, 30]])
+    expect(focusProjectSolarStrings(view, null).overlay).toBe(view.overlay)
+  })
+
+  it('reports missing geometry while showing the available selected strings', () => {
+    const input = fixture()
+    const graph = graphOf(input)
+    graph.strings.push({ id: 'empty', ordered_panel_refs: [], route: [] })
+    const view = projectSolarDrawingView(input)
+    const focus = focusProjectSolarStrings(view, new Set(['string', 'empty']))
+    expect(focus.unavailable).toBe(true)
+    expect(focus.overlay.polylines.at(-1)).toEqual({ pts: [
+      [0.875, 1.875], [1.125, 1.875], [1.125, 2.125], [0.875, 2.125], [0.875, 1.875],
+    ], color: '#facc15' })
+    expect(focusProjectSolarStrings(view, new Set(['unknown']))).toEqual({ overlay: view.overlay, unavailable: true })
+
+    graph.strings[0].ordered_panel_refs = ['missing-panel']
+    const invalid = projectSolarDrawingView(input)
+    expect(invalid.reason).toBe('INVALID_GRAPH')
+    expect(focusProjectSolarStrings(invalid, new Set(['string']))).toEqual({ overlay: null, unavailable: true })
+  })
+
+  it('does not expose selected geometry while the canvas shows another version', () => {
+    const input = fixture()
+    const pending = projectSolarDrawingView({ ...input, scene: { ...input.scene, drawingKey: other } })
+    expect(pending.reason).toBe('SCENE_PENDING')
+    expect(focusProjectSolarStrings(pending, new Set(['string']))).toEqual({ overlay: null, unavailable: true })
   })
 })

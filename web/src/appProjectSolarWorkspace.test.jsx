@@ -6,6 +6,7 @@ import { parse } from '@babel/parser'
 import ProjectSolarWorkspace from './solar/ProjectSolarWorkspace.jsx'
 import ProjectSolarGraphForm from './solar/ProjectSolarGraphForm.jsx'
 import SolarStepEditor from './solar/SolarStepEditor.jsx'
+import { ProjectStringFocus } from './solar/SolarConductorForm.jsx'
 import SolarFlowRail from './solar/SolarFlowRail.jsx'
 import { useAppProjectSolarRuntime } from './solar/useAppProjectSolarRuntime.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
@@ -60,9 +61,10 @@ function element(node, inputs, components = {}) {
     if (node.type.startsWith('JSX')) throw new Error('Unsupported JSX form: ' + node.type)
     return evaluate(node, bindings)
   }
-  if (node.openingElement.name.type !== 'JSXIdentifier') throw new Error('Unsupported JSX name')
-  const name = node.openingElement.name.name
-  const component = components[name] ?? (name[0] === name[0].toLowerCase() ? name : null)
+  const { name: jsxName } = node.openingElement
+  const name = text(jsxName)
+  const component = jsxName.type === 'JSXMemberExpression' ? evaluate(jsxName, bindings)
+    : components[name] ?? (name[0] === name[0].toLowerCase() ? name : null)
   if (!component) throw new Error('Missing component binding: ' + name)
   const props = {}
   for (const attribute of node.openingElement.attributes) {
@@ -202,6 +204,7 @@ async function setup({ names = ['solar-settings', ...STEP, ...GRAPH, ...READ], .
   function Rail(props) { h.rails.push(props); return <SolarFlowRail {...props} /> }
   function Harness({ input }) {
     const [drawer, setDrawer] = React.useState('tools')
+    const [, setProjectStringFocus] = React.useState(null)
     const runtime = useAppProjectSolarRuntime({ projectMode: input.projectMode, projectSolar: input.projectSolar,
       projectCatalog: input.catalogState.projectCatalog, workspaceController: h.ws, sessionController: h.session,
       completedVersionRef, hostEnabled: input.projectMode && input.ENV_SOLAR_FLOW_RAIL && input.ENV_CAD_EDIT &&
@@ -213,8 +216,10 @@ async function setup({ names = ['solar-settings', ...STEP, ...GRAPH, ...READ], .
     h.runtime = runtime; h.adapter = adapter; h.drawer = drawer
     const solarOverlayStatus = evaluate(declaration('solarOverlayStatus').node.init, {
       projectMode: input.projectMode, projectSolarRefusal: adapter.projectSolarRefusal,
-      solarOverlayStatusOf, projectDrawing: { reason: null }, solarOverlayReason: null })
+      solarOverlayStatusOf, projectDrawing: { reason: null }, projectStringFocusView: { unavailable: false },
+      solarOverlayReason: null })
     const bindings = { ...input, ...adapter, projectSolarRuntime: runtime, mintCorrelationId: h.key, solarOverlayStatus,
+      ProjectStringFocus, setProjectStringFocus,
       projectEditorBinding: input.projectMode ? input.projectSolar.scope.binding : null,
       projectSolarAppReason, projectDrawing: { mode: 'ready' }, onRequestCatalogRun: h.legacy.run, onSubmitSolarFlowStep: h.legacy.run,
       onCloseSolarFlowStep: h.legacy.close, solarFormTool: null, solarFlowEditor: null,
@@ -246,6 +251,21 @@ async function setup({ names = ['solar-settings', ...STEP, ...GRAPH, ...READ], .
   await act(drain)
   return h
 }
+it('uses selected string IDs only for the current drawing, authority and client', () => {
+  const client = {}
+  const ids = ['string-a']
+  const focus = { binding: B, authorityKey: 'epoch-1', client, ids }
+  const inputs = { projectContextCurrent: true, projectStringFocus: focus, projectDrawingBinding: B,
+    projectSolar: { scope: { authorityKey: 'epoch-1' }, projectClient: client }, sameSolarDrawingBinding }
+  const currentIds = (changes = {}) => evaluate(declaration('currentStringIds').node.init, { ...inputs, ...changes })
+
+  expect(currentIds()).toEqual(ids)
+  expect(currentIds({ projectContextCurrent: false, projectSolar: null })).toBeNull()
+  expect(currentIds({ projectStringFocus: { ...focus, authorityKey: 'retired-epoch' } })).toBeNull()
+  expect(currentIds({ projectStringFocus: { ...focus, client: {} } })).toBeNull()
+  expect(currentIds({ projectDrawingBinding: { ...B, input_version_id: OUTPUT } })).toBeNull()
+})
+
 const last = values => values.at(-1)
 const tool = (h, name) => h.adapter.ribbonClusters.flatMap(c => c.tools).find(t => t.id === name)
 const absent = h => expect(h.view.container.querySelector('.project-solar-workspace')).toBeNull()

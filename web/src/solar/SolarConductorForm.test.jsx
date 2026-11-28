@@ -2,7 +2,7 @@ import React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import declaration from '../../../server/solar_tools/solar_string_conductors.json'
-import SolarConductorForm from './SolarConductorForm.jsx'
+import SolarConductorForm, { ProjectStringFocus } from './SolarConductorForm.jsx'
 import { PROJECT_SIZING_CONDUCTOR_REASONS, projectSizingConductorReason } from './solarSizingModel.js'
 import { createSolarProjectClient } from './solarProjectClient.js'
 import workerUnavailable from './__fixtures__/workerUnavailable.json'
@@ -718,4 +718,39 @@ describe('SolarConductorForm', () => {
     fireEvent.click(stringRow('A1'), { ctrlKey: true })
     expect(selectedIds()).toEqual(['T3'])
   })
+})
+
+it('publishes only the current project conductor selection and clears it on rebind or close', async () => {
+  const h = r9Harness()
+  const publish = vi.fn()
+  const renderForm = () => <ProjectStringFocus.Provider value={publish}>
+    <R9Form {...h.props} />
+  </ProjectStringFocus.Provider>
+  const lastFocus = () => publish.mock.calls.filter(([focus]) => typeof focus !== 'function').at(-1)?.[0]
+  const view = render(renderForm())
+  await waitFor(() => expect(stringRows()).toHaveLength(2))
+  expect(publish).not.toHaveBeenCalled()
+  fireEvent.click(stringRow('A1'))
+  const first = lastFocus()
+  expect(first).toEqual({ binding: r9Binding, authorityKey: 'epoch-1', client: h.client, ids: new Set(['T1']) })
+  fireEvent.click(screen.getByRole('button', { name: 'Clear selection' }))
+  expect(publish.mock.lastCall[0](first)).toBeNull()
+
+  fireEvent.click(stringRow('A2'))
+  const prior = lastFocus()
+  h.props = { ...h.props, solarBinding: r9Next }
+  h.context = r9Context(r9Graph(), r9Next)
+  act(() => h.real.setScope(r9Next, h.props.authorityKey))
+  view.rerender(renderForm())
+  expect(publish.mock.lastCall[0](prior)).toBeNull()
+  await waitFor(() => expect(stringRows()).toHaveLength(2))
+  expect(selectedIds()).toEqual([])
+  fireEvent.click(stringRow('A1'))
+  const replacement = lastFocus()
+  expect(replacement.binding).toEqual(r9Next)
+  expect(replacement.ids).toEqual(new Set(['T1']))
+  view.unmount()
+  const clear = publish.mock.lastCall[0]
+  expect(clear(replacement)).toBeNull()
+  expect(clear(prior)).toBe(prior)
 })

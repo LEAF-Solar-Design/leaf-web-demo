@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { buildConductorParams, conductorGaugeOptions, conductorRows, CONDUCTOR_REASONS,
   deriveProjectConductorState, buildProjectConductorRequest } from './solarConductorModel.js'
 import { projectSizingConductorReason } from './solarSizingModel.js'
@@ -12,7 +12,10 @@ const toggled = (set, id) => {
   return next
 }
 
+export const ProjectStringFocus = createContext(null)
+
 function ProjectSolarConductorForm(props) {
+  const publishFocus = useContext(ProjectStringFocus)
   const [selection, setSelection] = useState(null)
   const [choice, setChoice] = useState(null)
   const selectionRef = useRef(null)
@@ -41,6 +44,14 @@ function ProjectSolarConductorForm(props) {
   const rows = form.editable && declarationValid ? form.state.rows : []
   const currentSelected = selection?.scope === form.scope ? selection.selected : new Set()
   const currentGauge = choice?.scope === form.scope ? choice.gauge : ''
+  const focusIds = rows.length && currentSelected.size && form.isScopeCurrent() ? currentSelected : null
+  const { binding, authorityKey, client } = form.scope
+  useLayoutEffect(() => {
+    if (!publishFocus || !focusIds) return undefined
+    const focus = { binding, authorityKey, client, ids: focusIds }
+    publishFocus(focus)
+    return () => publishFocus(current => current === focus ? null : current)
+  }, [publishFocus, binding, authorityKey, client, focusIds])
   selectionRef.current = { scope: form.scope, selected: currentSelected }
   choiceRef.current = { scope: form.scope, gauge: currentGauge }
   const disabled = !form.editable || !declarationValid || form.submitting || !form.isScopeCurrent()
