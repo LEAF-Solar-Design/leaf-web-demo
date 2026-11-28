@@ -2107,14 +2107,23 @@ class CustomizationService:
                 self._verified_record_fields(change, set())
                 result["package_path"] = receipt["package_path"]
                 if change.state is ChangeState.PUBLISHED:
-                    from branch_tools import sync_receipts
+                    from branch_tools import run_receipts, sync_receipts
                     from branch_tools.vendor.cad_tool_package.runner import package_digest
 
                     files, name = self._branch_package_files(change)
                     manifest = json.loads(files["tool.json"])
-                    branch = sync_receipts.latest(
-                        self.store, change.tenant_id, name, manifest["version"], package_digest(files),
-                    )
+                    digest = package_digest(files)
+                    try:
+                        branch = run_receipts.stage_view(
+                            self.store, change.tenant_id, name, manifest["version"], digest,
+                        )
+                    except Exception as exc:
+                        _LOG.warning("run_receipt_read_unavailable: exception=%s", type(exc).__name__)
+                        branch = None
+                    if branch is None:
+                        branch = sync_receipts.latest(
+                            self.store, change.tenant_id, name, manifest["version"], digest,
+                        )
                     if branch is not None:
                         result["branch"] = branch
                 else:
@@ -3486,7 +3495,9 @@ class CustomizationService:
                     os.environ["LEAF_TENANT_TOOLS_DIR"], change.tenant_id,
                     name, checked.manifest["version"])
                 if result.package_digest != checked.package_digest:
-                    raise tenant_publish.TenantPublishError("branch_version_conflict", 409)
+                    _, legacy_checked = tenant_publish.reviewed_package(files, name, timeout_cap_ms=None)
+                    if result.package_digest != legacy_checked.package_digest:
+                        raise tenant_publish.TenantPublishError("branch_version_conflict", 409)
             except (tenant_publish.TenantPublishError, OSError) as exc:
                 raise CustomizationServiceError("publish_not_available", 409) from exc
             return self._branch_publish_result(change, result)

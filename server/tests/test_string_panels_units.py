@@ -726,20 +726,41 @@ def test_anchor_reachability_preserves_unused_alternative_and_zero_hop_anchor():
     ({"max_system_voltage": 30}, "0 modules per string", "module"),
     ({"min_modules_per_string": 12, "max_modules_per_string": 8}, "bounds", "min_modules_per_string"),
 ])
-def test_string_refusal_recovery_survives_job_wait(params, cause, action):
+@pytest.mark.parametrize("name,filename", [
+    ("string-panels", REPO_DIR / "engine/registry.json"),
+    ("autofill-string-targets", SERVER_DIR / "catalog_tools.json"),
+])
+def test_string_refusal_recovery_survives_job_wait(name, filename, params, cause, action):
     import jobs
     import tool_loader
 
-    tools = json.loads((REPO_DIR / "engine/registry.json").read_text(encoding="utf-8"))["tools"]
-    record = next(tool for tool in tools if tool["name"] == "string-panels")
+    tools = json.loads(filename.read_text(encoding="utf-8"))["tools"]
+    record = next(tool for tool in tools if tool["name"] == name)
     drawing = {"polylines": [rect(0, 40, 80)]}
     original = copy.deepcopy(drawing)
     result = tool_loader.run_tool_dynamic(record, drawing, params, aps_live=False)
     for envelope in (result, jobs.failed_envelope_from(result)):
         error = envelope["error"]
         assert error["error_code"] == "BAD_PARAMS"
+        assert error["actor"] == "user"
+        assert error["retry_class"] == "after_action"
         assert cause in error["message"]
         assert params.get("panel_layer", "Panels") in error["message"]
         assert action in error["next_action"]
         assert envelope["result"] is None
     assert drawing == original
+
+
+def test_autofill_registration_trust_is_limited_to_shipped_read_only_body():
+    import tool_loader
+
+    tools = json.loads((SERVER_DIR / "catalog_tools.json").read_text(encoding="utf-8"))["tools"]
+    record = next(tool for tool in tools if tool["name"] == "autofill-string-targets")
+    builtin = SERVER_DIR / "builtins" / "string_panels.py"
+    assert tool_loader._is_trusted_builtin_path(record, builtin)
+    assert not tool_loader._is_trusted_builtin_path(
+        {**record, "capabilities": ["drawing.write"]}, builtin)
+    assert not tool_loader._is_trusted_builtin_path(
+        record, SERVER_DIR / "builtins" / "solar_solve_proposal.py")
+    assert not tool_loader._is_trusted_builtin_path(
+        record, SERVER_DIR / "authored" / "string_panels.py")

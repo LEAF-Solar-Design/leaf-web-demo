@@ -130,6 +130,112 @@ def test_self_approval_publishes_verified_reviewed_tenant_package(publishing, si
     assert state.client.get(BASE).json() == {"tools": [], "workspace_id": OTHER}
 
 
+def test_publish_caps_tenant_timeout_at_sixty_seconds(publishing):
+    state = publishing
+    manifest = json.loads(state.files["tool.json"])
+    manifest["timeout_ms"] = 600000
+    state.files["tool.json"] = json.dumps(manifest, indent=2).encode()
+    state.approve()
+    zipped = state.client.get(BASE + f"/{NAME}/{VERSION}/package").content
+    with zipfile.ZipFile(io.BytesIO(zipped)) as archive:
+        published = json.loads(archive.read(f"{NAME}/tool.json"))
+    assert published["timeout_ms"] == 60000
+    assert published["review"] == {"status": "reviewed"}
+    change = state.store.get_change_set(tenant_id=TENANT, change_set_id=state.change.change_set_id)
+    assert state.service._published_branch_result(change)["package_digest"] == (
+        state.client.get(BASE).json()["tools"][0]["package_digest"])
+
+
+@pytest.mark.parametrize("timeout", [30000, 60000])
+def test_publish_keeps_a_timeout_at_or_below_the_cap(publishing, timeout):
+    state = publishing
+    manifest = json.loads(state.files["tool.json"])
+    manifest["timeout_ms"] = timeout
+    state.files["tool.json"] = json.dumps(manifest, indent=2).encode()
+    state.approve()
+    zipped = state.client.get(BASE + f"/{NAME}/{VERSION}/package").content
+    with zipfile.ZipFile(io.BytesIO(zipped)) as archive:
+        assert json.loads(archive.read(f"{NAME}/tool.json"))["timeout_ms"] == timeout
+
+
+def test_reviewed_package_cap_is_deterministic():
+    files = package()
+    manifest = json.loads(files["tool.json"])
+    manifest["timeout_ms"] = 120000
+    files["tool.json"] = json.dumps(manifest, indent=2).encode()
+    capped_files, first = tenant_publish.reviewed_package(files, NAME)
+    _, second = tenant_publish.reviewed_package(files, NAME)
+    legacy_files, legacy = tenant_publish.reviewed_package(files, NAME, timeout_cap_ms=None)
+    assert first.package_digest == second.package_digest
+    assert first.package_digest != legacy.package_digest
+    assert json.loads(capped_files["tool.json"])["timeout_ms"] == 60000
+    assert json.loads(legacy_files["tool.json"])["timeout_ms"] == 120000
+    assert json.loads(files["tool.json"])["timeout_ms"] == 120000
+
+
+def test_interrupted_legacy_publication_recovers_after_the_cap(publishing, signer, monkeypatch):
+    state = publishing
+    manifest = json.loads(state.files["tool.json"])
+    manifest["timeout_ms"] = 120000
+    state.files["tool.json"] = json.dumps(manifest, indent=2).encode()
+    reviewed_package = tenant_publish.reviewed_package
+    with monkeypatch.context() as patch:
+        patch.setattr(tenant_publish, "reviewed_package",
+                      lambda files, name: reviewed_package(files, name, timeout_cap_ms=None))
+        legacy = tenant_publish.publish_tenant_tool(
+            state.files, NAME, TENANT, signer, state.root, NOW)
+    result = tenant_publish.publish_tenant_tool(
+        state.files, NAME, TENANT, signer, state.root, NOW)
+    assert result.package_digest == legacy.package_digest
+    assert result.package_digest != reviewed_package(state.files, NAME)[1].package_digest
+
+
+def test_conflicting_existing_version_still_conflicts(publishing, signer):
+    state = publishing
+    tenant_publish.publish_tenant_tool(state.files, NAME, TENANT, signer, state.root, NOW)
+    files = dict(state.files)
+    files["main.csx"] += b"\n// different content\n"
+    with pytest.raises(tenant_publish.TenantPublishError) as error:
+        tenant_publish.publish_tenant_tool(files, NAME, TENANT, signer, state.root, NOW)
+    assert error.value.code == "branch_version_conflict"
+
+
+def test_publish_refuses_past_the_version_scan_limit(publishing, signer, monkeypatch):
+    state = publishing
+    monkeypatch.setattr(tenant_catalog, "VERSION_SCAN_LIMIT", 2)
+    first = tenant_publish.publish_tenant_tool(
+        state.files, NAME, TENANT, signer, state.root, NOW)
+    (state.root / TENANT / NAME / "1.2.1").mkdir()
+    files = dict(state.files)
+    manifest = json.loads(files["tool.json"])
+    manifest["version"] = "1.2.2"
+    files["tool.json"] = json.dumps(manifest).encode()
+    with pytest.raises(tenant_publish.TenantPublishError) as error:
+        tenant_publish.publish_tenant_tool(files, NAME, TENANT, signer, state.root, NOW)
+    assert (error.value.code, error.value.status_code) == ("tenant_version_limit", 409)
+    assert not (state.root / TENANT / NAME / "1.2.2").exists()
+    assert tenant_publish.publish_tenant_tool(
+        state.files, NAME, TENANT, signer, state.root, NOW) == first
+
+
+def test_legacy_uncapped_publication_still_resolves(publishing, signer, monkeypatch):
+    state = publishing
+    manifest = json.loads(state.files["tool.json"])
+    manifest["timeout_ms"] = 120000
+    state.files["tool.json"] = json.dumps(manifest, indent=2).encode()
+    reviewed_package = tenant_publish.reviewed_package
+    with monkeypatch.context() as patch:
+        patch.setattr(tenant_publish, "reviewed_package",
+                      lambda files, name: reviewed_package(files, name, timeout_cap_ms=None))
+        legacy = tenant_publish.publish_tenant_tool(
+            state.files, NAME, TENANT, signer, state.root, NOW)
+        state.approve()
+    change = state.store.get_change_set(tenant_id=TENANT, change_set_id=state.change.change_set_id)
+    assert change.state is ChangeState.PUBLISHED
+    result = state.service._published_branch_result(change)
+    assert result["package_digest"] == legacy.package_digest
+
+
 @pytest.mark.parametrize("capability", ["files.write", "net.http", "files.write:/tmp", "net.http:https://example.com"])
 def test_forbidden_capabilities_write_nothing(tmp_path, signer, capability):
     files = package()

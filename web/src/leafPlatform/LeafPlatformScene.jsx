@@ -9,6 +9,7 @@ import DiagnosticsDetails from './DiagnosticsDetails.jsx'
 import BranchToolsPanel from './BranchToolsPanel.jsx'
 import OpenInStudioPanel from './OpenInStudioPanel.jsx'
 import { humanizeError } from '../errorHumanize.js'
+import { studioFeatureAvailable } from '../site/studioAvailability.js'
 import './leafPlatform.css'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -538,7 +539,9 @@ export default function LeafPlatformScene() {
             <button type="button" disabled={!selectedTarget || !!working} onClick={() => runAction(() => bridge.focusObject(selectedTarget, 'focus'), 'focus')}>{working === 'focus' ? 'Zooming...' : 'Zoom to'}</button>
           </div>
           {boundDetail?.identity === boundIdentity && boundDetail.project &&
-            <DrawingSyncRow key={boundIdentity} project={boundDetail.project} ready={state.ready} bridge={bridge} working={working} setWorking={setWorking} />}
+            (studioFeatureAvailable('cad.drawing-sync')
+              ? <DrawingSyncRow key={boundIdentity} project={boundDetail.project} ready={state.ready} bridge={bridge} working={working} setWorking={setWorking} />
+              : <div className="leaf-platform-summary" aria-label="Drawing sync"><h2>Drawing sync</h2><p>Sync back to AutoCAD is coming soon.</p></div>)}
           {state.ready?.capabilities?.runTool === true &&
             <BranchToolsPanel key={boundIdentity + ':' + state.ready.sessionId} bridge={bridge} working={working} setWorking={setWorking} />}
         </>}

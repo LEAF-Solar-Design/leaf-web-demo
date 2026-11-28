@@ -1132,6 +1132,17 @@ def build_suites() -> List[Suite]:
         # 31 tests + 4 more parametrizations = 35.
         Suite("server-solar-design-profiles", "server tests/test_solar_design_profiles.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_design_profiles.py"), 35),
+        Suite("tools-x12-offline", "X12 CAD standards evidence comparisons",
+              "pytest", REPO, [
+                  # Load stdlib before pytest adds the repo root (which has platform/).
+                  sys.executable, "-P", "-m", "pytest", "-o", "pythonpath=.",
+                  Path("tools", "xbench", "tests", "test_x12_layers.py").as_posix(),
+                  Path("tools", "xbench", "tests", "test_x12_text_styles.py").as_posix(),
+                  Path("tools", "xbench", "tests", "test_x12_title_blocks.py").as_posix(),
+                  Path("tools", "xbench", "tests", "test_x12_plot_styles.py").as_posix(),
+                  Path("tools", "xbench", "tests", "test_x12_entity_counts.py").as_posix(),
+                  "-q", "--color=no", "-r", "s", "-p", "no:cacheprovider",
+              ], 34),
         Suite("server-x07-offline", "server X07 isolated role and customer profile checks",
               "pytest", SERVER, _py_pytest("tests/test_solar_drawing_roles.py") + [
                   "tests/test_x07_role_selection.py",
@@ -4392,6 +4403,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_branch_dev_catalog.py"), 13),
         Suite("server-branch-sync-receipts", "server tests/test_branch_sync_receipts.py", "pytest", SERVER,
               _py_pytest("tests/test_branch_sync_receipts.py"), 37),
+        Suite("server-branch-run-receipts", "server tests/test_branch_run_receipts.py", "pytest", SERVER,
+              _py_pytest("tests/test_branch_run_receipts.py"), 25),
         Suite("server-tenant-catalog", "server tests/test_tenant_catalog.py", "pytest", SERVER,
               _py_pytest("tests/test_tenant_catalog.py"), 25),
         Suite("server-workspace-identity-echo", "server tests/test_workspace_identity_echo.py", "pytest", SERVER,

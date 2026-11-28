@@ -9,6 +9,8 @@ import zipfile
 from branch_tools import online_signer, tenant_catalog
 from branch_tools.package_check import check_branch_package
 
+TENANT_TIMEOUT_CAP_MS = 60_000  # tenant tools may block AutoCAD's UI thread for at most 60 s
+
 
 class TenantPublishError(RuntimeError):
     def __init__(self, code, status_code=503, failures=None):
@@ -33,7 +35,7 @@ def timestamp(now):
     return now.astimezone(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def reviewed_package(files, name):
+def reviewed_package(files, name, *, timeout_cap_ms=TENANT_TIMEOUT_CAP_MS):
     checked = check_branch_package(files, name)
     capabilities = (checked.manifest or {}).get("capabilities", [])
     if not isinstance(capabilities, list):
@@ -48,6 +50,10 @@ def reviewed_package(files, name):
         raise TenantPublishError("branch_package_invalid", 422, checked.failures)
     manifest = dict(checked.manifest)
     manifest["review"] = {"status": "reviewed"}
+    timeout = manifest.get("timeout_ms")
+    if (timeout_cap_ms is not None and isinstance(timeout, int) and not isinstance(timeout, bool)
+            and timeout > timeout_cap_ms):
+        manifest["timeout_ms"] = timeout_cap_ms
     files = dict(files)
     files["tool.json"] = online_signer.canonical_json(manifest)
     checked = check_branch_package(files, name)
@@ -89,18 +95,28 @@ def read_publication(root, tenant_id, name, version):
     return TenantPublishResult(name, version, entry[0]["package"]["package_digest"])
 
 
+def _matches_publication(result, digest, files, name) -> bool:
+    # an existing publication matches the capped digest, or the uncapped legacy digest of the same files
+    return (result.package_digest == digest or
+            reviewed_package(files, name, timeout_cap_ms=None)[1].package_digest == result.package_digest)
+
+
 def publish_tenant_tool(files, name, tenant_id, signer, root, now):
     if signer is None:
         raise TenantPublishError("signer_unavailable")
+    files_in = files
     files, checked = reviewed_package(files, name)
     version, digest = checked.manifest["version"], checked.package_digest
     destination = tenant_catalog._version(root, tenant_id, name, version)
     if destination.exists():
         result = read_publication(root, tenant_id, name, version)
-        if result.package_digest != digest:
+        if not _matches_publication(result, digest, files_in, name):
             raise TenantPublishError("branch_version_conflict", 409)
         refresh_revocations(root, tenant_id, signer, now)
         return result
+    if tenant_catalog.version_count(root, tenant_id, name,
+                                    tenant_catalog.VERSION_SCAN_LIMIT) >= tenant_catalog.VERSION_SCAN_LIMIT:
+        raise TenantPublishError("tenant_version_limit", 409)
     package = io.BytesIO()
     with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path, data in sorted(files.items()):
@@ -123,7 +139,7 @@ def publish_tenant_tool(files, name, tenant_id, signer, root, now):
         if exc.code != "version_exists":
             raise
         result = read_publication(root, tenant_id, name, version)
-        if result.package_digest != digest:
+        if not _matches_publication(result, digest, files_in, name):
             raise TenantPublishError("branch_version_conflict", 409) from exc
         return result
     return TenantPublishResult(name, version, digest)

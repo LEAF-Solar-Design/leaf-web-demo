@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>LeafSolarDesign.ScriptHost</AssemblyName>
+    <RootNamespace>LeafSolarDesign.ScriptHost</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../vendor/LeafSolarDesign.ScriptHost/Abstractions/*.cs" />
+    <Compile Include="../../vendor/LeafSolarDesign.ScriptHost/Run/ToolBudget.cs" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="autocad.net" Version="24.2.0" ExcludeAssets="runtime;native;contentfiles;build;buildTransitive" PrivateAssets="all" />
+    <PackageReference Include="autocad.net.core" Version="24.2.0" ExcludeAssets="runtime;native;contentfiles;build;buildTransitive" PrivateAssets="all" />
+    <PackageReference Include="autocad.net.model" Version="24.2.0" ExcludeAssets="runtime;native;contentfiles;build;buildTransitive" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

@@ -11,8 +11,8 @@ SERVER = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVER))
 
 from solar_grid_restitch import (
-    combine_flat_sequences, escalate, failed_group_indices, is_response_failed,
-    ordered_strings, restitch,
+    combine_flat_sequences, completed_prefix_strings, escalate, failed_group_indices,
+    is_response_failed, ordered_strings, restitch,
 )
 
 
@@ -43,6 +43,36 @@ def test_committed_split_group_strings(group):
     for committed, recorded in zip(sorted(actual), sorted(expected)):
         assert committed == recorded
     assert sum(map(len, actual)) == group["panel_count"]
+
+
+@pytest.mark.parametrize("group", GROUPS, ids=lambda g: g["group_block"])
+def test_completed_prefix_matches_saved_order_for_recorded_children(group):
+    responses = group["responses"]
+    rows = [piece["row_indices"] for piece in group["pieces"]]
+    merged = restitch(responses, rows)
+    saved = ordered_strings(merged)
+    previous = []
+    for count in range(1, len(responses) + 1):
+        preview = completed_prefix_strings(responses[:count], rows[:count])
+        assert preview
+        assert preview[:len(previous)] == previous
+        assert preview == saved[:len(preview)]
+        previous = preview
+    explicit_lengths = merged["data"]["best_result"]["info"]["sequence_length"]
+    assert len(previous) == len(explicit_lengths)
+
+
+def test_completed_prefix_waits_for_explicit_cuts_and_restitch_integrity():
+    first = response([[panel("a", 1), panel("b", 2)]], [1, 3])
+    second = response([[panel("c", 1), panel("d", 2)]], [])
+    assert completed_prefix_strings([first], [[0]]) == [["A"]]
+    assert completed_prefix_strings([first, second], [[0], [1]]) == [["A"], ["B", "C", "D"]]
+    duplicate = response([[panel("c", 1), panel("d", 1)]], [2])
+    assert completed_prefix_strings([first, duplicate], [[0], [1]]) == []
+    missing_info = deepcopy(second)
+    del missing_info["data"]["best_result"]["info"]
+    assert completed_prefix_strings([first, missing_info], [[0], [1]]) == []
+    assert completed_prefix_strings([second], [[1]]) == []
 
 
 def test_partial_beam_keeps_previous_length_and_commits_remainder():

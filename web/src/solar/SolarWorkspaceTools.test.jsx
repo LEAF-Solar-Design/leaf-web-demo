@@ -1039,7 +1039,7 @@ describe('F3 SolarEdge workspace integration', () => {
     p.transport.fetchImpl.mockResolvedValueOnce(guest())
     const file = f3Choose(); fireEvent.click(f3UploadButton())
     await waitFor(() => expect(screen.getByRole('status').textContent).toBe(
-      'Upload failed. A guest session cannot use the SolarEdge import, so sign in to an account.'))
+      `Upload failed. Selected file “${file.name}”. A guest session cannot use the SolarEdge import, so sign in to an account.`))
     expect(f3File().files[0]).toBe(file)
     fireEvent.click(f3UploadButton())
     await screen.findByLabelText('Alignment tolerance')

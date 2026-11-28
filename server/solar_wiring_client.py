@@ -33,7 +33,7 @@ def entity(graph, kind, tool, **fields):
             "validity": {"state": "valid", "reasons": []}, "extra": {}, **fields}
 
 
-def local_routes(graph, routing_constraints=None):
+def local_routes(graph, routing_constraints=None, *, drawing_keepouts=()):
     """Produce both terminal leads for every assigned string, in circuit order.
 
     The conductor is the explicit string conductor choice, never a guessed size.
@@ -75,10 +75,10 @@ def local_routes(graph, routing_constraints=None):
                        "input_number": assignment["input_number"],
                        "layer": graph["settings"]["home_run_layer"],
                        "routing_policy": "direct-terminal-lead-v1"}))
-    if routing_constraints is not None:
+    if routing_constraints is not None or drawing_keepouts:
         from solar_joint_homerun_routing import route_together
 
-        return route_together(routes, routing_constraints)
+        return route_together(routes, routing_constraints, drawing_keepouts=drawing_keepouts)
     return routes
 
 

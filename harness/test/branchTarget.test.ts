@@ -24,7 +24,7 @@ import {
 import { branchPackageDigest, submitBranchToolProposal } from "../src/vendor/mushy-author/agent/tools/submitBranchToolProposal.js";
 import * as branchSubmission from "../src/vendor/mushy-author/agent/tools/submitBranchToolProposal.js";
 import { decodeOperatorEntities } from "../src/vendor/mushy-author/agent/tools/decodeHtmlEntities.js";
-import { branchCompileCheck, setBranchCompileCheckForTests, type BranchCompileOutcome } from "../src/vendor/mushy-author/agent/tools/branchCompileCheck.js";
+import { branchCompileCheck, branchHostFloor, setBranchCompileCheckForTests, setBranchCompileNet48CheckForTests, type BranchCompileOutcome } from "../src/vendor/mushy-author/agent/tools/branchCompileCheck.js";
 import { FsTenantRepo } from "../src/vendor/mushy-author/agent/tools/fsTenantRepo.js";
 import * as repoPathSafety from "../src/vendor/mushy-author/agent/tools/repoPathSafety.js";
 import {
@@ -45,6 +45,7 @@ const servers: Server[] = [];
 
 afterEach(async () => {
   setBranchCompileCheckForTests(null);
+  setBranchCompileNet48CheckForTests(null);
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
   await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve, reject) => {
@@ -624,6 +625,108 @@ describe("branch stage lifecycle", () => {
     await expect(loop.stage(TENANT, "label", request(base))).rejects.toMatchObject({
       status: 422, reason: { code: "branch_author_no_submission", turns: 1, submit_calls: 0 },
     });
+  });
+});
+
+describe("D6 net48 host floor", () => {
+  const accepted: BranchCompileOutcome = {
+    status: "accept", ms: 1, allowlistSha256: ALLOWLIST_SHA,
+    summary: { pass: true, decision: "accept", errors: 0 },
+  };
+  const refused: BranchCompileOutcome = {
+    status: "refused", decision: "compile_failed", ms: 4,
+    diagnostics: ["main.csx(2,3): CS1061: missing MaxBy"],
+    structured: [{ file: "main.csx", line: 2, column: 3, code: "CS1061", message: "missing MaxBy" }],
+    summary: { pass: false, decision: "compile_failed", errors: 1 },
+  };
+  beforeEach(() => {
+    vi.stubEnv("LEAF_BRANCH_COMPILE_CHECK", undefined);
+    vi.stubEnv("LEAF_BRANCH_COMPILE_NET48_BIN", undefined);
+    setBranchCompileCheckForTests(async () => accepted);
+  });
+
+  it.each([
+    ["refused", refused, 2023, 2025],
+    ["accept", accepted, 2023, 2023],
+    ["timeout", { status: "unavailable", code: "timeout", ms: 4,
+      summary: { pass: false, decision: "unavailable", errors: 0 } } as BranchCompileOutcome, 2023, 2025],
+    ["not_configured", { status: "unavailable", code: "not_configured", ms: 0,
+      summary: { pass: false, decision: "unavailable", errors: 0 } } as BranchCompileOutcome, 2023, 2023],
+    ["higher declared", refused, 2026, 2026],
+  ] as const)("labels %s and binds the staged digest", async (_name, outcome, declared, expected) => {
+    const proposal = fixture("good-label-writer");
+    proposal.hosts.min_release = declared;
+    const check48 = vi.fn(async () => outcome);
+    setBranchCompileNet48CheckForTests(check48);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { base, bare, ports } = await setup([]);
+    let submitted: ReturnType<typeof submitBranchToolProposal> | undefined;
+    const loop = new AuthorLoop(ports, async input => {
+      submitted = await input.submitBranchToolProposal(proposal);
+      return { preview: "Done" };
+    });
+    const result = await loop.stage(TENANT, "write label", request(base));
+    const manifest = JSON.parse(git(bare.dir, ["show", result.receipt.staged_commit + ":branch-tools/label-writer/tool.json"]));
+    expect(manifest.hosts.min_release).toBe(expected);
+    expect(JSON.parse(submitted!.contents["tool.json"]).hosts.min_release).toBe(expected);
+    expect(submitted!.package_digest).toBe(branchPackageDigest(submitted!.contents));
+    expect(check48).toHaveBeenCalledTimes(1);
+    expect(check48).toHaveBeenCalledWith("label-writer", expect.any(Object), { target: "net48" });
+    const decision = outcome.status === "unavailable" ? `unavailable:${outcome.code}` : outcome.summary.decision;
+    expect(log).toHaveBeenCalledWith(`[harness] branch net48 check: decision=${decision} ms=${outcome.ms} min_release=${expected} tenant=${TENANT}`);
+    expect(result.compile_attempts).toHaveLength(1);
+  });
+
+  it("preserves V18 on net8 refusal and never runs net48", async () => {
+    setBranchCompileCheckForTests(async () => refused);
+    const check48 = vi.fn(async () => accepted);
+    setBranchCompileNet48CheckForTests(check48);
+    const { base, loop, sdk } = await setup([fixture("good-label-writer")]);
+    await expect(loop.stage(TENANT, "write label", request(base))).rejects.toMatchObject({
+      status: 422, reason: { rule: "V18" },
+    });
+    expect(sdk.replies[0].content[0].text).toContain("V18:");
+    expect(check48).not.toHaveBeenCalled();
+  });
+
+  it.each(["disabled", "unavailable"])("does not run net48 when net8 is %s", async mode => {
+    const check48 = vi.fn(async () => accepted);
+    setBranchCompileNet48CheckForTests(check48);
+    const { base, loop } = await setup([fixture("good-label-writer")]);
+    if (mode === "disabled") {
+      vi.stubEnv("LEAF_BRANCH_COMPILE_CHECK", "off");
+      await loop.stage(TENANT, "write label", request(base));
+    } else {
+      setBranchCompileCheckForTests(async () => ({ status: "unavailable", code: "timeout", ms: 1,
+        summary: { pass: false, decision: "unavailable", errors: 0 } }));
+      await expect(loop.stage(TENANT, "write label", request(base))).rejects.toMatchObject({ status: 422 });
+    }
+    expect(check48).not.toHaveBeenCalled();
+  });
+
+  it("keeps a thrown net48 check from failing a submission", async () => {
+    setBranchCompileNet48CheckForTests(async () => { throw new Error("checker failed"); });
+    const { base, bare, loop } = await setup([fixture("good-label-writer")]);
+    const result = await loop.stage(TENANT, "write label", request(base));
+    expect(JSON.parse(git(bare.dir, ["show", result.receipt.staged_commit + ":branch-tools/label-writer/tool.json"]))
+      .hosts.min_release).toBe(2025);
+  });
+
+  it("uses the snapshotted hosts when the caller mutates its proposal during a check", async () => {
+    const proposal = fixture("good-label-writer");
+    setBranchCompileNet48CheckForTests(async () => {
+      proposal.hosts.min_release = 2026;
+      return refused;
+    });
+    const { base, bare, loop } = await setup([proposal]);
+    const result = await loop.stage(TENANT, "write label", request(base));
+    expect(JSON.parse(git(bare.dir, ["show", result.receipt.staged_commit + ":branch-tools/label-writer/tool.json"]))
+      .hosts.min_release).toBe(2025);
+  });
+
+  it.each(["busy", "spawn_failed", "bad_output"] as const)("fails safe for unavailable %s", code => {
+    expect(branchHostFloor({ status: "unavailable", code, ms: 1,
+      summary: { pass: false, decision: "unavailable", errors: 0 } })).toBe(2025);
   });
 });
 

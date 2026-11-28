@@ -89,6 +89,7 @@ import { requiresReconciliation } from './errorPresentation.js'
 import DrawingDependencyReport from './components/DrawingDependencyReport.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
 import PromptBox, { shouldSkipPromptFocus } from './components/PromptBox.jsx'
+import { BUILD_TOOL_STARTER } from './lib/starterPrompts.js'
 import RoutePanel from './components/RoutePanel.jsx'
 import DegradedBanner from './components/DegradedBanner.jsx'
 import OperatorEntry from './components/operator/OperatorEntry.jsx'
@@ -550,6 +551,7 @@ export function boardDrawingFacts({ projectMode, shown, standaloneName, selected
     || binding.drawing_id !== selectedVersion.drawing_id) return null
   const facts = { project: true, version_id: selectedVersion.version_id, drawing_id: selectedVersion.drawing_id,
     name: (typeof projectIntake?.dwg === 'string' && projectIntake.dwg) || selectedVersion.name || 'Project drawing' }
+  if (projectIntake?.solar_design_graph) facts.solar = true
   return Array.isArray(projectIntake?.polylines) && Array.isArray(projectIntake?.layers)
     ? { ...facts, polylines: projectIntake.polylines.length, layers: projectIntake.layers.length }
     : { ...facts, pending: true }
@@ -2611,6 +2613,7 @@ export default function App() {
   const projectScene = viewerRef.current?.getDrawingScene?.()
   const projectDrawingBinding = projectSolar.scope.binding
   const projectContextView = projectSolarRuntime.contextView
+  const projectSolvePreview = projectSolarRuntime.solvePreview
   const projectContextCurrent = projectMode && projectSolarRuntime.contextCurrent()
   const projectSceneIntake = projectScene?.intake
   const projectSceneKey = projectScene?.drawingKey
@@ -2618,9 +2621,10 @@ export default function App() {
   const projectDrawing = useMemo(() => projectSolarDrawingView({
     solarBinding: projectDrawingBinding,
     contextView: projectContextView,
+    solvePreview: projectSolvePreview,
     current: projectContextCurrent,
     scene: { intake: projectSceneIntake, drawingKey: projectSceneKey, current: projectSceneReady },
-  }), [projectDrawingBinding, projectContextView, projectContextCurrent,
+  }), [projectDrawingBinding, projectContextView, projectSolvePreview, projectContextCurrent,
     projectSceneIntake, projectSceneKey, projectSceneReady])
   const projectEngineIntake = projectEditorEngine?.scopeKey === projectEditorKey ? projectEditorEngine.intake : null
   const engineObservationBinding = useMemo(() => projectEngineObservationBinding({
@@ -5540,6 +5544,7 @@ export default function App() {
           routeActive={!!route}
           mcpDiscoveryEnabled={!mock && !knownGuest}
           liveCallsAllowed={signedIn && !mock && !knownGuest && !signedOut}
+          starter={signedIn && !mock && !knownGuest && !signedOut ? BUILD_TOOL_STARTER : null}
           mock={mock}
           onOpenAuthor={onOpenAuthor}
           // Slice 8a round 3: the bar has no guard of its own. This is the

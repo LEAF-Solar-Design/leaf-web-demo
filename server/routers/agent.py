@@ -59,6 +59,7 @@ from pydantic import BaseModel
 import agent_audit
 import agent_gate
 import deps
+import drawing_identity
 import entitlements
 import entity_scope
 import platform_link
@@ -68,6 +69,27 @@ from envelopes import ErrorCode, error_response, with_envelope_fields
 from text_match import text_matches
 
 router = APIRouter()
+
+
+SAMPLE_DRAWING_BRANCH_REFUSAL = (
+    "sample_drawing_branch_refused: This is the built-in sample drawing, so a Branch tool "
+    "planned here would be built for the sample's layers, not yours. Open your own drawing "
+    "first (in AutoCAD, run Open in Studio, or open a drawing you sent to Studio), then ask again."
+)
+
+
+def sample_drawing_plan_refusal(action, args, session) -> Optional[str]:
+    """Refuse to plan a Branch tool against the built-in sample drawing; fails closed on a sample alias, never on a missing session."""
+    if (
+        action == "propose_build_plan"
+        and isinstance(args, dict)
+        and isinstance(args.get("plan"), dict)
+        and args["plan"].get("target") == "branch"
+        and isinstance(session, dict)
+        and drawing_identity.curated_identity(session.get("drawing_id")) is not None
+    ):
+        return SAMPLE_DRAWING_BRANCH_REFUSAL
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -164,6 +186,8 @@ def internal_gate(req: GateRequest,
         entity_scope.gate_scope_refusal(authority_session_id, authority_turn_id, req.tenant_id)
         if req.action in entity_scope.SCOPE_REFUSED_ACTIONS else None
     )
+    if scope_refusal is None:
+        scope_refusal = sample_drawing_plan_refusal(req.action, req.args, session)
     result = agent_gate.gate(req.tenant_id, req.session_id, req.turn_id,
                              req.action, req.args, tier_caps, tier=tier,
                              subject=turn_subject,

@@ -41,6 +41,71 @@ it('labels reports with the saved input version and opens the selected job', () 
   expect(actions.onOpenJob).toHaveBeenCalledExactlyOnceWith(historical)
 })
 
+const guardrails = (...rows) => ({ schema: 'leaf.solar-guardrails.v1', status: 'HEALTHY', rows })
+const stringVoltage = (...statuses) => ({
+  schema: 'leaf.solar-string-voltage.v1',
+  rows: statuses.map(status => ({ cold_dc_limit: { status } })),
+})
+const coldVerdict = status => ({ type: 'verdict', rule_id: 'NEC-690.7-VOC-COLD', status })
+const savedElectricalReport = (jobId, report, versionId = version.version_id, projectId = 'p1') => ({
+  ...job, job_id: jobId, input_version_id: versionId,
+  result: { ok: true, result: report, project_context: { project_id: projectId, input_version_id: versionId } },
+})
+const solarDrawing = { ...props.drawing, version_id: version.version_id, solar: true }
+const reportWorkspace = jobs => ({ ...props.workspace, project: { project_id: 'p1' }, jobs })
+
+it.each([
+  ['no saved electrical report', []],
+  ['a healthy summary without the cold-voltage rule', [savedElectricalReport('summary', guardrails())]],
+  ['a cold-voltage rule without a conclusive verdict', [savedElectricalReport('summary', guardrails(coldVerdict('info')))]],
+  ['an unverified string alongside an evaluated string', [savedElectricalReport('strings', stringVoltage('pass', 'unverified'))]],
+  ['an empty per-string report', [savedElectricalReport('strings', stringVoltage())]],
+  ['only older or foreign reports', [
+    savedElectricalReport('older', guardrails(coldVerdict('pass')), 'old-version'),
+    savedElectricalReport('other-project', guardrails(coldVerdict('pass')), version.version_id, 'p2'),
+  ]],
+])('flags a solar drawing with %s', (_, jobs) => {
+  render(<BoardTiles {...props} drawing={solarDrawing} workspace={reportWorkspace(jobs)} />)
+  expect(screen.getByRole('status')).toHaveTextContent(
+    'Electrical review incomplete. Cold-voltage check is missing or unverified for this drawing version.',
+  )
+})
+
+it.each([
+  ['a saved guardrails verdict', guardrails(coldVerdict('pass'))],
+  ['evaluated strings including a failing result', stringVoltage('pass', 'fail')],
+])('does not flag missing evidence for %s', (_, report) => {
+  const jobs = [savedElectricalReport('evaluated', report),
+    ...Array.from({ length: 5 }, (_, index) => ({ ...job, job_id: `unrelated-${index}` }))]
+  render(<BoardTiles {...props} drawing={solarDrawing} workspace={reportWorkspace(jobs)} />)
+  expect(screen.queryByRole('status')).toBeNull()
+})
+
+it.each([
+  ['a newer guardrails verdict', [stringVoltage('unverified'), guardrails(coldVerdict('pass'))]],
+  ['a newer string result', [guardrails(coldVerdict('info')), stringVoltage('pass')]],
+  ['an older guardrails verdict', [guardrails(coldVerdict('warning')), stringVoltage('unverified')]],
+])('flags incomplete evidence alongside %s', (_, reports) => {
+  const jobs = reports.map((report, index) => savedElectricalReport(`report-${index}`, report))
+  render(<BoardTiles {...props} drawing={solarDrawing} workspace={reportWorkspace(jobs)} />)
+  expect(screen.getByRole('status')).toHaveTextContent('Electrical review incomplete')
+})
+
+it('counts both evaluated reports and ignores a prior revision of the same project', () => {
+  const jobs = [
+    savedElectricalReport('summary', guardrails(coldVerdict('critical'))),
+    savedElectricalReport('strings', stringVoltage('pass', 'fail')),
+    savedElectricalReport('older', stringVoltage('unverified'), 'old-version'),
+  ]
+  render(<BoardTiles {...props} drawing={solarDrawing} workspace={reportWorkspace(jobs)} />)
+  expect(screen.queryByRole('status')).toBeNull()
+})
+
+it('leaves an ordinary project drawing without an electrical review status', () => {
+  render(<BoardTiles {...props} drawing={{ ...props.drawing, version_id: version.version_id }} workspace={reportWorkspace([])} />)
+  expect(screen.queryByRole('status')).toBeNull()
+})
+
 it('F64 opens tools from an empty project through SurfaceGrounds without a tool argument', () => {
   const actions = makeActions()
   const workspace = { ...props.workspace, built_tools: [] }

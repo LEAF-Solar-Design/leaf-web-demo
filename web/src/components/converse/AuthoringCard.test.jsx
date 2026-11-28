@@ -579,10 +579,96 @@ it('shows the Target row after the AutoCAD row for a published card', async () =
 })
 
 it('shows the waiting message and final row labels for a published card without a branch report', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-11-21T03:16:00Z'))
   getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: publishedPackage })
   const { container } = await mount()
   expect(screen.getByText('AutoCAD').nextElementSibling).toHaveTextContent(/^Deployed. AutoCAD picks it up within a minute.$/)
   expect(Array.from(container.querySelectorAll('dt'), row => row.textContent).slice(-2)).toEqual(['AutoCAD', 'Target'])
+})
+
+const receiptAt = '2026-11-27T15:28:00Z'
+const runAt = '2026-11-27T15:31:00Z'
+const localTime = at => new Date(at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+const fingerprint = 'roof.dwg | sent copy abcdef12 | 2 layers | 4 objects in model space'
+const receiptError = { code: 'denied', message: 'The tool was refused.' }
+
+it.each([
+  ['waiting', undefined, 60000, 'Deployed. AutoCAD picks it up within a minute.'],
+  ['not seen', undefined, 11 * 60000, 'Not seen in AutoCAD yet. Check that the plugin is signed in to this workspace.'],
+  ['arrived', { last_event: 'synced', arrived_at: receiptAt }, 0,
+    `Arrived in AutoCAD ${localTime(receiptAt)}. Not run yet.`],
+  ['verify failed', { last_event: 'verify_failed', verify_failed: { at: receiptAt, error: receiptError } }, 0,
+    `AutoCAD could not load it (${localTime(receiptAt)}): denied, The tool was refused.`],
+  ['ran ok', { last_event: 'ran', arrived_at: receiptAt,
+    last_run: { at: runAt, outcome: 'ok', duration_ms: 1234, drawing: fingerprint } }, 0,
+    `Arrived in AutoCAD ${localTime(receiptAt)}. Ran on roof.dwg: ok in 1.2 s (${localTime(runAt)})`],
+  ['ran failed', { last_event: 'run_failed', last_run: { at: runAt, outcome: 'failed', drawing: fingerprint, error: receiptError } }, 0,
+    `Ran on roof.dwg: failed (${localTime(runAt)}): denied, The tool was refused.`],
+  ['ran cancelled', { last_event: 'run_failed', last_run: { at: runAt, outcome: 'cancelled', drawing: fingerprint } }, 0,
+    `Ran on roof.dwg: cancelled (${localTime(runAt)})`],
+])('shows the AutoCAD %s display row', async (_state, branch, age, expected) => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date(runAt))
+  getAuthorStage.mockResolvedValue({ ...staged, target: 'branch', status: 'published', branch,
+    publication: { ...publishedPackage, published_at: new Date(Date.now() - age).toISOString() } })
+  await mount()
+  const row = screen.getByText('AutoCAD').nextElementSibling
+  expect(row).toHaveTextContent(expected)
+  if (branch?.last_run?.drawing) expect(row.querySelector('[title]')).toHaveAttribute('title', fingerprint)
+  for (const time of row.querySelectorAll('time')) {
+    expect(time).toHaveTextContent(localTime(time.getAttribute('datetime')))
+  }
+  if (branch?.verify_failed || branch?.last_run?.error) expect(row.querySelector('code')).toHaveTextContent('denied')
+})
+
+it.each([[0, '0 ms'], [999, '999 ms'], [1000, '1.0 s']])('formats a run duration of %s', async (duration_ms, label) => {
+  getAuthorStage.mockResolvedValue({ ...staged, status: 'published', branch: {
+    last_event: 'ran', last_run: { at: runAt, outcome: 'ok', duration_ms },
+  } })
+  await mount()
+  expect(screen.getByText('AutoCAD').nextElementSibling).toHaveTextContent(`Ran: ok in ${label}`)
+})
+
+it('uses updated_at for an old publication with no published_at', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date(runAt))
+  getAuthorStage.mockResolvedValue({ ...staged, status: 'published', updated_at: '2026-11-27T15:00:00Z' })
+  await mount()
+  expect(screen.getByText('AutoCAD').nextElementSibling).toHaveTextContent(
+    'Not seen in AutoCAD yet. Check that the plugin is signed in to this workspace.')
+})
+
+it('keeps polling a published Branch build every 15 seconds until a run arrives', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date(runAt))
+  const published = { ...staged, target: 'branch', status: 'published',
+    publication: { ...publishedPackage, published_at: runAt } }
+  getAuthorStage.mockResolvedValueOnce(published)
+    .mockResolvedValueOnce({ ...published, branch: { last_event: 'synced', arrived_at: receiptAt } })
+    .mockResolvedValue({ ...published, branch: { last_event: 'ran', last_run: { at: runAt, outcome: 'ok' } } })
+  await mount()
+  await advance(14999)
+  expect(getAuthorStage).toHaveBeenCalledTimes(1)
+  await advance(1)
+  expect(getAuthorStage).toHaveBeenCalledTimes(2)
+  await advance(15000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(3)
+  await advance(60000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(3)
+})
+
+it('bounds published Branch polling by 30 minutes from publication', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date(runAt))
+  getAuthorStage.mockResolvedValue({ ...staged, target: 'branch', status: 'published',
+    staged_at: '2026-11-27T14:00:00Z', publication: { ...publishedPackage,
+      published_at: new Date(Date.now() - 29 * 60000).toISOString() } })
+  await mount()
+  await advance(30000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(3)
+  await advance(60000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(4)
 })
 
 it('withholds the Target row for an unpublished card', async () => {

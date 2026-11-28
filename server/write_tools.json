@@ -351,7 +351,7 @@
     {
       "name": "solar-homeruns",
       "version": "1.0.0",
-      "description": "Route terminal leads for assigned strings, optionally sharing available aisle capacity.",
+      "description": "Route terminal leads for assigned strings using direct paths, explicit routing constraints, or saved aisle centerlines.",
       "kind": "script",
       "family_id": "stringing",
       "engine_op": "solar_homeruns",
@@ -369,6 +369,12 @@
           },
           "cancel": {
             "type": "boolean"
+          },
+          "saved_aisle_layer": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Layer of straight, open model-space polylines in the selected saved drawing. Each lead must connect on the selected centerlines. Choose this field or routing_constraints."
           },
           "routing_constraints": {
             "type": "object",

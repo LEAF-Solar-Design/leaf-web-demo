@@ -631,6 +631,7 @@ def _sidecar_bound(raw: bytes, payload: Dict[str, Any], payload_bytes: bytes,
         intake = dxf_intake.parse_dxf_bytes(
             raw, source_name=str(payload.get("dwg") or "edited.dxf"),
             include_model_entity_counts="model_entity_counts" in payload,
+            include_paper_entity_locations="paper_entity_locations" in payload,
         )
     except dxf_intake.DxfParseError:
         return False
