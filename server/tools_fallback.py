@@ -730,8 +730,13 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     if authored_revision_panel_moves.matches(description):
         verb, engine_op = "compare", "revision_panel_moves"
         drawing_body = authored_revision_panel_moves.build_body(description)
-        drawing_params = authored_revision_panel_moves.PARAMS
-        summary = "compares host-bound parent and current DXFs using the supplied floor base elevations"
+        drawing_params = authored_revision_panel_moves.parameter_schema(description)
+        if authored_revision_panel_moves.group_comparison_requested(description):
+            summary = "compares saved DXF group membership across the host-bound parent and current revisions"
+        elif authored_revision_panel_moves.layer_comparison_requested(description):
+            summary = "compares panel moves and source INSERT layers across the host-bound revisions"
+        else:
+            summary = "compares host-bound parent and current DXFs using the supplied floor base elevations"
     elif authored_recipe_retry.matches(description):
         verb, engine_op = "report", "recipe_save_recovery"
         drawing_body = authored_recipe_retry.build_body(description)
