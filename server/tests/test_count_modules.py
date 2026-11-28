@@ -946,29 +946,24 @@ def test_minimum_coverage_excludes_named_layers(prompt, excluded, solutions):
 
 @pytest.mark.parametrize("hide_every_layer", [False, True])
 def test_visible_panel_count_uses_saved_layer_state(hide_every_layer):
-    from io import StringIO
-
-    import ezdxf
     from dxf_intake import parse_dxf_bytes
+    from intake_dxf import intake_to_dxf
     from nl_router import classify
     from tool_loader import run_tool_dynamic
 
-    drawing = ezdxf.new("R2018")
-    panel = drawing.blocks.new("Solar Panel")
-    panel.add_lwpolyline([(0, 0), (2, 0), (2, 1), (0, 1)], close=True)
-    for name in ("Roof", "Alternate", "Frozen"):
-        drawing.layers.new(name)
-    drawing.layers.get("Alternate").off()
-    drawing.layers.get("Frozen").freeze()
-    if hide_every_layer:
-        drawing.layers.get("Roof").off()
-    handles = [
-        drawing.modelspace().add_blockref(panel.name, (i * 3, 0), dxfattribs={"layer": layer}).dxf.handle
-        for i, layer in enumerate(("Roof", "Alternate", "Frozen"))
+    source = region_intake()
+    source["blocks"]["Panel"]["children"][0].update(nrm=[0, 0, 1], elev=0, layer="0")
+    handles = ["100", "101", "102"]
+    source["inserts"] = [
+        {"name": "Panel", "layer": layer, "handle": handle, "x": i * 3, "y": 0, "z": 0}
+        for i, (layer, handle) in enumerate(zip(("Roof", "Alternate", "Frozen"), handles))
     ]
-    stream = StringIO()
-    drawing.write(stream)
-    intake = parse_dxf_bytes(stream.getvalue().encode())
+    source["hidden_layers"] = ["Alternate", "Roof"] if hide_every_layer else ["Alternate"]
+    dxf = intake_to_dxf(source)
+    # The writer emits off layers. Set the layer-table frozen bit for the separate control.
+    frozen_record = b"2\nFrozen\n70\n0\n62\n7\n"
+    assert dxf.count(frozen_record) == 1
+    intake = parse_dxf_bytes(dxf.replace(frozen_record, b"2\nFrozen\n70\n1\n62\n7\n"))
 
     catalog = json.loads((PATH.parents[2] / "engine" / "registry.json").read_text())["tools"]
     tool = next(t for t in catalog if t["name"] == "count-modules")
