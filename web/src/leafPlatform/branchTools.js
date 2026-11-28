@@ -24,12 +24,13 @@ export const TOOL_DECISIONS = {
   digest_mismatch: 'The installed package does not match this tool.',
   version_not_current: 'This tool version is no longer current. Refresh the tool list.',
   confirmation_declined: 'Confirmation was declined in AutoCAD.',
+  pick_cancelled: 'Cancelled in AutoCAD: no object was picked. Nothing changed.',
   run_tool_unavailable: 'This host cannot run tools.',
   args_too_large: 'Arguments exceed the 64 KiB limit.',
   invalid_response: 'The host returned an invalid tool response.',
 }
 const hostRefusals = new Set(['invalid_command', 'tool_not_installed', 'digest_mismatch',
-  'version_not_current', 'confirmation_declined', 'run_tool_unavailable',
+  'version_not_current', 'confirmation_declined', 'pick_cancelled', 'run_tool_unavailable',
   'malformed', 'unknown_key', 'signature_invalid', 'identity_mismatch', 'revoked',
   'stale_revocation_list', 'unreviewed', 'unentitled', 'host_api_too_low',
   'capability_violation', 'timeout', 'compile_failed', 'script_error', 'revocation_invalid'])
@@ -77,7 +78,8 @@ export function buildFormModel(params) {
       Object.keys(params).some((key) => !['type', 'properties', 'required', 'additionalProperties', 'title', 'description', '$schema'].includes(key))) {
     return [{ name: '$args', label: 'Arguments JSON', type: 'json', initial: '{}', wholeArgs: true }]
   }
-  return Object.entries(params.properties).map(([name, schema]) => {
+  // R2-11: AutoCAD asks the user to pick an x-leaf-pick input in the drawing, so the form never shows one.
+  return Object.entries(params.properties).filter(([, schema]) => !(plain(schema) && Object.hasOwn(schema, 'x-leaf-pick'))).map(([name, schema]) => {
     const supported = plain(schema) && Object.keys(schema).every((key) =>
       ['type', 'enum', 'default', 'title', 'description', 'minimum', 'maximum', 'minLength', 'maxLength'].includes(key))
     const type = supported && Array.isArray(schema.enum) && schema.enum.length ? 'enum'

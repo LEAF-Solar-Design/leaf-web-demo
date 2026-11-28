@@ -16,7 +16,16 @@ REQUIRED_KEYS = (
 PLAN_KEYS = frozenset((*REQUIRED_KEYS, "target_tool_name"))
 TARGETS = ("branch", "studio")
 CHANGE_KINDS = ("create", "revise")
-INPUT_TYPES = ("string", "integer", "boolean", "number")
+INPUT_TYPES = ("string", "integer", "boolean", "number", "pick")
+# R2-11: a pick input is an object the user picks in the drawing when the tool runs.
+PICK_KEYS = ("prompt", "dxf", "closed")
+MAX_PICK_INPUTS = 8
+# The DXF names Branch's picker accepts (PickSpec.KnownDxfNames, Branch2025 #746).
+PICK_DXF_NAMES = (
+    "LWPOLYLINE", "POLYLINE", "LINE", "ARC", "CIRCLE", "INSERT", "TEXT", "MTEXT", "HATCH", "POINT",
+    "SPLINE", "ELLIPSE", "SOLID", "3DFACE", "3DSOLID", "REGION", "RAY", "XLINE", "DIMENSION", "LEADER",
+    "MULTILEADER",
+)
 CAPABILITIES = ("drawing.read", "drawing.write")
 _TOOL_NAME = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
 _UNSAFE_TEXT = re.compile(r"[\x00-\x09\x0b-\x1f\x7f\ud800-\udfff]")
@@ -57,12 +66,24 @@ def _text_list(value, key, minimum, maximum, item_length):
         _text(item, key, 1, item_length)
 
 
-def _inputs(value):
+def _pick(item):
+    _require(item["default"] is None, "default")
+    _text(item["prompt"], "prompt", 1, 120)
+    dxf = item["dxf"]
+    _array(dxf, "dxf", 1, 16)
+    _require(all(isinstance(n, str) and n in PICK_DXF_NAMES for n in dxf) and len(set(dxf)) == len(dxf), "dxf")
+    _require(type(item.get("closed", False)) is bool, "closed")
+
+
+def _inputs(value, target):
     _array(value, "inputs", 0, 12)
     names = set()
     fields = ("name", "type", "default", "description")
+    picks = 0
     for item in value:
-        _object(item, "inputs", fields, fields)
+        pick = isinstance(item, dict) and item.get("type") == "pick"
+        _object(item, "inputs", (*fields, *PICK_KEYS) if pick else fields,
+                (*fields, "prompt", "dxf") if pick else fields)
         name = item["name"]
         _require(isinstance(name, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,39}", name), "name")
         _require(name not in names, "inputs")
@@ -70,6 +91,11 @@ def _inputs(value):
         kind = item["type"]
         _require(kind in INPUT_TYPES, "type")
         _text(item["description"], "description", 0, 200)
+        if pick:
+            picks += 1
+            _require(target == "branch" and picks <= MAX_PICK_INPUTS, "inputs")
+            _pick(item)
+            continue
         default = item["default"]
         if default is None:
             continue
@@ -133,7 +159,7 @@ def _validated_bytes(value):
         _text(value[key], key, minimum, maximum)
     for key, minimum, maximum in (("behavior", 1, 12), ("assumptions", 0, 8), ("acceptance", 0, 6)):
         _text_list(value[key], key, minimum, maximum, 240)
-    _inputs(value["inputs"])
+    _inputs(value["inputs"], value["target"])
     caps = value["capabilities"]
     _array(caps, "capabilities", 1, 2)
     _require(all(cap in CAPABILITIES for cap in caps) and len(set(caps)) == len(caps), "capabilities")
@@ -162,6 +188,12 @@ def _quote(text):
     return re.sub(r"(^|[\n\x85\u2028\u2029])=== ", r"\1> === ", text)
 
 
+def _inline_json(value):
+    # JSON text on one rendered line: escape the line separators a JSON string can hold.
+    text = _json(value).replace("\u2028", r"\u2028").replace("\u2029", r"\u2029")
+    return text.replace("\x85=== ", r"\u0085=== ")
+
+
 def render_description(plan: dict) -> str:
     digest = plan_digest(plan)
     target = "Studio tool" if plan["target"] == "studio" else "branch tool that runs inside AutoCAD"
@@ -177,8 +209,12 @@ def render_description(plan: dict) -> str:
     lines.extend(f"{i}. {_quote(item)}" for i, item in enumerate(plan["behavior"], 1))
     lines.append("Inputs:")
     for item in plan["inputs"]:
-        default = _json(item["default"]).replace("\u2028", r"\u2028").replace("\u2029", r"\u2029")
-        default = default.replace("\x85=== ", r"\u0085=== ")
+        if item["type"] == "pick":
+            pick = (f"pick in drawing, prompt {_inline_json(item['prompt'])}, dxf {', '.join(item['dxf'])}, "
+                    f"closed {_json(item.get('closed', False))}")
+            lines.append(f"- {item['name']} ({pick}): {_quote(item['description'])}")
+            continue
+        default = _inline_json(item["default"])
         lines.append(f"- {item['name']} ({item['type']}, default {default}): {_quote(item['description'])}")
     if not plan["inputs"]:
         lines.append("- none")

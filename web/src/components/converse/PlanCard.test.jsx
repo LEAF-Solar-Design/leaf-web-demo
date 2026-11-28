@@ -33,6 +33,16 @@ it('renders the plan contract as plain text and reports the replaced revision', 
   expect(screen.queryByRole('button')).toBeNull()
 })
 
+it('shows a pick input as a pick in the drawing, not a typed default', () => {
+  const pick = { name: 'handle', type: 'pick', default: null, description: 'Outline to mark',
+    prompt: 'Pick a closed polyline', dxf: ['LWPOLYLINE'], closed: true }
+  render(<PlanCard {...props} proposal={{ ...props.proposal, plan: { ...plan, inputs: [pick, ...plan.inputs] } }} />)
+  const row = screen.getByText('Pick in drawing: Pick a closed polyline').closest('tr')
+  expect(row).toHaveTextContent('handlePick in drawing: Pick a closed polylineOutline to mark')
+  expect(row).not.toHaveTextContent('none')
+  expect(screen.getByRole('table')).toHaveTextContent('thresholdnumber0Minimum area')
+})
+
 it('shows the Studio target and omits an empty answers section', () => {
   render(<PlanCard {...props} proposal={{ ...props.proposal, plan: { ...plan, target: 'studio', answers: {} } }} />)
   expect(screen.getByText('Runs in Studio')).toBeVisible()

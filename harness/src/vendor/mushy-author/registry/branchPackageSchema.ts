@@ -50,6 +50,56 @@ const object = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 const integer = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v);
 
+/**
+ * R2-11 pick inputs, mirroring PickSpec in Branch2025 PackageValidator.cs (Branch2025 #746).
+ * PICK_MIN_HOST_API is the first plugin host API (HostApi.Version) that prompts for x-leaf-pick inputs.
+ */
+export const PICK_MIN_HOST_API = 2;
+export const MAX_PICK_INPUTS = 8;
+/** The DXF entity names a pick may name: PickSpec.KnownDxfNames, in the same order. */
+export const PICK_DXF_NAMES: readonly string[] = Object.freeze(["LWPOLYLINE", "POLYLINE", "LINE", "ARC", "CIRCLE",
+  "INSERT", "TEXT", "MTEXT", "HATCH", "POINT", "SPLINE", "ELLIPSE", "SOLID", "3DFACE", "3DSOLID", "REGION", "RAY",
+  "XLINE", "DIMENSION", "LEADER", "MULTILEADER"]);
+const PICK_KEYS = ["prompt", "dxf", "closed", "implied"];
+// PickSpec.PrintablePrompt: 1..120 UTF-16 units, not all white space, and no control, format,
+// line or paragraph separator, lone surrogate, unassigned or private-use character.
+const PICK_PROMPT_REFUSED = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}\p{Cn}\p{Co}]/u;
+const printablePrompt = (v: unknown): boolean => typeof v === "string" && v.length >= 1 && v.length <= 120
+  && v.trim().length > 0 && !PICK_PROMPT_REFUSED.test(v);
+
+/** Check every x-leaf-pick declaration on params.properties against the R2-11 contract shape. */
+export function pickDiagnostics(params: unknown, hosts?: unknown): BranchDiagnostic[] {
+  if (!object(params) || !object(params.properties)) return [];
+  const errors: BranchDiagnostic[] = [];
+  let picks = 0;
+  for (const [name, property] of Object.entries(params.properties)) {
+    if (!object(property) || !Object.hasOwn(property, "x-leaf-pick")) continue;
+    picks++;
+    const path = `params.properties.${name}.x-leaf-pick`;
+    const fail = (message: string) => errors.push({ rule: "V7", path, message });
+    const pick = property["x-leaf-pick"];
+    if (property.type !== "string") fail("x-leaf-pick is only valid on a \"type\": \"string\" property");
+    if (!object(pick)) { fail("expected an object with prompt and dxf"); continue; }
+    for (const key of Object.keys(pick)) if (!PICK_KEYS.includes(key)) fail(`unknown key ${key}; allowed: ${PICK_KEYS.join(", ")}`);
+    if (!printablePrompt(pick.prompt)) fail("prompt must be 1..120 printable characters");
+    if (!Array.isArray(pick.dxf) || pick.dxf.length < 1 || pick.dxf.length > 16
+      || !pick.dxf.every(n => typeof n === "string" && PICK_DXF_NAMES.includes(n)) || new Set(pick.dxf).size !== pick.dxf.length) {
+      fail(`dxf must list 1..16 distinct names from: ${PICK_DXF_NAMES.join(", ")}`);
+    }
+    for (const key of ["closed", "implied"]) {
+      if (pick[key] !== undefined && typeof pick[key] !== "boolean") fail(`${key} must be a boolean`);
+    }
+  }
+  if (picks > MAX_PICK_INPUTS) {
+    errors.push({ rule: "V7", path: "params.properties", message: `at most ${MAX_PICK_INPUTS} x-leaf-pick inputs` });
+  }
+  const hostApi = object(hosts) ? hosts.min_host_api : undefined;
+  if (picks > 0 && !(integer(hostApi) && hostApi >= PICK_MIN_HOST_API)) {
+    errors.push({ rule: "V10", path: "hosts", message: `x-leaf-pick inputs need hosts.min_host_api >= ${PICK_MIN_HOST_API}` });
+  }
+  return errors;
+}
+
 /** Check common 2020-12 meta-schema constraints without interpreting user schemas. */
 function schemaValid(v: unknown, depth = 0): boolean {
   if (depth > 100) return false;
@@ -107,6 +157,7 @@ export function validateBranchPackage(
   if (typeof manifest.description !== "string" || [...manifest.description].length < 1 || [...manifest.description].length > 500) fail("V5", "description", "expected 1..500 characters");
   if (manifest.entry !== "main.csx" || !("main.csx" in files)) fail("V6", "entry", "main.csx is required");
   if (!object(manifest.params) || manifest.params.type !== "object" || !schemaValid(manifest.params)) fail("V7", "params", "expected an object JSON Schema");
+  errors.push(...pickDiagnostics(manifest.params, manifest.hosts));
   if (!object(manifest.returns) || !schemaValid(manifest.returns)) fail("V7", "returns", "expected a JSON Schema object");
   if (!Array.isArray(manifest.capabilities) || manifest.capabilities.some(c => c !== "drawing.read" && c !== "drawing.write")) fail("V8", "capabilities", "only drawing.read and drawing.write are permitted");
   if (manifest.family !== undefined && (typeof manifest.family !== "string" || !NAME.test(manifest.family) || manifest.family.length < 3 || manifest.family.length > 64)) fail("V9", "family", "invalid family");

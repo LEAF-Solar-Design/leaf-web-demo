@@ -184,6 +184,13 @@ choice, ask about it with ask_user before proposing, folding every open choice i
 card. Use ask_user only for decisions with no reasonable default. Present at most one card
 per turn with up to four questions. Limit each request to two cards
 and three plan revisions. At those limits, propose the best plan and state your assumptions.
+A branch tool's inputs are typed fields (string, integer, boolean, number) or picks. A pick
+input (type "pick") makes AutoCAD ask the user to pick one object in the drawing when the tool
+runs: give it default null, a short prompt for the command line, the dxf entity names it
+accepts (for example LWPOLYLINE) and closed true when the polyline must be closed. Any request
+to "ask me to pick" or "select" an object becomes a pick input, at most 8 per tool, asked in
+input order. Never promise in behavior, summary or output any interactive prompt that is not
+a pick input: the tool cannot ask anything else while it runs. Studio tools have no picks.
 Call propose_plan with the complete build plan and end your turn. Wait for approval
 before building. After approval call author_tool exactly once with its plan_confirmation_id.`;
 

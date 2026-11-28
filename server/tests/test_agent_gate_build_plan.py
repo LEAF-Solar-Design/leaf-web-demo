@@ -489,3 +489,19 @@ def test_retry_requires_failed_same_tenant_same_digest(author_api, prior):
     else:
         assert response.status_code == 409 and response.json()["reason_code"] == "retry_target_invalid"
         assert not charges
+
+
+def test_branch_plan_with_a_pick_input_reaches_the_author_description():
+    from test_build_plan import pick
+    plan = dict(create_plan(), target="branch", inputs=[pick()])
+    cid = propose(plan)
+    assert agent_gate.read_pending(cid)["args"] == {"plan": plan}
+    assert 'handle (pick in drawing, prompt "Pick a closed polyline", dxf LWPOLYLINE, closed true)' in (
+        build_plan.render_description(plan))
+
+
+def test_studio_plan_with_a_pick_input_is_refused():
+    from test_build_plan import pick
+    result = call("propose_build_plan", {"plan": dict(create_plan(), inputs=[pick()])})
+    assert result["decision"] == "deny" and result["reason"] == "plan_invalid_field:inputs"
+    assert not agent_gate.list_pending()

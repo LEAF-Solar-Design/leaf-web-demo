@@ -9,7 +9,7 @@ import { grantSecrets, redactSecrets } from "../redact.js";
 import { carriedFailureCategory, safeErrorMessage, withFailureCategory } from "./captureGuards.js";
 import type { BranchSubmissionResult } from "./tools/submitBranchToolProposal.js";
 import type { BranchCompileDiagnostic, BranchCompileSummary } from "./tools/branchCompileCheck.js";
-import { BranchPackageError } from "../registry/branchPackageSchema.js";
+import { BranchPackageError, MAX_PICK_INPUTS, PICK_DXF_NAMES, PICK_MIN_HOST_API } from "../registry/branchPackageSchema.js";
 
 export function branchTargetPrompt(revision?: { packagePath: string; version: string }): string {
   // The explicit import also makes tsc copy the artifact into the harness dist.
@@ -23,6 +23,17 @@ Use a 3..64 character lower-case kebab name, X.Y.Z version without leading zeros
 a 1..500 character description, object params JSON Schema and returns JSON Schema.
 hosts={min_release:2018..2030,min_host_api:integer>=1}; timeout_ms=1..600000;
 idempotent is boolean. Every number anywhere in the manifest must be a whole number (V15): defaults, minimum, maximum, multipleOf, enum and examples inside params and returns too. A fractional default such as 2.5 is refused. Leave it out of params and write it in main_csx: Ctx.Args.Value<double?>("x") ?? 2.5.
+Object picks (R2-11): when the plan lists a pick input, or the user asks to pick or select an
+object, declare a "type": "string" params property with an x-leaf-pick object. AutoCAD asks the
+user to pick in the drawing before the tool runs, and Ctx.Args carries the picked entity's handle
+as uppercase hex (the form id.Handle.ToString() gives). The tool never prompts itself.
+"handle": {"type": "string", "x-leaf-pick": {"prompt": "Pick a closed polyline", "dxf": ["LWPOLYLINE"], "closed": true, "implied": true}}
+x-leaf-pick keys: prompt (required, 1..120 printable characters, shown at the command line),
+dxf (required, 1..16 distinct DXF entity names from: ${PICK_DXF_NAMES.join(", ")}), closed (optional
+boolean, default false: a polyline must be closed) and implied (optional boolean, default false:
+use the one already-selected object that passes the filter without prompting). No other keys.
+At most ${MAX_PICK_INPUTS} pick inputs, prompted in params.properties key order. A package with any x-leaf-pick
+must set hosts.min_host_api to at least ${PICK_MIN_HOST_API}, the first plugin API version that supports picks.
 Maximum 64 total files
 (tool.json and main.csx count) and 4 MiB total, with tool.json at most 256 KiB.
 Only drawing.read and drawing.write capabilities are allowed. No files.* or net.http.
@@ -179,6 +190,45 @@ using (var tr = Ctx.Db.TransactionManager.StartTransaction()) {
   tr.Commit();
 }
 return new { marked, blocks };
+
+Worked example corner-marks (drawing.read and drawing.write; one pick input; idempotent=false):
+params: {"type": "object", "properties": {"handle": {"type": "string", "x-leaf-pick": {"prompt": "Pick a closed polyline", "dxf": ["LWPOLYLINE"], "closed": true, "implied": true}}, "radius": {"type": "integer", "minimum": 1, "default": 6}}, "required": ["handle"], "additionalProperties": false}
+hosts: {"min_release": 2023, "min_host_api": ${PICK_MIN_HOST_API}}
+main_csx:
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.Geometry;
+using Newtonsoft.Json.Linq;
+// The host has already asked the user to pick; handle is the picked entity's uppercase hex handle.
+string handle = Ctx.Args.Value<string>("handle");
+int radius = Ctx.Args.Value<int?>("radius") ?? 6;
+int marked = 0;
+using (var tr = Ctx.Db.TransactionManager.StartTransaction()) {
+  var layers = (LayerTable)tr.GetObject(Ctx.Db.LayerTableId, OpenMode.ForRead);
+  if (!layers.Has("CORNER-MARKS")) {
+    layers.UpgradeOpen();
+    var rec = new LayerTableRecord { Name = "CORNER-MARKS" };
+    layers.Add(rec);
+    tr.AddNewlyCreatedDBObject(rec, true);
+  }
+  var bt = (BlockTable)tr.GetObject(Ctx.Db.BlockTableId, OpenMode.ForRead);
+  var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+  Polyline outline = null;
+  foreach (ObjectId id in ms) {
+    Ctx.Cancel.ThrowIfCancellationRequested();
+    if (id.Handle.ToString() == handle) { outline = tr.GetObject(id, OpenMode.ForRead) as Polyline; break; }
+  }
+  if (outline == null || !outline.Closed) throw new System.ArgumentException("handle must name a closed polyline");
+  for (int i = 0; i < outline.NumberOfVertices; i++) {
+    var mark = new Circle(outline.GetPoint3dAt(i), Vector3d.ZAxis, radius);
+    mark.SetDatabaseDefaults(Ctx.Db);
+    mark.Layer = "CORNER-MARKS";
+    ms.AppendEntity(mark);
+    tr.AddNewlyCreatedDBObject(mark, true);
+    marked++;
+  }
+  tr.Commit();
+}
+return new { marked };
 
 Pinned API allowlist (types, members, namespaces, denials and capability gates):
 ${JSON.stringify(allowlist, null, 2)}`;
