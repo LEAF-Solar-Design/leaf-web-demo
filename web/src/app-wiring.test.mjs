@@ -447,7 +447,7 @@ it('R13G2B-05 workspace props use the existing canonical owners', () => {
     projectClient: 'projectSolar.projectClient', projectCatalog: 'catalogState.projectCatalog', isCurrent: 'projectSolar.isCurrent',
     FlowRail: 'SolarFlowRail', StepEditor: 'SolarStepEditor', GraphForm: 'ProjectSolarGraphForm',
     newProjectIntentKey: 'mintCorrelationId', onProjectSubmit: 'projectSolarRuntime.onProjectSubmit',
-    onEstimatePublished: '(receipt, captured, isCurrent) => seatProjectDrawingPublication(workspaceController, receipt,\n                    () => isCurrent() && workspaceController.getSnapshot().canonicalVersionId === captured.input_version_id)',
+    onEstimatePublished: '(receipt, captured, isCurrent) => seatProjectDrawingPublication(workspaceController, receipt,\n                      () => isCurrent() && workspaceController.getSnapshot().canonicalVersionId === captured.input_version_id)',
     submissionSignal: 'projectSolarRuntime.submissionSignal', openTool: 'projectSolarRuntime.openTool',
     onOpenTool: 'onOpenProjectSolarTool', onClose: 'onCloseProjectSolarTool', busy: 'projectSolarRuntime.busy',
     projectRunMemory: 'projectSolarRuntime.projectRunMemory', projectPending: 'projectSolarRuntime.projectPending',
@@ -901,7 +901,13 @@ describe('R13F project Solar execution and form ingresses', () => {
     const { branch, hosts } = r13ProjectHosts()
     assert.equal(branch.consequent.type, 'ConditionalExpression')
     assert.equal(r13Text(branch.consequent.test), 'solarFlowSeated')
+    const provider = r13One(n => n.type === 'JSXElement' && n.openingElement.name.type === 'JSXMemberExpression'
+      && n.openingElement.name.object.name === 'ProjectStringFocus'
+      && n.openingElement.name.property.name === 'Provider')
+    assert.ok(r13Find(n => n === provider, branch.consequent.consequent).includes(provider))
+    assert.equal(r13Text(provider.openingElement.attributes.find(a => a.name.name === 'value').value.expression), 'setProjectStringFocus')
     const workspace = r13One(n => n.type === 'JSXElement' && n.openingElement.name.name === 'ProjectSolarWorkspace', branch.consequent.consequent)
+    assert.ok(provider.children.includes(workspace))
     assert.equal(r13Text(workspace.openingElement.attributes.find(a => a.name.name === 'projectCatalog').value.expression), 'catalogState.projectCatalog')
     const paragraph = branch.consequent.alternate
     assert.equal(paragraph.type, 'JSXElement')
@@ -969,7 +975,10 @@ describe('R13F project Solar execution and form ingresses', () => {
     const imports = r13Find((node) => node.type === 'ImportDeclaration').map((node) => node.source.value)
     assert.ok(!imports.some((path) => /ProjectSolarReadPanel|useProjectRunController/.test(path)))
     const model = r13One(node => node.type === 'ImportDeclaration' && node.source.value === './solar/solarProjectDrawingModel.js')
-    assert.deepEqual(model.specifiers.map(node => [node.imported.name, node.local.name]), [['projectSolarDrawingView', 'projectSolarDrawingView']])
+    assert.deepEqual(model.specifiers.map(node => [node.imported.name, node.local.name]), [
+      ['focusProjectSolarStrings', 'focusProjectSolarStrings'],
+      ['projectSolarDrawingView', 'projectSolarDrawingView'],
+    ])
     const publication = r13One((node) => node.type === 'JSXAttribute' && node.name.name === 'consumeCatalogPublication')
     assert.equal(r13Text(publication.value.expression), 'catalogController.consumeCatalogPublication')
     const services = r13One((node) => node.type === 'VariableDeclarator' && node.id.name === 'catalogServices')
@@ -1471,7 +1480,10 @@ describe('R13F project Solar catalog attachment', () => {
     const imports = find((node) => node.type === 'ImportDeclaration').map((node) => node.source.value)
     assert.ok(!imports.some((path) => /ProjectSolarReadPanel|useProjectRunController/.test(path)))
     const model = r13One(node => node.type === 'ImportDeclaration' && node.source.value === './solar/solarProjectDrawingModel.js')
-    assert.deepEqual(model.specifiers.map(node => [node.imported.name, node.local.name]), [['projectSolarDrawingView', 'projectSolarDrawingView']])
+    assert.deepEqual(model.specifiers.map(node => [node.imported.name, node.local.name]), [
+      ['focusProjectSolarStrings', 'focusProjectSolarStrings'],
+      ['projectSolarDrawingView', 'projectSolarDrawingView'],
+    ])
     const checkoutImports = find((node) => node.type === 'ImportDeclaration'
       && (/useProjectCheckoutController/.test(node.source.value)
         || node.specifiers.some((specifier) => specifier.local.name === 'useProjectCheckoutController')))
@@ -1672,9 +1684,11 @@ describe('A1b-2 stored Solar graph wiring', () => {
     assert.equal(text(propExpression(element, 'ref').alternate), 'intake ? viewerRef : solarStarterViewerRef')
     assert.equal(text(propExpression(element, 'onIntakeOverride')), 'onViewerIntakeOverride')
     const projectDrawing = { intake: {}, drawingKey: 'project:canonical', overlay: {} }
-    const project = { ...scope, projectMode: true, projectDrawing }
-    for (const [prop, field] of [['intake', 'intake'], ['drawingKey', 'drawingKey'], ['solarOverlay', 'overlay'], ['key', 'drawingKey']])
+    const projectStringFocusView = { overlay: {} }
+    const project = { ...scope, projectMode: true, projectDrawing, projectStringFocusView }
+    for (const [prop, field] of [['intake', 'intake'], ['drawingKey', 'drawingKey'], ['key', 'drawingKey']])
       assert.equal(evaluate(propExpression(element, prop), project), projectDrawing[field])
+    assert.equal(evaluate(propExpression(element, 'solarOverlay'), project), projectStringFocusView.overlay)
     for (const prop of ['highlightHandles', 'markers', 'overlayPolylines', 'stringRoutes'])
       assert.equal(evaluate(propExpression(element, prop), project), undefined)
     assert.equal(evaluate(propExpression(element, 'pendingEdit'), project), null)
@@ -1733,12 +1747,19 @@ describe('A1b-2 stored Solar graph wiring', () => {
       assert.match(seated, /Solar flow tools/)
       assert.match(seated, /class="solar-flow-seat-content"/)
     }
+    const projectStatus = (reason, unavailable, projectSolarRefusal = null) => evaluate(declaration.init, {
+      projectMode: true, projectSolarRefusal, projectDrawing: { reason },
+      projectStringFocusView: { unavailable }, solarOverlayStatusOf: statusOf,
+    })
     for (const [reason, expected] of [['INVALID_SCALE', reasons.invalid_scale], ['OVERLAY_LIMIT', reasons.overlay_limit],
       ['GRAPH_PAIR_INVALID', reasons.invalid_graph], ['GRAPH_UNREADABLE', reasons.invalid_graph],
       ['INVALID_GRAPH', reasons.invalid_graph], ['GRAPHLESS', null], ['SCENE_PENDING', null]]) {
-      assert.equal(evaluate(declaration.init, { projectMode: true, projectSolarRefusal: null,
-        projectDrawing: { reason }, solarOverlayStatusOf: statusOf }), expected)
+      assert.equal(projectStatus(reason, false), expected)
     }
+    assert.equal(projectStatus(null, true), 'Selected string panel geometry is unavailable for this drawing.')
+    assert.equal(projectStatus('SCENE_PENDING', true), null)
+    assert.equal(projectStatus('INVALID_SCALE', true), reasons.invalid_scale)
+    assert.equal(projectStatus(null, true, { reason: 'Project unavailable' }), 'Project unavailable')
     for (const reason of ['refresh_pending', null, undefined, 'unknown', 'constructor', 'toString']) {
       assert.equal(statusOf(reason), null)
       assert.equal(renderStatus(h, statusOf(reason)), null)
