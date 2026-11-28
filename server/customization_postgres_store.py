@@ -3,7 +3,11 @@
 The operation methods remain in ``SQLiteCustomizationStore``. This adapter
 supplies PostgreSQL connections and translates the small SQL dialect surface
 used by those storage-independent methods. Schema creation is never a runtime
-side effect. Migration 0020 must already be present.
+side effect. Migration 0020 and subsequent additive migrations, including 0108
+for nullable tool_target (NULL means studio), must already be present. The
+inherited reservation and row mapper carry tool_target for both backends.
+The inherited publish_branch transaction uses the same write fence and audit
+CAS as publish, while leaving effective_catalogs untouched.
 """
 from __future__ import annotations
 
@@ -25,10 +29,12 @@ _TABLES = {
     "customization_audit_events",
     "customization_confirmations",
     "customization_publication_requests",
+    "customization_review_decisions",
     "customization_deployment_snapshots",
     "customization_deployment_audit",
     "customization_removal_requests",
     "customization_stage_attempt_history",
+    "customization_stage_grants",
 }
 _PG_NOW = (
     "to_char(clock_timestamp() AT TIME ZONE 'UTC', "

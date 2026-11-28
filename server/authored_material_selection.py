@@ -1,6 +1,7 @@
 """Author a provenance report for a checker selection bound by its project host."""
 import hashlib
 import json
+import math
 import re
 from decimal import Decimal
 
@@ -62,6 +63,13 @@ def _numeric_projection(value, exact_paths, path=""):
     return ("-" if sign else "") + trimmed + "e" + str(exponent + len(coefficient) - len(trimmed))
 
 
+def _range_checked_float(literal):
+    value = float(literal)
+    if not math.isfinite(value) or (value == 0 and re.match(r"[-0.]*[1-9]", literal)):
+        raise ValueError("Material number is outside the supported floating-point range.")
+    return value
+
+
 def bind_material_selection(intake, org_id, project_id, actor_id, material_id, context, *,
                             include_row_digests=False, include_row_values=False, exact_numbers=False):
     """Bind a host-provided selection against a separately authorized material ID."""
@@ -81,9 +89,12 @@ def bind_material_selection(intake, org_id, project_id, actor_id, material_id, c
             or material.get("media_type") != "application/json"
             or material.get("sha256") != source["sha256"] or material.get("byte_size") != source["byte_length"]):
         raise ValueError("Selection does not match the project's original JSON material.")
-    raw = originals.read_content(org_id, project_id, material).decode("utf-8-sig")
-    document = json.loads(raw, parse_float=Decimal if exact_numbers else float,
+    raw = originals.read_content(org_id, project_id, material)
+    originals.check_json_depth(raw)
+    document = json.loads(raw.decode("utf-8-sig"), parse_float=Decimal if exact_numbers else _range_checked_float,
                           object_pairs_hook=originals.unique_json_object)
+    if br'\u' in raw:
+        originals.check_json_unicode(document)
     pointer = context["selection"]["records_pointer"]
     rows = _selected_rows(document, pointer, context["row_count"])
     # JSON comparison preserves distinctions such as false versus 0.

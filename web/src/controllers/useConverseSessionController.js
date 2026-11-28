@@ -114,7 +114,9 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
   // refusal, handed straight to the live or mock transport's guard.
   // Nothing here stores it, so a retry that never reaches the transport
   // authorises nothing.
-  const startTurn = useCallback(async (text, classifierHint, { allowSecretOnce = false, requireImmediateTurn = false } = {}) => {
+  const startTurn = useCallback(async (text, classifierHint, {
+    allowSecretOnce = false, requireImmediateTurn = false, existingSessionOnly = false,
+  } = {}) => {
     // Only mock author staging needs local authority. Do not attach these ids
     // to the live session cache or load the mint for ordinary/live turns.
     if (isMockConversation() && classifierHint?.purpose === 'stage_authority') {
@@ -125,25 +127,30 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
       }
       return startMockStageAuthority(text, classifierHint, { allowSecretOnce })
     }
+    const existingSession = sessionRef.current
+    if (existingSessionOnly && !existingSession) throw new Error('Open the project conversation before staging native source.')
+    const generation = generationRef.current
     const requestedProjectId = projectRef.current
-    const requestedDrawingId = drawingRef.current
     const requestedProjectContext = projectContextRef.current
       ? { ...projectContextRef.current } : null
     const requestId = requestedProjectId ? createRequestId() : null
-    const send = async (id) => {
-      if (projectRef.current !== requestedProjectId || drawingRef.current !== requestedDrawingId) {
-        throw new Error('Project changed while starting the conversation')
+    const assertCurrent = (id, turnGeneration) => {
+      if (generationRef.current !== turnGeneration || sessionRef.current !== id) {
+        throw new Error('Conversation changed while starting the request')
       }
+    }
+    const send = async (id, turnGeneration) => {
+      assertCurrent(id, turnGeneration)
       const payload = { text, classifier_hint: classifierHint, allowSecretOnce }
       if (requestedProjectContext) payload.projectContext = requestedProjectContext
       if (requestedProjectId) {
         payload.queue = !requireImmediateTurn
         payload.request_id = requestId
       }
-      const response = await postMessage(id, payload)
-      if (projectRef.current !== requestedProjectId || drawingRef.current !== requestedDrawingId) {
-        throw new Error('Project changed while starting the conversation')
-      }
+      const response = existingSessionOnly
+        ? await postMessage(id, payload, { rejectRedirect: true })
+        : await postMessage(id, payload)
+      assertCurrent(id, turnGeneration)
       if (requireImmediateTurn && (!response.turn_id || response.status === 'queued')) {
         throw new Error('The conversation has not started this request. Wait for the current turn to finish, then try again.')
       }
@@ -166,15 +173,17 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
     // The response carries the session id the turn actually ran under, so a
     // caller that needs (session, turn) authority in the same continuation
     // never has to race the sessionId state update through a re-render.
-    const current = sessionRef.current || (await attach())
+    const current = existingSession || (await attach())
     try {
-      return await send(current)
+      return await send(current, generation)
     } catch (error) {
-      if (!retryNotFound || classifyAgentError(error) !== 'not_found') throw error
+      if (existingSessionOnly || !retryNotFound || classifyAgentError(error) !== 'not_found') throw error
+      assertCurrent(current, generation)
+      const retryGeneration = ++generationRef.current
       resetCached()
       sessionRef.current = null
       setSessionId(null)
-      return await send(await attach())
+      return await send(await attach(), retryGeneration)
     }
   }, [attach, resetCached, retryNotFound])
 

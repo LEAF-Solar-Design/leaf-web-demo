@@ -46,7 +46,7 @@ POLICY_ORDER: Dict[str, int] = {"auto": 0, "confirm-once": 1, "always-confirm": 
 
 _VALID_POLICIES = frozenset(POLICY_ORDER)
 _VALID_CATEGORIES = frozenset({"low", "medium", "high"})
-_VALID_DISPATCH_KINDS = frozenset({"app_api", "harness"})
+_VALID_DISPATCH_KINDS = frozenset({"app_api", "harness", "none"})
 _VALID_RUNGS = frozenset(range(0, 8))
 
 _ACTION_REQUIRED_FIELDS = frozenset({
@@ -55,7 +55,7 @@ _ACTION_REQUIRED_FIELDS = frozenset({
 })
 _ACTION_KNOWN_FIELDS = _ACTION_REQUIRED_FIELDS | frozenset({
     "args_schema", "timeout_s", "audit_extra", "enabled", "tenant_tightenable",
-    "cost_class",
+    "cost_class", "approval_ttl_s",
 })
 _TOP_LEVEL_KNOWN = frozenset({"version", "actions", "rate_limits", "approval_ttl_s",
                               "tier_overrides"})
@@ -126,6 +126,7 @@ class AgentAction:
     enabled: bool = True
     tenant_tightenable: bool = True
     cost_class: Optional[str] = None
+    approval_ttl_s: Optional[int] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -207,6 +208,25 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
                                                                                                                                  'minLength': 1,
                                                                                                                                  'maxLength': 128,
                                                                                                                                  'pattern': '^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])'}},
+                                                                                                           'row_grouping': {'type': 'object',
+                                                                                                            'properties': {'kind': {'type': 'string', 'const': 'provider_pairs'},
+                                                                                                                           'pair_key_field': {'type': 'string',
+                                                                                                                                              'minLength': 1,
+                                                                                                                                              'maxLength': 128,
+                                                                                                                                              'pattern': '^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])'},
+                                                                                                                           'provider_field': {'type': 'string',
+                                                                                                                                              'minLength': 1,
+                                                                                                                                              'maxLength': 128,
+                                                                                                                                              'pattern': '^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])'},
+                                                                                                                           'providers': {'type': 'array',
+                                                                                                                                         'prefixItems': [{'type': 'string',
+                                                                                                                                                          'minLength': 1,
+                                                                                                                                                          'maxLength': 120},
+                                                                                                                                                         {'type': 'string',
+                                                                                                                                                          'minLength': 1,
+                                                                                                                                                          'maxLength': 120}]}},
+                                                                                                            'required': ['kind', 'pair_key_field', 'provider_field', 'providers'],
+                                                                                                            'additionalProperties': False},
                                                                                                            'row_limit': {'type': 'integer',
                                                                                                                          'minimum': 1,
                                                                                                                          'maximum': 1000}},
@@ -807,6 +827,15 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
             "rate_limit_category": "medium", "timeout_s": 120,
             "audit_extra": ["tool", "dwg"], "cost_class": "write",
         },
+        "run_drawing_edit_tool": {
+            "description": "Dispatch a registered drawing.write tool on the user's own standalone drawing via POST /api/run (R3; creates vN+1, undoable from version history). Runs without an approval card; project drawings, solves, live APS runs, authoring, publishing and platform edits keep their own approval actions.",
+            "rung": 3, "required_capability": "run_write", "policy": "auto",
+            "tenant_tightenable": True,
+            "dispatch": {"kind": "app_api", "routes": ["POST /api/run"]},
+            "args_schema": _RUN_TOOL_SCHEMA,
+            "rate_limit_category": "medium", "timeout_s": 120,
+            "audit_extra": ["tool", "dwg"], "cost_class": "write",
+        },
         "run_solve_tool": {
             "description": "Request a Leaf cloud Solar proposal for the selected project. Every solve requires a fresh approval; it does not change the drawing.",
             "rung": 4, "required_capability": "solve", "policy": "always-confirm",
@@ -836,14 +865,27 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
             "rate_limit_category": "medium", "timeout_s": 30,
             "audit_extra": ["dwg", "to_version"],
         },
+        "propose_build_plan": {
+            "description": "Ask the user to approve an exact tool build plan.",
+            "rung": 5, "required_capability": "build", "policy": "always-confirm",
+            "approval_ttl_s": 1800,
+            "dispatch": {"kind": "none", "routes": []},
+            "args_schema": {"type": "object", "properties": {"plan": {"type": "object"}},
+                            "required": ["plan"], "additionalProperties": False},
+            "rate_limit_category": "high",
+        },
         "author_tool": {
-            "description": "Author a new tool, or revise one explicitly named authored tool, in the design-time sandbox (R5; nothing registered until R6).",
+            "description": "Author a new tool, or revise one explicitly named authored tool, in the design-time sandbox (R5; nothing registered until R6). Progress shows live on the build card. Do not state build, compile or publish status, and do not promise to check later.",
             "rung": 5, "required_capability": "build", "policy": "confirm-once",
             "dispatch": {"kind": "harness", "routes": ["POST /author"]},
             "args_schema": {"type": "object",
                             "properties": {"description": {"type": "string"},
                                            "mode": {"type": "string", "enum": ["build", "one_off"]},
                                            "target_tool_name": {"type": "string"},
+                                           # Optional authoring target (#3553); absent = studio.
+                                           "target": {"type": "string", "enum": ["studio", "branch"]},
+                                           "plan_confirmation_id": {"type": "string"},
+                                           "retry_of_change_set_id": {"type": "string", "format": "uuid"},
                                            "confirmation_id": {"type": "string"}},
                             "required": ["description"], "additionalProperties": False},
             "rate_limit_category": "high", "timeout_s": 600, "audit_extra": [],
@@ -1117,6 +1159,12 @@ def _parse(raw: Dict[str, Any]) -> AgentPolicy:
     tier_overrides = _parse_tier_overrides(
         raw["tier_overrides"] if "tier_overrides" in raw else {}, actions)
 
+    # Keep the legacy catalog visible during a disabled rollout. Validate the
+    # full file above so a configuration error cannot hide until rollout day.
+    from customization_flags import RolloutMode, mode
+    if mode("LEAF_STUDIO_PLAN_MODE") is RolloutMode.OFF:
+        actions.pop("propose_build_plan", None)
+
     return AgentPolicy(version=1, actions=actions, rate_limits=rate_limits,
                        approval_ttl_s=ttl, tier_overrides=tier_overrides)
 
@@ -1154,6 +1202,8 @@ def _parse_action(name: str, record: Any) -> AgentAction:
     routes = dispatch.get("routes")
     if not isinstance(routes, list) or any(not isinstance(r, str) for r in routes):
         raise PolicyError(f"actions.{name}.dispatch.routes: must be a list of strings")
+    if dispatch["kind"] == "none" and routes:
+        raise PolicyError(f"actions.{name}.dispatch.routes: none dispatch requires empty routes")
 
     rlc = record["rate_limit_category"]
     if rlc not in _VALID_CATEGORIES:
@@ -1192,6 +1242,12 @@ def _parse_action(name: str, record: Any) -> AgentAction:
     if timeout_s <= 0:
         raise PolicyError(f"actions.{name}.timeout_s: must be a positive integer; got {timeout_s}")
 
+    approval_ttl_s = None
+    if "approval_ttl_s" in record:
+        approval_ttl_s = security_int(record["approval_ttl_s"], field=f"actions.{name}.approval_ttl_s")
+        if not 60 <= approval_ttl_s <= 3600:
+            raise PolicyError(f"actions.{name}.approval_ttl_s: must be in 60..3600")
+
     cost_class = record.get("cost_class")
     if cost_class is not None and not isinstance(cost_class, str):
         raise PolicyError(f"actions.{name}.cost_class: must be a string or absent")
@@ -1213,6 +1269,7 @@ def _parse_action(name: str, record: Any) -> AgentAction:
             record.get("tenant_tightenable", MISSING),
             field=f"actions.{name}.tenant_tightenable", default=True),
         cost_class=cost_class,
+        approval_ttl_s=approval_ttl_s,
     )
 
 

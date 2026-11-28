@@ -48,6 +48,107 @@ def rig(authority, monkeypatch):
     runs.set_paused(prior_pause, "", "test")
 
 
+@pytest.mark.parametrize("variant", ["builtin", "one_corpus", "three_corpus", "foreign", "stale",
+                                     "project_refused", "role_only", "wrong_code_pin", "unscoped_corpus"])
+def test_execution_plan_reads_published_graph_without_scheduling(variant, monkeypatch, tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from lab_evaluate import trusted_registry
+    from lab_tool_manifests import corpus_capability
+    from routers import lab_activation as router
+
+    monkeypatch.setenv("LEAF_LAB_STORE", "sqlite")
+    monkeypatch.setenv("LEAF_LAB_RUN_STORE", "sqlite")
+    monkeypatch.setenv("LEAF_LAB_DB", str(tmp_path / "activation.db"))
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "test")
+    monkeypatch.setenv("LEAF_PLATFORM_POSTGRES_REQUIRED", "0")
+    monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1")
+    tenant = activation.deps.TenantContext("tenant-a", tier="hosted_pro")
+    monkeypatch.setattr(activation.entitlements, "entitlements_for",
+                        lambda tier: {"deploy": variant != "role_only"})
+    manifest = trusted_registry()["constant@1.0.0"]
+    configs = [{"value": 7}]
+    if variant in {"one_corpus", "three_corpus", "project_refused", "unscoped_corpus"}:
+        manifest, _ = corpus_capability()
+        configs = [
+            {"project_id": "c4f64fee-83ce-4ee9-92aa-bfb58e5c81a3",
+             "corpus": {"material_id": f"f7f1bcff-325b-4ddc-90e2-c030e079000{i}",
+                        "sha256": "b" * 64, "byte_size": 7},
+             "suite": {"material_id": "82c89d36-c813-4c9c-900c-a444b10e9481",
+                       "sha256": "c" * 64, "byte_size": 11}}
+            for i in range(3 if variant == "three_corpus" else 1)
+        ]
+        if variant == "unscoped_corpus":
+            del configs[0]["project_id"]
+        if variant != "project_refused":
+            import platform_link
+            platform_link._ensure_platform_package()
+            from leaf_platform import project_lifecycle
+            from routers import lab_runs
+            monkeypatch.setattr(lab_runs, "_corpus_actor", lambda tenant: "bound-actor")
+            monkeypatch.setattr(project_lifecycle, "require_project_role",
+                                lambda tenant, project, actor, write: None)
+
+    code_sha256 = "a" * 64 if variant == "wrong_code_pin" else manifest["version"]["code_sha256"]
+    blocks = [{"id": f"node-{i}", "registry": {"id": manifest["id"], "version": "1.0.0",
+               "code_sha256": code_sha256}, "settings": values} for i, values in enumerate(configs)]
+    graph = {"schema": "leaf.lab-graph.v1", "blocks": blocks, "pipes": [],
+             "outputs": {"answer": {"node": "node-0", "port": "result"}}}
+    doc = "preview-doc"
+    saved = lab_artifacts.save(str(tenant), doc, graph, None, "actor")
+    lab_artifacts.publish(str(tenant), doc, saved["revision"], "actor")
+    lab_artifacts.save(str(tenant), doc, {**graph, "outputs": {}}, saved["revision"], "actor")
+    app = FastAPI()
+    app.include_router(router.router)
+    read_tenant = activation.deps.TenantContext("tenant-b", tier="hosted_pro") if variant == "foreign" else tenant
+    app.dependency_overrides[activation.deps.require_tenant] = lambda: read_tenant
+    with TestClient(app) as client:
+        response = client.get("/api/lab/activations", params={"preview_doc_id": doc,
+                              "revision": 2 if variant == "stale" else 1, "interval_s": 90})
+        expected = {"foreign": 404, "stale": 409, "project_refused": 403, "role_only": 403}.get(variant, 200)
+        assert response.status_code == expected, response.json()
+        if expected == 200:
+            plan = response.json()
+            assert response.headers["Cache-Control"] == "private, no-store"
+            assert plan["revision"] == 1 and plan["graph_sha256"] == saved["sha256"]
+            assert plan["interval_s"] == 90 and plan["max_run_wall_s"] == 600
+            assert plan["outputs"] == graph["outputs"]
+            assert [item["id"] for item in plan["blocks"]] == [block["id"] for block in blocks]
+            if variant in {"one_corpus", "three_corpus"}:
+                for item, settings in zip(plan["blocks"], configs):
+                    assert item["inputs"] == {key: settings[key] for key in ("corpus", "suite")}
+                assert plan["blockers"] == [
+                    {"code": "lab_activation_corpus_authority_unavailable", "block": block["id"]}
+                    for block in blocks
+                ]
+                denied = client.post("/api/lab/activations", json={"doc_id": doc, "interval_s": 90,
+                                                                  "expected_revision": 1})
+                assert denied.status_code == 422
+                assert denied.json()["detail"]["code"] == "lab_activation_corpus_authority_unavailable"
+            elif variant == "wrong_code_pin":
+                assert plan["blockers"] == [{"code": "lab_graph_unknown_block", "block": "node-0"}]
+            elif variant == "unscoped_corpus":
+                assert plan["blockers"] == [{"code": "lab_graph_invalid_settings", "block": "node-0"}]
+                assert "inputs" not in plan["blocks"][0]
+            else:
+                assert plan["blockers"] == []
+                assert "inputs" not in plan["blocks"][0]
+        assert activation.list(str(tenant)) == []
+        assert runs._run(str(tenant), lambda sql: sql.execute(
+            "SELECT COUNT(*) AS count FROM lab_runs").fetchone()["count"]) == 0
+        if variant == "builtin":
+            activated = client.post("/api/lab/activations", json={"doc_id": doc, "interval_s": 90,
+                                                                    "expected_revision": 1})
+            assert activated.status_code == 202, activated.json()
+            assert activated.json()["revision"] == 1
+
+
+def test_create_refuses_stale_preview_revision(rig):
+    with pytest.raises(activation.Refused, match="publication_changed"):
+        activation.create(rig.tenant, "doc", 60, "subject-private", "subject-private", expected_revision=1)
+    assert activation.list(rig.tenant) == []
+
+
 def test_unpublished_refused(rig):
     rig.head["published_revision"] = None
     with pytest.raises(activation.Refused, match="lab_activation_unpublished"):

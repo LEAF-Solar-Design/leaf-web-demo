@@ -15,7 +15,7 @@ import envelopes
 import platform_link
 import solar_project_admission as policy
 import solar_project_context as project
-import solar_project_graph as graph
+import solar_project_graph as graph_adapter
 import solar_project_jobs as service
 import solar_tools
 from leaf_platform import canonical_jobs, entitlements as stored
@@ -23,6 +23,7 @@ from routers import capabilities as catalog_route, jobs as route
 import test_sip_r5_policy as policy_cases
 import test_campaign_capability_job_access as campaign_cases
 import test_project_scoped_read_tool as read_cases
+from test_sip_r3b_tools import case, graph  # noqa: F401
 
 _FIND_TOOL = deps.find_tool
 _ENGINE_TOOLS = deps.load_engine_registry_tools
@@ -117,6 +118,49 @@ def states(response):
     assert response.status_code == 200, response.text
     return {row["name"]: row["availability"] for family in response.json()["families"]
             for row in family["capabilities"] if "availability" in row}
+
+
+@pytest.mark.parametrize(("layer", "padding"), [
+    ("PV_KEEP_OUT", 0.25), ("Keepout-Access", 1), ("ROOF KEEPOUT", 2), ("Roof Aisles", None),
+])
+def test_homerun_routing_refusal_names_leads_in_preview_and_submit(lane, case, monkeypatch, layer, padding):
+    r3b = policy_cases.r3b
+    ctx = r3b.assigned_parent(lane.s, case)
+    ctx = r3b.canonical_custody(lane.s, monkeypatch, ctx.graph)
+    params = {"expected_rev": ctx.graph["rev"]}
+    baseline = r3b.direct(ctx, "solar-homeruns", params)
+    leads = [route for route in baseline["routes"] if route["route_kind"].endswith("homerun")]
+    assert leads
+    scale = ctx.graph["project"]["units"]["meters_per_unit"]
+    xs, ys = zip(*(point[:2] for route in leads for point in route["points"]))
+    if padding is None:
+        params["saved_aisle_layer"] = layer
+        top = max(ys) / scale + 1
+        points = [[min(xs) / scale, top], [max(xs) / scale, top]]
+    else:
+        left, right = min(xs) / scale - padding, max(xs) / scale + padding
+        bottom, top = min(ys) / scale - padding, max(ys) / scale + padding
+        points = [[left, bottom], [right, bottom], [right, top], [left, top]]
+    lane.s.set_parent({**ctx.intake, "polylines": [{
+        "handle": "A8", "layer": layer, "closed": padding is not None, "space": "model",
+        "pts": points,
+    }]})
+    pinned = graph_adapter.resolve_project_graph_context(lane.s.context())
+    policy_cases.r4.at(lane.a, monkeypatch, pinned, "solar-homeruns")
+
+    before = lane.s.head, list(lane.s.writes)
+    availability = states(preview(lane, params, "solar-homeruns"))["solar-homeruns"]
+    submitted = run(lane, params, "solar-homeruns")
+    assert availability["admission_checked"] is True and availability["runnable"] is False
+    assert availability["admission"]["status_code"] == submitted.status_code == 409
+    error = submitted.json()["error"]
+    assert availability["admission"]["error"] == error
+    assert error["reason_code"] == "JOINT_ROUTING_INFEASIBLE"
+    assert sorted(error["affected_leads"]) == sorted(
+        f"{route['from_ref']}/{route['route_kind']}" for route in leads
+    )
+    assert "manually" in error["message"]
+    assert (lane.s.head, lane.s.writes) == before and not lane.records
 
 
 def refusal(response, reason, status=409, message="Project Solar admission unavailable.", retry=False):
@@ -225,7 +269,7 @@ def test_sip_r5_existing_early_refusals(lane, monkeypatch):
 
 def test_sip_r5_seed_submission(lane, monkeypatch):
     monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
-    monkeypatch.setattr(graph, "publish_project_graph_commit", policy_cases.r4.forbidden)
+    monkeypatch.setattr(graph_adapter, "publish_project_graph_commit", policy_cases.r4.forbidden)
     before = deepcopy((lane.s.blobs, lane.s.versions, lane.s.fingerprints, lane.s.writes))
     response = run(lane)
     assert response.status_code == 202
@@ -367,7 +411,7 @@ def test_sip_r5_replay(lane, monkeypatch):
     params = body(lane)["params"]
     for target, name in ((project, "verify_at_admission"),
             (service, "_validate_new_project_graph_params"), (stored, "stored_job_entitlement_verdict"),
-            (graph, "_tool"), (graph, "publish_project_graph_commit")):
+            (graph_adapter, "_tool"), (graph_adapter, "publish_project_graph_commit")):
         monkeypatch.setattr(target, name, policy_cases.r4.forbidden)
     for status in ("queued", "succeeded"):
         row["status"] = status
@@ -406,7 +450,7 @@ def test_sip_r5_catalog_unchecked(lane, monkeypatch):
 
 def test_sip_r5_catalog_preview(lane, monkeypatch):
     monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
-    monkeypatch.setattr(graph, "publish_project_graph_commit", policy_cases.r4.forbidden)
+    monkeypatch.setattr(graph_adapter, "publish_project_graph_commit", policy_cases.r4.forbidden)
     original = policy.project_tool_admission
     calls = []
     def admission(*args, **kwargs):
@@ -520,7 +564,7 @@ def catalog_proposal(lane, monkeypatch):
     a.s.set_parent(policy_cases.r3b.embedded(value))
     a.params = {"grant_ref": "g1", "request": case[1]}
     a.solve_context = proposals.solve_context(value)
-    a.context = graph.resolve_project_graph_context(a.s.context())
+    a.context = graph_adapter.resolve_project_graph_context(a.s.context())
     a.grants = []
     monkeypatch.setattr(proposals.cloud, "resolve_grant", lambda ref, tenant:
         a.grants.append((ref, tenant)) or proposals.CloudGrant(tenant, "private-test-token"))

@@ -13,6 +13,8 @@ export interface TenantForgeConfiguration {
   isRemoteTenant(tenantId: string): boolean;
 }
 
+const TENANT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+
 function refused(): never { throw new Error("tenant Forge configuration refused"); }
 
 function keys(value: unknown, expected: string[]): value is Record<string, unknown> {
@@ -57,8 +59,13 @@ function origin(value: unknown): value is string {
 }
 
 /** Explicitly absent configuration retains existing local behavior.
- * Once configured, every tenant must have a closed forge/local entry. Unknown
- * tenants refuse rather than silently publishing a local-only catalog.
+ * Once configured, the document is `{version: 1, tenants, default?}`. Listed
+ * tenants keep their exact closed forge/local entry. Without `default`, an
+ * unlisted tenant refuses. The only accepted `default` is `{"mode":"local"}`:
+ * an unlisted tenant with a valid tenant id then resolves to local mode, so
+ * self-serve tenants created after the catalog was written can author. Local
+ * mode never yields a remote URL or a credential, so a default can never widen
+ * Forge access. An invalid tenant id refuses whether or not a default exists.
  */
 export function createTenantForgeConfigurationFromEnv(
   env: NodeJS.ProcessEnv = process.env,
@@ -73,13 +80,18 @@ export function createTenantForgeConfigurationFromEnv(
     || !isAbsolute(path) || !isAbsolute(credentialDir)) refused();
   let document: unknown;
   try { document = readJson(path, 128 * 1024); } catch { return refused(); }
-  if (!keys(document, ["version", "tenants"]) || document.version !== 1
-    || !document.tenants || typeof document.tenants !== "object" || Array.isArray(document.tenants)) refused();
+  const hasDefault = keys(document, ["version", "tenants", "default"]);
+  if (!hasDefault && !keys(document, ["version", "tenants"])) refused();
+  const catalog = document as Record<string, unknown>;
+  if (catalog.version !== 1
+    || !catalog.tenants || typeof catalog.tenants !== "object" || Array.isArray(catalog.tenants)) refused();
+  // Closed shape: `{"mode":"local"}` is the only default; forge needs a listed entry.
+  if (hasDefault && !(keys(catalog.default, ["mode"]) && catalog.default.mode === "local")) refused();
   const entries = new Map<string, Entry>();
   const origins = new Set<string>();
   const refs = new Set<string>();
-  for (const [tenant, value] of Object.entries(document.tenants)) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(tenant)) refused();
+  for (const [tenant, value] of Object.entries(catalog.tenants)) {
+    if (!TENANT_ID.test(tenant)) refused();
     if (keys(value, ["mode"]) && value.mode === "local") {
       entries.set(tenant, { mode: "local" });
     } else if (keys(value, ["mode", "remoteUrl", "credential_ref"]) && value.mode === "forge"
@@ -91,7 +103,11 @@ export function createTenantForgeConfigurationFromEnv(
     } else refused();
   }
   if (entries.size < 1 || entries.size > 1000) refused();
-  const entry = (tenant: string): Entry => entries.get(tenant) ?? refused();
+  const fallback: Local | undefined = hasDefault ? { mode: "local" } : undefined;
+  const entry = (tenant: string): Entry => {
+    if (typeof tenant !== "string" || !TENANT_ID.test(tenant)) refused();
+    return entries.get(tenant) ?? fallback ?? refused();
+  };
   const credentials = async (tenantId: string, remoteUrl: string): Promise<ForgeCredential | null> => {
     const selected = entry(tenantId);
     if (selected.mode !== "forge" || selected.remoteUrl !== remoteUrl) return null;

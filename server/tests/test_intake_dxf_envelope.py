@@ -57,6 +57,40 @@ def _get(record, code):
     return next(v for c, v in record if c == str(code))
 
 
+@pytest.mark.parametrize("unit,units_per_metre", [(4, 1000), (5, 100), (6, 1)])
+def test_reexport_preserves_insertion_units_and_native_coordinates(unit, units_per_metre):
+    points = [[0, 0], [units_per_metre, 0], [units_per_metre, units_per_metre / 2]]
+    source = intake_to_dxf({"polylines": [
+        {"handle": "A", "layer": "0", "pts": points, "closed": True},
+    ]}).replace(b"1\nAC1015\n", f"1\nAC1015\n9\n$INSUNITS\n70\n{unit}\n".encode(), 1)
+    parsed = parse_dxf_bytes(source)
+    assert parsed["insunits"] == unit
+    raw = intake_to_dxf(parsed)
+    assert _sections(raw)["HEADER"][-2:] == [("9", "$INSUNITS"), ("70", str(unit))]
+    reopened = parse_dxf_bytes(raw)
+    assert reopened["insunits"] == unit
+    assert reopened["polylines"] == parsed["polylines"]
+
+
+def test_reexport_distinguishes_unitless_and_absent_insertion_units():
+    assert "insunits" not in parse_dxf_bytes(intake_to_dxf({}))
+    assert parse_dxf_bytes(intake_to_dxf({"insunits": 0}))["insunits"] == 0
+
+
+def test_reexport_rejects_conflicting_insertion_units():
+    source = b"0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n9\n$INSUNITS\n70\n6\n0\nENDSEC\n0\nEOF\n"
+    parsed = parse_dxf_bytes(source)
+    assert "insunits_error" in parsed
+    with pytest.raises(intake_dxf.IntakeDxfError, match="insertion units"):
+        intake_to_dxf(parsed)
+
+
+@pytest.mark.parametrize("unit", [-1, 25, True, "4", 4.0, None])
+def test_reexport_rejects_invalid_insertion_unit_code(unit):
+    with pytest.raises(intake_dxf.IntakeDxfError, match="INSUNITS"):
+        intake_to_dxf({"insunits": unit})
+
+
 def _assert_pointers_resolve(raw):
     sections = _sections(raw)
     records = [record for name, pairs in sections.items() if name != "HEADER"
@@ -72,6 +106,72 @@ def _round_trip_with_resolved_pointers(intake):
     raw = intake_to_dxf(intake)
     _assert_pointers_resolve(raw)
     return parse_dxf_bytes(raw, source_name="x.dxf")
+
+
+@pytest.mark.parametrize("parent,middle,override", [
+    ("Roof", "Branch", "Override"),
+    ("Circuit-7", "Circuit-8", "Circuit-9"),
+    ("South Roof", "East Rack", "Manual Override"),
+])
+def test_reexport_preserves_nested_insert_paths_and_arrays(parent, middle, override):
+    def insert(handle, name, layer, columns, invisible=False):
+        return [(0, "INSERT"), (5, handle), (2, name), (8, layer),
+                (10, 5), (20, 10), (30, 2), (41, -2), (42, 3), (50, 90),
+                (210, 0), (220, 1), (230, 0), (70, columns), (71, 2), (44, 4), (45, 7),
+                (60, int(invisible))]
+
+    def block(name, *records):
+        return [(0, "BLOCK"), (2, name), *[pair for record in records for pair in record],
+                (0, "ENDBLK")]
+
+    pairs = [(0, "SECTION"), (2, "BLOCKS"),
+             *block("Module", [(0, "POINT"), (8, "0"), (10, 0), (20, 0)]),
+             *block("Tray", insert("A1", "Module", "0", 2),
+                    insert("A2", "Module", override, 3, invisible=True)),
+             *block("Rack", insert("B1", "Tray", "0", 1),
+                    insert("B2", "Tray", middle, 1)),
+             (0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES"),
+             *insert("C1", "Rack", parent, 2), (0, "ENDSEC"), (0, "EOF")]
+    parsed = parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in pairs).encode())
+    assert not parsed.get("parse_errors")
+    raw = intake_to_dxf(parsed)
+    reopened = parse_dxf_bytes(raw)
+    assert reopened["inserts"] == parsed["inserts"]
+    assert reopened["blocks"]["Tray"]["nested_inserts"][1]["invisible"] is True
+    for name in ("Rack", "Tray"):
+        assert reopened["blocks"][name]["nested_inserts"] == parsed["blocks"][name]["nested_inserts"]
+    sections = _sections(raw)
+    owners = {_get(row, 2): _get(row, 5) for row in _records(sections["TABLES"])
+              if row[0] == ("0", "BLOCK_RECORD")}
+    nested = {_get(row, 5): _get(row, 330) for row in _records(sections["BLOCKS"])
+              if row[0] == ("0", "INSERT")}
+    assert nested == {"A1": owners["Tray"], "A2": owners["Tray"],
+                      "B1": owners["Rack"], "B2": owners["Rack"]}
+    _assert_pointers_resolve(raw)
+
+
+@pytest.mark.parametrize("issue,match", [
+    ("incomplete", "nested INSERT data is incomplete"),
+    ("unresolved", "unresolved block reference"),
+    ("duplicate", "duplicate handle A"),
+    ("bad-count", "columns must be an integer"),
+])
+def test_reexport_rejects_unusable_nested_insert_data(issue, match):
+    intake = _small(with_blocks=True)
+    fixture = intake["blocks"]["Fixture"]
+    reference = {"name": "Leaf", "handle": "B", "layer": "0", "x": 0, "y": 0, "z": 0}
+    intake["blocks"]["Leaf"] = {"base": [0, 0, 0], "children": []}
+    fixture["nested_inserts"] = [reference]
+    if issue == "incomplete":
+        fixture["nested_inserts_incomplete"] = True
+    elif issue == "unresolved":
+        reference["name"] = "Missing"
+    elif issue == "duplicate":
+        reference["handle"] = "a"
+    elif issue == "bad-count":
+        reference["columns"] = 32768
+    with pytest.raises(intake_dxf.IntakeDxfError, match=match):
+        intake_to_dxf(intake)
 
 
 def test_exhausted_handle_space_is_rejected():
@@ -126,6 +226,154 @@ def test_case_distinct_textstyles_keep_mleader_style_pointers():
     back = _round_trip_with_resolved_pointers(intake)
     assert [(s["name"], s["textstyle"]) for s in back["mlstyles"]] == [
         ("M", "Standard"), ("N", "standard")]
+
+
+@pytest.mark.parametrize(("blocks", "children", "message"), [
+    (201, 1, "block database was capped"),
+    (1, 61, "truncated block children"),
+    (2, 62, "truncated block children"),
+])
+def test_reexport_refuses_truncated_block_data(blocks, children, message):
+    intake = parse_dxf_bytes(_block_capture_dxf(blocks, children))
+    with pytest.raises(intake_dxf.IntakeDxfError, match=message):
+        intake_to_dxf(intake)
+
+
+def _block_capture_dxf(blocks, children, *, nested_tail=False):
+    pairs = [(0, "SECTION"), (2, "BLOCKS")]
+    for index in range(blocks):
+        pairs.extend([(0, "BLOCK"), (2, f"Panel{index}")])
+        for child in range(children if index == 0 else 1):
+            pairs.extend([(0, "POINT"), (8, "0"), (10, child), (20, 0)])
+        if nested_tail and index == 0:
+            pairs.extend([(0, "INSERT"), (5, "A1"), (2, "Panel1"), (10, 60), (20, 0)])
+        pairs.append((0, "ENDBLK"))
+    pairs.extend([(0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES"),
+                  (0, "INSERT"), (5, "A2"), (2, "Panel0"), (10, 0), (20, 0),
+                  (0, "ENDSEC"), (0, "EOF")])
+    return "".join(f"{code}\n{value}\n" for code, value in pairs).encode()
+
+
+@pytest.mark.parametrize("nested_tail", [False, True])
+def test_reexport_retains_complete_block_capture_at_limits(nested_tail):
+    intake = parse_dxf_bytes(_block_capture_dxf(200, 60, nested_tail=nested_tail))
+    reopened = parse_dxf_bytes(intake_to_dxf(intake))
+    assert len(reopened["blocks"]) == 200
+    assert "blocksCapped" not in reopened
+    assert reopened["blocks"]["Panel0"] == intake["blocks"]["Panel0"]
+
+
+def _nested_outline_dxf(vertex_groups, outline_groups=()):
+    pairs = [(0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, "Module"),
+             (0, "LWPOLYLINE"), (90, 4), (70, 1), *outline_groups, *vertex_groups,
+             (0, "ENDBLK"), (0, "BLOCK"), (2, "Panel"), (0, "INSERT"), (5, "A1"),
+             (2, "Module"), (10, 1), (20, 2), (0, "ENDBLK"), (0, "ENDSEC"),
+             (0, "SECTION"), (2, "ENTITIES"), (0, "INSERT"), (5, "A2"), (2, "Panel"),
+             (10, 4), (20, 5), (0, "ENDSEC"), (0, "EOF")]
+    return "".join(f"{code}\n{value}\n" for code, value in pairs).encode()
+
+
+@pytest.mark.parametrize(("bulges", "thickness"), [
+    ([0.5, 0, 0, 0], 0),
+    ([0, -0.25, 0, 0], 0),
+    ([0, 0, 0, 0], 1.25),
+    ([0, 0, -0.625, 0.125], -0.03125),
+    ([0, 0, 0, 0], 0),
+])
+def test_nested_block_polyline_preserves_edge_geometry(bulges, thickness):
+    vertices = []
+    for (x, y), bulge in zip([(0, 0), (3, 0), (3, 2), (0, 2)], bulges, strict=True):
+        vertices.extend([(10, x), (20, y)])
+        if bulge:
+            vertices.append((42, bulge))
+    drawing = parse_dxf_bytes(_nested_outline_dxf(vertices, [(39, thickness)]))
+    exported = intake_to_dxf(drawing)
+    reopened = parse_dxf_bytes(exported)
+    assert reopened["blocks"]["Panel"]["nested_inserts"] == drawing["blocks"]["Panel"]["nested_inserts"]
+    for intake in (drawing, reopened):
+        outline, = intake["blocks"]["Module"]["children"]
+        assert outline.get("bulges", [0] * 4) == bulges
+        assert outline.get("thickness", 0) == thickness
+        assert ("bulges" in outline) == any(bulges)
+        assert ("thickness" in outline) == bool(thickness)
+    outline, = (record for record in _records(_sections(exported)["BLOCKS"])
+                if record[0] == ("0", "LWPOLYLINE"))
+    assert [float(value) for code, value in outline if code == "42"] == [b for b in bulges if b]
+    assert [float(value) for code, value in outline if code == "39"] == ([thickness] if thickness else [])
+
+
+@pytest.mark.parametrize("invalid_groups", [
+    [(39, "nan")], [(42, "nan")], [(42, 1), (42, -1)],
+])
+def test_nested_block_polyline_refuses_malformed_geometry(invalid_groups):
+    vertices = [(10, 0), (20, 0), *invalid_groups, (10, 3), (20, 2)]
+    drawing = parse_dxf_bytes(_nested_outline_dxf(vertices))
+    with pytest.raises(intake_dxf.IntakeDxfError, match="truncated block children"):
+        intake_to_dxf(drawing)
+
+
+@pytest.mark.parametrize("extra", [
+    [(0, "POINT"), (10, 1), (20, 2)] * 60,
+    [(0, "LWPOLYLINE"), (10, 0), (20, 0), (42, "nan"), (10, 1), (20, 1)],
+    [(0, "LWPOLYLINE"), (10, "bad"), (20, 0), (42, "nan")],
+])
+def test_legacy_block_geometry_drop_does_not_hide_another_omission(extra):
+    pairs = [(0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, "Module"),
+             (0, "LINE"), (10, 0), (20, 0), *extra,
+             (0, "ENDBLK"), (0, "ENDSEC"), (0, "EOF")]
+    drawing = parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in pairs).encode())
+    assert drawing["blocks"]["Module"]["dropped_legacy_geometry"] == 1
+    with pytest.raises(intake_dxf.IntakeDxfError, match="truncated block children"):
+        intake_to_dxf(drawing)
+
+
+@pytest.mark.parametrize("name,reference,font,bigfont,width,oblique,label_kind", [
+    ("ModuleNotes", "ModuleNotes", "txt.shx", "", 1.0, 0, "TEXT"),
+    ("PanelLabels", "panellabels", "simplex.shx", "bigfont.shx", 0.85, 12, "MTEXT"),
+    ("String Labels", "String Labels", "arial.ttf", "", 1.25, -15, "TEXT"),
+])
+def test_reexport_retains_only_used_text_styles(name, reference, font, bigfont, width, oblique, label_kind):
+    style = [(70, 0), (40, 2), (41, width), (50, oblique), (71, 0), (42, 2), (3, font), (4, bigfont)]
+    pairs = [(0, "SECTION"), (2, "TABLES"), (0, "TABLE"), (2, "STYLE"), (70, 2),
+             (0, "STYLE"), (2, name), *style, (0, "STYLE"), (2, "UnusedLabels"), (3, "unused.shx"),
+             (0, "ENDTAB"), (0, "ENDSEC"),
+             (0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, "Module"),
+             (0, "TEXT"), (5, "A0"), (1, "Module label"), (7, reference),
+             (10, 0), (20, 0), (40, 2), (0, "ENDBLK"),
+             (0, "BLOCK"), (2, "Rack"), (0, "INSERT"), (5, "A1"), (2, "Module"),
+             (10, 1), (20, 2), (0, "ENDBLK"), (0, "ENDSEC"),
+             (0, "SECTION"), (2, "ENTITIES"), (0, "INSERT"), (5, "A2"), (2, "Rack"),
+             (10, 4), (20, 5), (0, label_kind), (5, "A3"), (1, "Drawing label"),
+             (7, reference), (10, 2), (20, 3), (40, 2), (0, "ENDSEC"), (0, "EOF")]
+    source = parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in pairs).encode())
+    raw = intake_to_dxf(source)
+    reopened = parse_dxf_bytes(raw)
+    for drawing in (source, reopened):
+        assert drawing["inserts"][0]["handle"] == "A2"
+        assert drawing["blocks"]["Rack"]["nested_inserts"][0]["handle"] == "A1"
+        assert drawing["blocks"]["Module"]["children"][0]["style"] == reference
+        assert drawing["texts"][0]["style"] == reference
+        assert set(drawing["text_styles"]) == {name.casefold()}
+    assert reopened["text_styles"] == source["text_styles"]
+    exported = [record for record in _records(_sections(raw)["TABLES"])
+                if record[0] == ("0", "STYLE")]
+    assert {_get(record, 2) for record in exported} == {"Standard", name}
+    custom, = [record for record in exported if _get(record, 2) == name]
+    assert custom[6:] == [(str(code), str(value)) for code, value in style]
+    _assert_pointers_resolve(raw)
+
+
+@pytest.mark.parametrize("catalogue,error", [
+    ({}, "missing STYLE definition"),
+    ({"label": {"name": "Other"}}, "STYLE name does not match"),
+    ({"label": {"name": "Label", "width": "nan"}}, "invalid width"),
+])
+def test_reexport_refuses_unresolved_or_invalid_text_style(catalogue, error):
+    drawing = _small(with_blocks=True)
+    drawing["texts"] = [{"layer": "0", "pt": [0, 1], "text": "Label", "style": "Label"}]
+    drawing["text_styles"] = catalogue
+    with pytest.raises(intake_dxf.IntakeDxfError, match=error):
+        intake_to_dxf(drawing)
 
 
 def test_case_distinct_block_records_keep_definition_owners():
@@ -236,7 +484,7 @@ def test_r2000_document_envelope_and_legacy_handles(case):
         assert layer[-2:] == [("370", "-3"), ("390", _get(normal, 5))]
         if _get(layer, 2).casefold() == "defpoints":
             assert layer[-3] == ("290", "0")
-    back = parse_dxf_bytes(raw)
+    back = parse_dxf_bytes(raw, include_measurement_evidence=False)
     assert back["layers"] == intake["layers"]
     assert "dimstyles" not in back
     if case == "blocks-groups":
@@ -244,6 +492,13 @@ def test_r2000_document_envelope_and_legacy_handles(case):
         assert _get(user_block, 5) == "109"
         child = next(r for r in blocks if r[0] == ("0", "LINE"))
         assert _get(child, 5) == "10A"
+        # The default measurement view adds a handle-bound child path.
+        block = dict(parse_dxf_bytes(raw)["blocks"]["Fixture"])
+        path, = block.pop("beam_paths")
+        expected_child = intake["blocks"]["Fixture"]["children"][0]
+        assert path["pts"] == expected_child["pts"]
+        assert path["handle"] and path["layer"] == expected_child["layer"] and path["closed"] is False
+        assert {"Fixture": block} == intake["blocks"]
         assert back["blocks"] == intake["blocks"]
         assert back["groups"] == [{"handle": "10E", "owner": "10D", "name": "RACK",
                                    "flags": 0, "selectable": 1, "members": ["A", "100"]}]

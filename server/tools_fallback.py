@@ -11,6 +11,7 @@ so the demo runs before Lane B lands, and it also backs authored tools.
 """
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from datetime import datetime, timezone
@@ -43,10 +44,16 @@ def _centroid(pts: List[List[float]]) -> Tuple[float, float]:
     return (sx / len(pts), sy / len(pts))
 
 
-def _all_entities_by_layer(intake: Dict[str, Any]) -> Dict[str, int]:
+def _model_entities_by_layer(intake: Dict[str, Any]) -> Dict[str, int]:
+    census = intake.get("model_entity_counts")
+    if census is not None:
+        return census.copy()
+
     counts: Dict[str, int] = {}
     for key in ("polylines", "inserts", "faces3d"):
         for ent in intake.get(key) or []:
+            if ent.get("space") == "paper":
+                continue
             layer = ent.get("layer", "0")
             counts[layer] = counts.get(layer, 0) + 1
     return counts
@@ -69,7 +76,7 @@ def _bounds(polylines: List[Dict[str, Any]]) -> Tuple[float, float, float, float
 # --------------------------------------------------------------------------- #
 def op_count_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[dict, dict | None] | dict:
     layer = params.get("layer")
-    counts = _all_entities_by_layer(intake)
+    counts = _model_entities_by_layer(intake)
     if layer:
         layers = intake.get("layers") or []
         if layer not in counts and not any(
@@ -87,19 +94,153 @@ def op_count_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[d
     return ({"counts": counts, "total": sum(counts.values())}, None)
 
 
+class AreaMeasurementInputError(ValueError):
+    """The drawing cannot support the requested area measurement."""
+
+
+_DXF_AREA_SOURCE_UNITS = {
+    1: ("in", 0.0254),
+    2: ("ft", 0.3048),
+    3: ("mi", 1609.344),
+    4: ("mm", 0.001),
+    5: ("cm", 0.01),
+    6: ("m", 1.0),
+    7: ("km", 1000.0),
+    10: ("yd", 0.9144),
+    14: ("dm", 0.1),
+}
+
+
+def _boundaries_touch(edges, other_edges):
+    def turn(a, b, p):
+        return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+
+    for a, b in edges:
+        for c, d in other_edges:
+            if any(max(a[i], b[i]) < min(c[i], d[i]) or max(c[i], d[i]) < min(a[i], b[i])
+                   for i in (0, 1)):
+                continue
+            left, right = turn(a, b, c), turn(a, b, d)
+            near, far = turn(c, d, a), turn(c, d, b)
+            if min(left, right) <= 0 <= max(left, right) and min(near, far) <= 0 <= max(near, far):
+                return True
+    return False
+
+
+def _net_panel_areas(rings):
+    from dxf_spatial_clips import _polygon
+    from solar_ground_analysis import is_inside_polygon
+
+    if sum(len(p.get("pts", [])) for p in rings) > 2048:
+        raise AreaMeasurementInputError("Net area supports at most 2048 boundary vertices per selection.")
+
+    boundaries = []
+    elevations = set()
+    for poly in rings:
+        points = poly.get("pts", [])
+        if poly.get("width") or any(poly.get("bulges", ())) or any(
+            len(p) not in (2, 3) or not all(math.isfinite(v) for v in p) for p in points
+        ):
+            raise AreaMeasurementInputError("Net area requires straight finite boundaries without width.")
+        elevations.update(p[2] if len(p) == 3 else 0 for p in points)
+        if len(points) < 3 or len(elevations) > 1:
+            raise AreaMeasurementInputError("Net area requires closed boundaries on the same XY plane.")
+        try:
+            outline = _polygon([(p[0], p[1]) for p in points], (1, 0, 0, 0, 0, 1, 0, 0))
+        except ValueError as exc:
+            raise AreaMeasurementInputError("Net area requires simple polygon boundaries.") from exc
+        x, y = outline[0]
+        area = _shoelace_area([(px - x, py - y) for px, py in outline])
+        if not math.isfinite(area) or area == 0:
+            raise AreaMeasurementInputError("Net area requires finite, nonzero boundary areas.")
+        boundaries.append((outline, list(zip(outline, outline[1:] + outline[:1])), area))
+
+    depths = [0] * len(boundaries)
+    for i, (outline, edges, _) in enumerate(boundaries):
+        for j in range(i):
+            other, other_edges, _ = boundaries[j]
+            if _boundaries_touch(edges, other_edges):
+                raise AreaMeasurementInputError("Net area cannot decide boundaries that touch or cross.")
+            x, y = outline[0]
+            u, v = other[0]
+            depths[i] += int(is_inside_polygon(other, x, y))
+            depths[j] += int(is_inside_polygon(outline, u, v))
+
+    return [record[2] * (-1 if depth % 2 else 1) for record, depth in zip(boundaries, depths)]
+
+
 def op_measure_area_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[dict, dict | None]:
     layer = params.get("layer", DEFAULT_LAYER)
+    net = params.get("area_mode") == "net"
+    report = params.get("include_contributors") is True
     polys = [p for p in (intake.get("polylines") or []) if p.get("layer") == layer]
-    areas = [_shoelace_area(p.get("pts", [])) for p in polys if p.get("closed")]
-    total = sum(areas)
-    count = len(areas)
+    if report:
+        if len(polys) > 2048:
+            raise AreaMeasurementInputError("Area reporting supports at most 2048 polylines per layer.")
+        handles = [p.get("handle") for p in polys]
+        if any(not isinstance(h, str) or not h.strip() or len(h) > 64 for h in handles) or (
+            len({h.upper() for h in handles}) != len(handles)
+        ):
+            raise AreaMeasurementInputError("Area reporting requires distinct intake polyline handles.")
+
+    eligible = []
+    excluded = []
+    for poly in polys:
+        reason = None
+        if not poly.get("closed"):
+            reason = "open"
+        elif net and poly.get("space") == "paper":
+            reason = "paper_space"
+        if reason is None:
+            eligible.append(poly)
+        elif report:
+            excluded.append({"handle": poly["handle"], "reason": reason})
+
+    details = {}
+    if net:
+        areas = _net_panel_areas(eligible)
+        holes = sum(area < 0 for area in areas)
+        total = math.fsum(areas)
+        count = len(areas) - holes
+        details.update(area_mode="net", hole_count=holes)
+    else:
+        areas = [_shoelace_area(p.get("pts", [])) for p in eligible]
+        total = sum(areas)
+        count = len(areas)
+
+    units = params.get("output_units", "drawing")
+    area_factor = 1.0
+    if units == "ft2":
+        code = intake.get("insunits")
+        if intake.get("insunits_error") or type(code) is not int or code not in _DXF_AREA_SOURCE_UNITS:
+            raise AreaMeasurementInputError("Square feet requires a supported, unambiguous $INSUNITS value.")
+        source_unit, metres_per_unit = _DXF_AREA_SOURCE_UNITS[code]
+        area_factor = (metres_per_unit / _DXF_AREA_SOURCE_UNITS[2][1]) ** 2
+        total *= area_factor
+        details["unit_conversion"] = {
+            "source": "$INSUNITS",
+            "source_code": code,
+            "source_unit": source_unit,
+            "area_factor": area_factor,
+        }
+
+    if report:
+        if not all(math.isfinite(amount * area_factor) for amount in areas):
+            raise AreaMeasurementInputError("Area reporting requires finite contributor areas.")
+        details.update(
+            contributors=[{"handle": poly["handle"], "signed_area": amount * area_factor}
+                          for poly, amount in zip(eligible, areas)],
+            excluded=excluded,
+        )
+
     return (
         {
             "layer": layer,
             "count": count,
             "total_area": round(total, 3),
             "avg_area": round(total / count, 3) if count else 0.0,
-            "units": "drawing",
+            "units": units,
+            **details,
         },
         None,
     )
@@ -202,13 +343,18 @@ DEFAULT_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "measure-panel-area",
         "version": "1.0.0",
-        "description": "Measures total and average closed-polyline area on a layer.",
+        "description": "Measures gross or net closed-polyline area on a layer. Net area subtracts nested holes.",
         "kind": "script",
         "engine_op": "measure_area_by_layer",
         "entry": "builtins/measure_area_by_layer.py",
         "params": {
             "type": "object",
-            "properties": {"layer": {"type": "string", "default": DEFAULT_LAYER}},
+            "properties": {
+                "layer": {"type": "string", "default": DEFAULT_LAYER},
+                "output_units": {"type": "string", "enum": ["drawing", "ft2"], "default": "drawing"},
+                "area_mode": {"type": "string", "enum": ["gross", "net"], "default": "gross"},
+                "include_contributors": {"type": "boolean"},
+            },
             "required": [],
         },
         "returns": {"type": "object"},
@@ -463,7 +609,7 @@ __LAYER_BINDING__
                 {"highlight_handles": [], "markers": []})
     minx, miny, maxx, maxy = min(xs), min(ys), max(xs), max(ys)
     span = min(maxx - minx, maxy - miny) or 1.0
-    margin = float(params.get("margin", round(span * 0.05, 3)))
+__MARGIN_BINDING__
     handles = []
     markers = []
     for p in polys:
@@ -488,7 +634,40 @@ _BODIES = {
 }
 
 
-def _params_schema(engine_op: str, layer: str | None) -> Dict[str, Any]:
+class InvalidEdgeDistance(ValueError):
+    """An explicit roof-edge distance could not be saved by the template."""
+
+
+_EDGE_DISTANCE_REQUEST = re.compile(
+    r"\bwithin\s+((?:[^.;!?\r\n]|\.(?=\d))+?)\s+(?:of|from)\s+"
+    r"(?:(?:a|an|the)\s+)?(?:roof\s+)?(?:edges?|perimeter|boundary)\b",
+    re.IGNORECASE,
+)
+_EDGE_DISTANCE = re.compile(
+    r"(\d{1,12}(?:\.\d{1,9})?|\.\d{1,9})\s+"
+    r"(inch(?:es)?|feet|foot|mm|cm|m|meters?|metres?|drawing\s+units?)",
+    re.IGNORECASE,
+)
+_EDGE_UNIT_METRES = {
+    "inches": 0.0254, "inch": 0.0254, "feet": 0.3048, "foot": 0.3048,
+    "mm": 0.001, "cm": 0.01, "m": 1.0,
+    "meter": 1.0, "meters": 1.0, "metre": 1.0, "metres": 1.0,
+}
+_PHYSICAL_MARGIN_BINDING = """
+    if "margin" in params:
+        margin = float(params["margin"])
+    else:
+        unit = intake.get("insunits")
+        metres_per_unit = {1: 0.0254, 2: 0.3048, 3: 1609.344, 4: 0.001, 5: 0.01,
+                           6: 1.0, 7: 1000.0, 10: 0.9144, 14: 0.1}
+        if intake.get("insunits_error") or (unit not in (None, 0) and unit not in metres_per_unit):
+            raise ValueError("Set a supported drawing insertion unit or supply a margin in drawing units.")
+        # Legacy rooftop intakes have inch coordinates and no insertion-unit field.
+        margin = __AMOUNT__ * (__METRES_PER_REQUEST_UNIT__ / metres_per_unit.get(unit, 0.0254))
+"""
+
+
+def _params_schema(engine_op: str, layer: str | None, margin_description: str | None) -> Dict[str, Any]:
     if engine_op == "list_layers":
         return {
             "type": "object",
@@ -503,7 +682,7 @@ def _params_schema(engine_op: str, layer: str | None) -> Dict[str, Any]:
             "type": "object",
             "properties": {"layer": layer_schema,
                            "margin": {"type": "number",
-                                      "description": "drawing units; default 5% of span"}},
+                                      "description": margin_description or "drawing units; default 5% of span"}},
             "required": [],
         }
     return {
@@ -542,6 +721,7 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     import authored_spatial_clearance
     import authored_beam_openings
     import authored_beam_lengths
+    import authored_layer_subtotals
     import authored_route_crossings
 
     verb, engine_op = _detect_op(description)
@@ -580,12 +760,25 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "compare", "material_revision_diff"
         drawing_body = authored_material_revision.build_body(description)
         summary = "compares verified records across pinned import revisions"
-    elif authored_viewport_panels.matches(description):
-        verb, engine_op = "count", "viewport_layer_panels"
+    elif authored_viewport_panels.revision_comparison_requested(description):
+        verb, engine_op = "compare", "viewport_panel_revision_comparison"
         drawing_body = authored_viewport_panels.build_body(description)
-        drawing_params = {"type": "object", "properties": {"viewport_handle": {"type": "string"}},
-                          "required": [] if authored_viewport_panels.viewport_handle(description) else ["viewport_handle"]}
-        summary = "counts model-space panel placements by viewport layer visibility"
+        drawing_params = authored_viewport_panels.parameter_schema(description)
+        summary = "compares visible panel placements in two selected viewports across the verified parent revision"
+    elif authored_viewport_panels.matches(description):
+        if authored_viewport_panels.comparison_requested(description):
+            verb, engine_op = "compare", "viewport_panel_comparison"
+            summary = "compares panel placements in two selected viewports"
+        else:
+            verb, engine_op = "count", "viewport_layer_panels"
+            summary = "counts model-space panel placements by viewport layer visibility"
+        drawing_body = authored_viewport_panels.build_body(description)
+        drawing_params = authored_viewport_panels.parameter_schema(description)
+    elif authored_viewport_panels.camera_diagnostics_requested(description):
+        verb, engine_op = "report", "viewport_camera_diagnostics"
+        summary = "reports unresolved camera geometry by paper-space viewport"
+        drawing_body = authored_viewport_panels.CAMERA_DIAGNOSTICS
+        drawing_params = {"type": "object", "properties": {}}
     elif authored_panel_regions.matches(description):
         verb, engine_op = "measure", authored_panel_regions.operation(description)
         drawing_body = authored_panel_regions.build_body(description)
@@ -646,6 +839,14 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         drawing_body = authored_route_crossings.ROUTE_CROSSINGS_BODY
         summary = "checks cable routes against array and aisle boundaries"
 
+    if drawing_body is None:
+        family = authored_layer_subtotals.requested_family(description)
+        if family:
+            verb, engine_op = "count", "layer_family_subtotals"
+            drawing_body = authored_layer_subtotals.build_body(family)
+            summary = f"counts supported drawing entities on each layer matching {family}"
+
+    margin_description = None
     relative_layer = drawing_body is None and engine_op != "list_layers" and _QUOTED_LAYER.search(description) is None and bool(_RELATIVE_LAYER.search(description))
     if drawing_body is not None:
         layer = ""
@@ -675,9 +876,33 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
             if relative_layer:
                 name = "count-panels-current-layer"
         body = body.replace("__LAYER_BINDING__", binding)
+        if engine_op == "highlight_near_edge":
+            margin_binding = '    margin = float(params.get("margin", round(span * 0.05, 3)))'
+            requests = _EDGE_DISTANCE_REQUEST.findall(description)
+            if requests:
+                distance = _EDGE_DISTANCE.fullmatch(requests[0].strip())
+                if len(requests) != 1 or distance is None:
+                    raise InvalidEdgeDistance(
+                        "Use one numeric roof-edge distance in inches, feet, mm, cm, metres, or drawing units."
+                    )
+                amount, unit = distance.groups()
+                unit = " ".join(unit.lower().split())
+                margin_description = f"Override in drawing units. Saved distance is {amount} {unit}."
+                if unit in _EDGE_UNIT_METRES:
+                    margin_binding = (
+                        _PHYSICAL_MARGIN_BINDING
+                        .replace("__AMOUNT__", repr(float(amount)))
+                        .replace("__METRES_PER_REQUEST_UNIT__", repr(_EDGE_UNIT_METRES[unit]))
+                        .strip("\n")
+                    )
+                else:
+                    margin_binding = f'    margin = float(params.get("margin", {float(amount)!r}))'
+            body = body.replace("__MARGIN_BINDING__", margin_binding)
 
-    header = _HEADER_TEMPLATE.format(
-        name=name, description=(description.replace('"', "'") or "(none)"), engine_op=engine_op)
+    # The description is data inside the generated docstring. Preserve its
+    # backslashes so JSON escape sequences are never interpreted as Python.
+    description_literal = repr(description.replace('"', "'") or "(none)")[1:-1]
+    header = _HEADER_TEMPLATE.format(name=name, description=description_literal, engine_op=engine_op)
     code = header + body
 
     tool = {
@@ -686,7 +911,7 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         "description": (description or f"{verb} on layer {layer}")[:200],
         "kind": "script",
         "engine_op": engine_op,
-        "params": drawing_params if drawing_body is not None else _params_schema(engine_op, layer),
+        "params": drawing_params if drawing_body is not None else _params_schema(engine_op, layer, margin_description),
         "returns": {"type": "object"},
         "capabilities": ["drawing.read"],
         "provenance": {"author": "agent", "created": _iso_now()},

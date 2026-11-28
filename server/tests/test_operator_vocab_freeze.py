@@ -313,18 +313,27 @@ def test_roles_file_gained_no_operator_role():
 # BSP47 (6e3c4288) adds run_solve_tool with fresh confirmation; reviewed photo
 # assignments (8c8b32ac) add private proposals only. Removing just those two
 # entries restores the preceding 542a65ca pin; operator authority is unchanged.
+# assistant-compliance B adds run_drawing_edit_tool: auto drawing edits on standalone
+# drawings only; project custody, solves and every other action unchanged; removing
+# that entry restores the preceding a4292136 pin.
+# PR3593 adds the contract-defined optional table row_grouping schema.
+# Removing that member restores the preceding a90f8637 policy digest.
+# F3 appends only a build-card status sentence to author_tool's description; reverting
+# that sentence restores the preceding 46cb1b1e pin. Actions, routes and policies unchanged.
 FROZEN_TENANT_POLICY_SHA256 = (
-    "a42921368b79f06ae95ab32440c41c103355cd8509843c5a314a8b82f90d223e")
+    "89a24b84c47a6c8c0de7a955fd44b6075b0808f4d88ce6323935deaaa0a39c79")
 
 FROZEN_TENANT_ACTIONS = {
     "request_confirmation": "always-confirm",
     "read_platform_state": "auto",
     "run_read_tool": "auto",
     "run_write_tool": "always-confirm",
+    "run_drawing_edit_tool": "auto",
     "run_solve_tool": "always-confirm",
     "submit_live_solve": "confirm-once",
     "undo_drawing_version": "auto",
     "author_tool": "confirm-once",
+    "propose_build_plan": "always-confirm",
     "request_publication": "auto",
     "register_tool": "always-confirm",
     "customize_platform": "always-confirm",

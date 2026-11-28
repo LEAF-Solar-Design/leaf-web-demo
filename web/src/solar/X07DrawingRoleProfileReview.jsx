@@ -1,3 +1,4 @@
+import { validTrackers } from './x07TrackerRoles.js'
 import { useEffect, useId, useRef, useState } from 'react'
 import X07DrawingRoleReview, { isSuccessfulRoleConfirmation } from './X07DrawingRoleReview.jsx'
 import X07CustomerProfileEditor from './X07CustomerProfileEditor.jsx'
@@ -9,7 +10,7 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 const label = value => typeof value === 'string' && value.trim() && value.length <= 512
 const validRoles = roles => object(roles) && object(roles.module)
   && label(roles.module.block) && label(roles.module.layer)
-  && Object.entries(roles).every(([name, role]) => ['module', 'roof', 'obstruction'].includes(name)
+  && Object.entries(roles).every(([name, role]) => name === 'trackers' ? validTrackers(role) : ['module', 'roof', 'obstruction'].includes(name)
     && object(role) && label(role.layer) && (role.block === undefined || label(role.block)))
 
 function confirmedPin(result, owner) {
@@ -25,6 +26,7 @@ function confirmedPin(result, owner) {
       || !label(pin.profile_id) || !Number.isSafeInteger(pin.version) || pin.version < 1
       || !validRoles(pin.roles)) return null
   const roles = Object.fromEntries(Object.entries(pin.roles).map(([name, role]) => [name,
+    name === 'trackers' ? Object.freeze(role.map(entry => Object.freeze({ ...entry }))) :
     Object.freeze({ ...(role.block === undefined ? {} : { block: role.block }), layer: role.layer })]))
   return Object.freeze({ customer_key: pin.customer_key, project_key: pin.project_key,
     drawing_key: drawing, profile_id: pin.profile_id, version: pin.version, roles: Object.freeze(roles) })
@@ -72,7 +74,14 @@ function ScopedProfileReview(props) {
         || !isSuccessfulRoleConfirmation(result)) return { ok: false }
     const pin = confirmedPin(result, owner)
     if (!pin) return { ok: false }
-    setApplied({ client: owner.projectClient, pin })
+    const latestProfile = result.profile
+    const initialProfile = latestProfile?.customer_key === pin.customer_key
+      && latestProfile.profile_id === pin.profile_id && Number.isSafeInteger(latestProfile.version)
+      && latestProfile.version >= pin.version && validRoles(latestProfile.roles)
+      ? { customer_key: pin.customer_key, profile_id: pin.profile_id,
+          version: latestProfile.version, roles: structuredClone(latestProfile.roles) }
+      : null
+    setApplied({ client: owner.projectClient, pin, initialProfile })
     return { ok: true }
   }
   if (applied?.client === props.projectClient) return <section ref={container} aria-label="Confirmed drawing profile" aria-describedby={statusId}>
@@ -80,11 +89,13 @@ function ScopedProfileReview(props) {
     <section aria-label="Pinned drawing roles"><h3>Pinned drawing roles</h3>
       <p>Pinned profile version: {applied.pin.version}</p>
       <dl>{Object.entries(applied.pin.roles).map(([name, role]) => <div key={name}>
-        <dt>{name[0].toUpperCase() + name.slice(1)}</dt><dd>{role.block ? `${role.block} on ` : ''}{role.layer}</dd>
+        <dt>{name[0].toUpperCase() + name.slice(1)}</dt><dd>{name === 'trackers'
+          ? <ul>{role.map(row => <li key={JSON.stringify([row.block, row.layer])}>{row.block} on {row.layer}, {row.tracker_type}, {row.modules_per_instance} modules per instance</li>)}</ul>
+          : <>{role.block ? `${role.block} on ` : ''}{role.layer}</>}</dd>
       </div>)}</dl>
     </section>
     <X07CustomerProfileEditor customerKey={props.customerKey} drawingKey={props.drawingKey}
-      loadProfile={props.loadProfile} saveProfile={props.saveProfile} applicationRecord={applied.pin} pinnedRoles={applied.pin.roles} />
+      initialProfile={applied.initialProfile} loadProfile={props.loadProfile} saveProfile={props.saveProfile} applicationRecord={applied.pin} pinnedRoles={applied.pin.roles} />
   </section>
   return <X07DrawingRoleReview {...props} onConfirm={typeof props.onConfirm === 'function' ? confirm : undefined} />
 }

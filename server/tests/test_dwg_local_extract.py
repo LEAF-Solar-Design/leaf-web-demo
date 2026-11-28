@@ -55,7 +55,7 @@ def _stub_converter(tmp_path: Path, mode: str = "ok") -> Path:
     so what's under test is the actual subprocess plumbing."""
     stub_py = tmp_path / f"stub_{mode}.py"
     stub_py.write_text(textwrap.dedent(f"""
-        import sys, time
+        import json, os, sys, time
         mode = {mode!r}
         out = sys.argv[sys.argv.index("-o") + 1]
         src = sys.argv[-1]
@@ -68,6 +68,9 @@ def _stub_converter(tmp_path: Path, mode: str = "ok") -> Path:
             time.sleep(30)
             sys.exit(0)
         open(src, "rb").read()  # the staged source must exist and be readable
+        if mode == "env":
+            with open({str(tmp_path / "child-env.json")!r}, "w") as fh:
+                json.dump(sorted(os.environ), fh)
         with open(out, "w") as fh:
             fh.write({STUB_DXF!r})
         sys.exit(0)
@@ -224,8 +227,8 @@ def _fake_cage_tools(monkeypatch, present: bool) -> None:
         if name in ("prlimit", "setpriv") else real_which(name))
 
 
-def _captured_argv(monkeypatch, tmp_path, **env):
-    """The exact argv converted_dxf() hands subprocess.run, without running it."""
+def _captured_call(monkeypatch, tmp_path, **env):
+    """The exact call converted_dxf() hands subprocess.run, without running it."""
     seen = {}
 
     def _fake_run(argv, **kwargs):
@@ -242,7 +245,60 @@ def _captured_argv(monkeypatch, tmp_path, **env):
     with pytest.raises(AssertionError, match="stop before exec"):
         with dwg_convert.converted_dxf(src):
             pass
-    return seen["argv"]
+    return seen
+
+
+def _captured_argv(monkeypatch, tmp_path, **env):
+    return _captured_call(monkeypatch, tmp_path, **env)["argv"]
+
+
+def test_parser_child_env_is_an_allowlist_without_secrets(monkeypatch):
+    secret_names = (
+        "LEAF_APP_DISPATCH_SECRET", "LEAF_GUEST_SECRET", "LEAF_HARNESS_SECRET",
+        "LEAF_CUSTOMIZATION_CONFIRMATION_KEY", "DATABASE_URL",
+        "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "ANTHROPIC_API_KEY",
+        "LD_PRELOAD",
+    )
+    for name in secret_names:
+        monkeypatch.setenv(name, "sentinel-value")
+    env = dwg_convert.parser_child_env()
+    if os.name != "nt":
+        assert env == {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+    else:
+        assert set(env) <= {"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",
+                            "TEMP", "TMP", "LANG", "LC_ALL"}
+    assert not any(name.startswith("LEAF_") for name in env)
+    assert not set(secret_names) & env.keys()
+    assert "sentinel-value" not in env.values()
+
+
+@pytest.mark.parametrize("cage_present", [True, False])
+def test_converter_is_launched_with_the_allowlisted_env(
+        monkeypatch, tmp_path, cage_present):
+    _fake_cage_tools(monkeypatch, cage_present)
+    monkeypatch.delenv("LEAF_DWG_CONVERT_REQUIRE_CAGE", raising=False)
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "sentinel-value")
+    monkeypatch.setenv("DATABASE_URL", "sentinel-value")
+    kwargs = _captured_call(monkeypatch, tmp_path)["kwargs"]
+    assert isinstance(kwargs["env"], dict)
+    assert kwargs["env"] == dwg_convert.parser_child_env()
+    assert "LEAF_APP_DISPATCH_SECRET" not in kwargs["env"]
+    assert "DATABASE_URL" not in kwargs["env"]
+
+
+def test_real_child_process_sees_no_app_secret(monkeypatch, tmp_path):
+    _fake_cage_tools(monkeypatch, False)
+    monkeypatch.delenv("LEAF_DWG_CONVERT_REQUIRE_CAGE", raising=False)
+    for name in ("LEAF_APP_DISPATCH_SECRET", "LEAF_GUEST_SECRET", "DATABASE_URL"):
+        monkeypatch.setenv(name, "sentinel-value")
+    monkeypatch.setenv("LEAF_DWG2DXF_BIN", str(_stub_converter(tmp_path, "env")))
+    src = tmp_path / "u.dwg"
+    src.write_bytes(MALFORMED_DWG)
+    with dwg_convert.converted_dxf(src) as dxf_path:
+        assert dxf_path.read_text() == STUB_DXF
+    names = json.loads((tmp_path / "child-env.json").read_text())
+    assert not {"LEAF_APP_DISPATCH_SECRET", "LEAF_GUEST_SECRET", "DATABASE_URL"} & set(names)
+    assert not any(name.startswith("LEAF_") for name in names)
 
 
 def test_cage_wraps_the_parser_in_prlimit_and_setpriv(monkeypatch, tmp_path):

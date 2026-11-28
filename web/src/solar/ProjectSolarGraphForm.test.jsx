@@ -85,6 +85,37 @@ const location = () => screen.getByRole('textbox', { name: 'Insertion point (x, 
 const feedback = () => screen.getByTestId('project-solar-graph-feedback').textContent
 const arm = async () => waitFor(() => expect(action().disabled).toBe(false))
 
+it('binds saved aisle routing to a fresh homerun preview and submits that same layer', async () => {
+  const h = harness()
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await arm()
+  expect(h.client.catalog.mock.calls.at(-1)[0].intents[0].params).toEqual({
+    drawing_id: binding.drawing_id, expected_rev: 6,
+  })
+  fireEvent.change(screen.getByLabelText('Saved aisle layer (optional)'), { target: { value: ' Roof Aisles ' } })
+  expect(action().disabled).toBe(true)
+  await arm()
+  const params = { drawing_id: binding.drawing_id, expected_rev: 6, saved_aisle_layer: 'Roof Aisles' }
+  expect(h.client.catalog.mock.calls.at(-1)[0].intents[0].params).toEqual(params)
+  fireEvent.click(action())
+  await waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1))
+  expect(h.submit.mock.calls[0][0].params).toEqual(params)
+})
+
+it.each([
+  ['saved_aisle_layer_empty', 'The selected layer has no saved aisle centerlines.'],
+  ['invalid_saved_aisle_geometry', 'Use straight, open aisle centerlines on the selected layer.'],
+])('shows the saved aisle preview refusal %s and disables submit', async (code, message) => {
+  const h = harness()
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await arm()
+  h.code = code
+  fireEvent.change(screen.getByLabelText('Saved aisle layer (optional)'), { target: { value: 'Roof Aisles' } })
+  await screen.findByText(message)
+  expect(action().disabled).toBe(true)
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
 function discoveryHarness() {
   const h = harness('solar-panel-groups')
   h.client.readContext.mockImplementation(() => {
@@ -750,6 +781,33 @@ it('R13C-15 renders equipment assignment refusal', async () => {
       'Homeruns require valid equipment assignments. Review the electrical reasons on the inverter.')
   }
 })
+
+const startHomerun = `${binding.drawing_id}/start homerun`
+const endHomerun = `${binding.input_version_id}/end homerun`
+it.each([
+  { leads: [startHomerun] }, { leads: [endHomerun] }, { leads: [startHomerun, endHomerun] },
+])('shows the affected manual homeruns when preview or submission refuses', async ({ leads }) => {
+  const code = 'JOINT_ROUTING_INFEASIBLE'
+  const sentence = `Route these homerun leads manually. ${leads.join(', ')}`
+  const blocked = harness('solar-homeruns', code)
+  const denied = catalog(blocked.name, code)
+  const error = denied.data.families[0].capabilities[0].availability.admission.error
+  error.affected_leads = leads
+  blocked.previews.push(Promise.resolve(denied))
+  const mounted = render(<ProjectSolarGraphForm {...blocked.props} />)
+  await waitFor(() => expect(feedback()).toContain(sentence))
+  expect(action().disabled).toBe(true)
+  expect(blocked.submit).not.toHaveBeenCalled()
+  mounted.unmount()
+
+  const raced = harness()
+  raced.submissions.push(Promise.resolve({ ok: false, status: 409, reason: code, envelope: { error } }))
+  render(<ProjectSolarGraphForm {...raced.props} />)
+  await submitAndWait(raced)
+  await waitFor(() => expect(feedback()).toContain(sentence))
+  expect(screen.queryByText(published)).toBeNull()
+})
+
 it('R13C-16 renders unknown voltage', async () => {
   await assertRefusal('solar-homeruns', 'EQUIPMENT_VOLTAGE_UNKNOWN', 'The inverter has no verified string voltage.')
 })

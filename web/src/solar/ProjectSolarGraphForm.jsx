@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
 import { PROJECT_SOLAR_GRAPH_TOOLS, projectSolarGraphReason, parseProjectSolarInsertionPoint,
   deriveProjectSolarGraphFormState, buildProjectSolarGraphRequest, exactProjectSolarGraphPreview,
@@ -19,6 +19,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
   catalogDigest, newProjectIntentKey, onProjectSubmit, isCurrent, busy = false,
   projectOutcome = null, submissionSignal, onClose }) {
   const name = tool?.name
+  const aisleLayerHelp = useId()
   const latest = useRef(null)
   latest.current = { name, solarBinding, authorityKey, projectClient, catalogDigest, newProjectIntentKey,
     onProjectSubmit, isCurrent, busy, submissionSignal }
@@ -54,9 +55,13 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
       name: panelInputs.names[proposal.key] ?? `Group ${index + 1}` }))
   }
   const proposalKey = (proposals) => JSON.stringify(proposals.map(({ key, panel_refs }) => [key, panel_refs]))
-  const insertionPointText = draft?.scope === scope ? draft.text : ''
+  const draftText = draft?.scope === scope ? draft.text : ''
+  const insertionPointText = name === 'solar-schedule' ? draftText : ''
+  const savedAisleLayer = name === 'solar-homeruns' ? draftText.trim() : ''
   const parsed = name === 'solar-schedule' ? parseProjectSolarInsertionPoint(insertionPointText) : null
-  const coordinateKey = name === 'solar-schedule' ? (parsed?.ok ? JSON.stringify(parsed.point) : null) : panelInputKey
+  let coordinateKey = panelInputKey
+  if (name === 'solar-schedule') coordinateKey = parsed?.ok ? JSON.stringify(parsed.point) : null
+  if (name === 'solar-homeruns') coordinateKey = savedAisleLayer
   const [refresh, setRefresh] = useState(0)
   const [view, setView] = useState(null)
   const [, repaint] = useState(0)
@@ -184,7 +189,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
           else groups = checked.value
         }
         const validate = buildProjectSolarGraphRequest({ tool: name, binding, state, currentState: state,
-          insertionPointText, groups, discover, geometryOnly: Boolean(geometryOnly), catalogDigest, idempotencyKey: 'candidate-validation' })
+          insertionPointText, savedAisleLayer, groups, discover, geometryOnly: Boolean(geometryOnly), catalogDigest, idempotencyKey: 'candidate-validation' })
         if (!validate.ok) { setCurrent({ state, reason: validate.reason }, pending.generation); return }
         phase = 'prepare'
         const fingerprint = JSON.stringify([validate.request, state.intakeSha256,
@@ -192,7 +197,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
         let candidate = scope.candidate
         if (!candidate || candidate.fingerprint !== fingerprint) {
           const built = buildProjectSolarGraphRequest({ tool: name, binding, state, currentState: state,
-            insertionPointText, groups, discover, geometryOnly: Boolean(geometryOnly), catalogDigest, idempotencyKey: latest.current.newProjectIntentKey() })
+            insertionPointText, savedAisleLayer, groups, discover, geometryOnly: Boolean(geometryOnly), catalogDigest, idempotencyKey: latest.current.newProjectIntentKey() })
           if (!built.ok) { setCurrent({ state, reason: built.reason }, pending.generation); return }
           candidate = { fingerprint, state, proposalKey: proposals ? proposalKey(proposals) : null,
             intent: projectClient.prepareRun(built.request) }
@@ -209,7 +214,9 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
           setCurrent({ state, reason: null }, pending.generation)
         } else {
           const feedback = projectSolarGraphFeedback({ tool: name,
-            submission: { ok: false, status: 409, reason: exact.reasonCode } })
+            submission: { ok: false, status: 409, reason: exact.reasonCode,
+              ...(exact.affectedLeads ? { envelope: { error: {
+                reason_code: exact.reasonCode, affected_leads: exact.affectedLeads } } } : {}) } })
           setCurrent({ state, reason: 'preview_refused', feedback }, pending.generation)
         }
       } catch {
@@ -292,7 +299,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
         else groups = checked.value
       }
       const built = buildProjectSolarGraphRequest({ tool: name, binding, state: armed.candidate.state,
-        currentState, insertionPointText, groups, discover, geometryOnly: Boolean(geometryOnly), catalogDigest, idempotencyKey: armed.candidate.intent.idempotencyKey })
+        currentState, insertionPointText, savedAisleLayer, groups, discover, geometryOnly: Boolean(geometryOnly), catalogDigest, idempotencyKey: armed.candidate.intent.idempotencyKey })
       if (!built.ok) {
         scope.armed = null
         setCurrent({ reason: built.reason }, pending.generation)
@@ -446,6 +453,19 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
       </p>}
     </fieldset>}
     </fieldset>}
+    {name === 'solar-homeruns' && <>
+      <label>
+        Saved aisle layer (optional)
+        <input type="text" maxLength={128} value={draftText} disabled={busy || Boolean(scope.lock) || scope.blocked}
+          aria-describedby={aisleLayerHelp}
+          onChange={(event) => {
+            const text = event.target.value
+            if (text.trim() !== scope.coordinateKey) invalidate(true)
+            setDraft({ scope, text })
+          }} />
+      </label>
+      <span id={aisleLayerHelp}>Enter the drawing layer containing open aisle centerlines. Leave blank for direct routing.</span>
+    </>}
     {name === 'solar-schedule' && <label>
       Insertion point (x, y, optional z)
       <input type="text" maxLength={160} value={insertionPointText} disabled={busy || Boolean(scope.lock) || scope.blocked}

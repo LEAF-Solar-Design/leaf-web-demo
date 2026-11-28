@@ -146,7 +146,22 @@ export function useSolarGraphOverlay(input) {
     if (graph === UNREADABLE) return { polylines: [], refusal: 'invalid_graph' }
     return solarGraphOverlay(graph, { metersPerUnit })
   }, [graph, metersPerUnit, enabled])
-  if (graph === UNREAD_SHOWN) return none('drawing_mismatch')
+
+  const decision = graph === UNREAD_SHOWN ? none('drawing_mismatch')
+    : decideWithResult(input, read, enabled, graphProjection, metersPerUnit)
+  const { solarOverlay } = decision
+  const saved = solarOverlay && !Object.hasOwn(solarOverlay, 'panelFills') ? solarOverlay : null
+  const polylines = saved?.polylines
+  const intake = saved?.intake
+  const drawingKey = saved?.drawingKey
+  // Recheck admission above on every render. Keep the admitted saved geometry stable for the Viewer.
+  const savedOverlay = useMemo(() => (
+    polylines ? { polylines, intake, drawingKey } : null
+  ), [polylines, intake, drawingKey])
+  return savedOverlay ? { solarOverlay: savedOverlay, reason: null } : decision
+}
+
+function decideWithResult(input, read, enabled, graphProjection, metersPerUnit) {
   // Optional result/request inputs use the same scene admission fences as the
   // saved graph. App must pass the result belonging to that shown drawing.
   const result = enabled ? read(input, 'result') : null

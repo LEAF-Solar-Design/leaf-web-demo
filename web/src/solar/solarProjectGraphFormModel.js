@@ -416,7 +416,7 @@ export function validatePanelGroupDiscovery(graph, numbers) {
 }
 
 export function buildProjectSolarGraphRequest({ tool, binding, state, currentState, insertionPointText, groups, discover,
-  catalogDigest, idempotencyKey, geometryOnly = false }) {
+  catalogDigest, idempotencyKey, geometryOnly = false, savedAisleLayer = '' }) {
   const fail = (reason) => ({ ok: false, reason })
   try {
     state = state == null ? state : { mode: state.mode, reason: state.reason, binding: state.binding,
@@ -458,6 +458,9 @@ export function buildProjectSolarGraphRequest({ tool, binding, state, currentSta
     if (!parsed.ok) return parsed
     params.insertion_point = parsed.point
   } else if (insertionPointText !== undefined && insertionPointText !== '') return fail('request_invalid')
+  if (typeof savedAisleLayer !== 'string' || [...savedAisleLayer].length > 128
+      || (savedAisleLayer && tool !== 'solar-homeruns')) return fail('request_invalid')
+  if (savedAisleLayer) params.saved_aisle_layer = savedAisleLayer
   return { ok: true, request: { tool, params, catalogDigest, idempotencyKey } }
 }
 
@@ -481,6 +484,18 @@ function previewList(value, limit) {
     copy.push(descriptor.value)
   }
   return copy
+}
+
+function manualHomerunLeads(tool, status, error) {
+  if (tool !== 'solar-homeruns' || status !== 409
+      || previewField(error, 'reason_code') !== 'JOINT_ROUTING_INFEASIBLE') return null
+  const value = previewField(error, 'affected_leads')
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64) return null
+  const leads = previewList(value, 64)
+  return leads.every((lead) => {
+    if (typeof lead !== 'string' || lead.length > 50 || lead[36] !== '/') return false
+    return validUuid(lead.slice(0, 36)) && ['start homerun', 'end homerun'].includes(lead.slice(37))
+  }) && new Set(leads).size === leads.length ? leads : null
 }
 
 export function exactProjectSolarGraphPreview(input) {
@@ -510,6 +525,7 @@ export function exactProjectSolarGraphPreview(input) {
     }
     if (!rows.length) return fail()
     let accepted = true
+    let affectedLeads = null
     const codes = new Set()
     for (const row of rows) {
       const view = previewField(row, 'availability')
@@ -523,6 +539,10 @@ export function exactProjectSolarGraphPreview(input) {
         && listed !== null && listed.length === 0
       if (!ready) accepted = false
       const admissionCode = boundedCode(previewField(error, 'reason_code'))
+      if (rows.length === 1 && previewField(row, 'catalog_digest') === catalogDigest
+          && previewField(view, 'admission_checked') === true && previewField(view, 'runnable') === false) {
+        affectedLeads = manualHomerunLeads(tool, previewField(admission, 'status_code'), error)
+      }
       if (admissionCode) codes.add(admissionCode)
       else if (listed) {
         for (const value of listed) {
@@ -552,12 +572,19 @@ export function exactProjectSolarGraphPreview(input) {
       const code = boundedCode(previewField(outcome, 'reason'))
       if (code) codes.add(code)
     }
-    return fail(codes.size === 1 ? [...codes][0] : null)
+    const refusal = fail(codes.size === 1 ? [...codes][0] : null)
+    return affectedLeads ? { ...refusal, affectedLeads } : refusal
   } catch { return { accepted: false, reasonCode: null } }
 }
 
 function refusalText(code, tool) {
   switch (code?.toLowerCase()) {
+    case 'saved_aisle_layer_empty':
+      return tool === 'solar-homeruns'
+        ? 'The selected layer has no saved aisle centerlines.' : PROJECT_SOLAR_GRAPH_REASONS.request_refused
+    case 'invalid_saved_aisle_geometry':
+      return tool === 'solar-homeruns'
+        ? 'Use straight, open aisle centerlines on the selected layer.' : PROJECT_SOLAR_GRAPH_REASONS.request_refused
     case 'submitted':
     case 'pending':
     case 'succeeded':
@@ -574,7 +601,7 @@ function feedbackSubmission(value, depth = 0) {
       ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new TypeError('Invalid submission')
   const copy = {}
   for (const key of ['ok', 'status', 'status_code', 'state', 'reason', 'reason_code', 'reasonCode', 'job_id', 'jobId',
-    'output_version_id', 'outputVersionId', 'result', 'job', 'data', 'envelope', 'error']) {
+    'output_version_id', 'outputVersionId', 'result', 'job', 'data', 'envelope', 'error', 'affected_leads']) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key)
     if (!descriptor) continue
     if (!Object.hasOwn(descriptor, 'value')) throw new TypeError('Invalid submission field')
@@ -616,7 +643,10 @@ export function projectSolarGraphFeedback(input) {
           return result('outcome_unknown', lower === 'sip_r13b_outcome_unknown' ? code : null)
         }
         if ((submission.status >= 400 && submission.status < 500) || (submission.status == null && code)) {
-          return result('refused', code)
+          const feedback = result('refused', code)
+          const leads = submission.reason == null || submission.reason === code
+            ? manualHomerunLeads(tool, submission.status, submission.envelope?.error) : null
+          return leads ? { ...feedback, text: `Route these homerun leads manually. ${leads.join(', ')}` } : feedback
         }
       }
       return result('outcome_unknown')

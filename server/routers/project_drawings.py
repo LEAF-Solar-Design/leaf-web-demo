@@ -1,13 +1,15 @@
 """Authenticated canonical project drawing context and checkout endpoints."""
 from __future__ import annotations
 
+import logging
 import math
 import re
-from typing import Optional
+from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from psycopg import Error as PostgresError
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
 import deps
@@ -16,10 +18,12 @@ import solar_project_context as service
 from envelopes import ErrorCode, err_envelope, with_envelope_fields
 
 router = APIRouter()
+_LOG = logging.getLogger(__name__)
 _NO_STORE = {"Cache-Control": "no-store"}
 _PROJECT_DRAWING_PATH = re.compile(
     r"^/api/projects/[^/]+/(?:solar-layout|drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
-    r"drawings/[^/]+/versions/[^/]+/(?:physical|solar-reads|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf|solar-layout(?:/operations)?)|"
+    r"drawings/[^/]+/versions/[^/]+/(?:physical|solar-reads|solar-schedule-comparison|"
+    r"solar-engineering-comparison|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf|solar-layout(?:/operations)?)|"
     r"drawings/[^/]+/solar-artifacts/[^/]+)/?$")
 _FAILURES = {
     "demo_actor_refused": (403, False),
@@ -29,6 +33,7 @@ _FAILURES = {
     "SIP_R1_INTAKE_DIGEST_MISMATCH": (500, False), "SIP_R1_INTAKE_INVALID": (500, False),
     "SIP_R1_INTAKE_UNAVAILABLE": (503, True), "SIP_R1_STORE_UNAVAILABLE": (503, True),
     "SIP_R1_CHECKOUT_PARAMS_INVALID": (400, False), "SIP_R1_CHECKOUT_CONFLICT": (409, True),
+    "SIP_R1_PROJECT_ARCHIVED": (409, False),
     "SIP_R1_CHECKOUT_REQUIRED": (409, False), "SIP_R1_CHECKOUT_EXPIRED": (409, False),
     "SIP_R1_CHECKOUT_DENIED": (403, False), "SIP_R1_CHECKOUT_STALE": (409, False),
     "SIP_R1_CHECKOUT_UNAVAILABLE": (503, True), "SIP_R1_FENCE_EXHAUSTED": (409, False),
@@ -113,8 +118,29 @@ def _dispatch(operation):
             body.update(acquired=False, locked_by=exc.checkout.holder if exc.checkout else None,
                         checkout=service.public_checkout(exc.checkout))
         return JSONResponse(content=body, status_code=status, headers=_NO_STORE)
+    except HTTPException as exc:
+        return JSONResponse(content={"detail": exc.detail}, status_code=exc.status_code,
+                            headers=_NO_STORE)
     except Exception:
         return _dispatch(lambda: service.refuse("INTERNAL"))
+
+
+def _add_solve_history(context, preparation):
+    from leaf_platform.project_solve_history import latest_by_frame
+
+    frames = preparation["frames"]
+    try:
+        history = latest_by_frame(
+            context.binding, context.intake_sha256, preparation["graph_sha256"],
+            [frame["id"] for frame in frames],
+        )
+    except (PostgresError, RuntimeError) as exc:
+        _LOG.warning("project_solve_history_unavailable exception_type=%s", type(exc).__name__)
+        preparation["solve_history_available"] = False
+        return
+    preparation["solve_history_available"] = True
+    for frame in frames:
+        frame["latest_solve"] = history.get(frame["id"])
 
 
 @router.get("/api/projects/{project_id}/drawing-versions/{input_version_id}/context")
@@ -136,7 +162,10 @@ def context_route(project_id: UUID, input_version_id: UUID, drawing_id: Optional
                   "role_discovery": discover_roles(context.intake)}
         if prepare_solve or solve_frame is not None:
             from solar_project_solve_preparation import prepare_solve as prepare
-            result["solve_preparation"] = prepare(context.intake, solve_frame, is_head=binding.is_head)
+            preparation = prepare(context.intake, solve_frame, is_head=binding.is_head)
+            if preparation["available"] and solve_frame is None:
+                _add_solve_history(context, preparation)
+            result["solve_preparation"] = preparation
         return result
     return _dispatch(operation)
 
@@ -156,6 +185,9 @@ def status_route(project_id: UUID, drawing_id: UUID, tenant=Depends(deps.require
     return _dispatch(operation)
 
 
+# Archive enforcement must live in the service/store mutation transaction.
+# A router preflight both releases the project lock too early and bypasses the
+# service's injected store (including stores without archive state).
 @router.post("/api/projects/{project_id}/drawings/{drawing_id}/checkout")
 def acquire_route(project_id: UUID, drawing_id: UUID, req: Optional[CheckoutRequest] = None,
                   tenant=Depends(deps.require_active_tenant),
@@ -394,7 +426,9 @@ from starlette.concurrency import run_in_threadpool
 import solar_project_admission as output_policy
 import solar_project_artifacts as output_artifacts
 import solar_project_read as output_reads
+import solar_project_schedule_compare as schedule_compare
 import solar_project_solaredge as project_solaredge
+import solar_saved_engineering_comparison as engineering_compare
 from solar_design_graph import GraphValidationError
 
 _OUTPUT_FAILURES = {
@@ -418,6 +452,8 @@ _OUTPUT_FAILURES = {
     "SIP_R6_TOOL_MANIFEST_MISMATCH": (409, "The Solar tool changed. Refresh the tools and try again."),
     "SIP_R6_STALE_CURRENT": (409, "The drawing changed. Select the current version and run the tool again."),
     "ARTIFACT_STALE": (409, "The drawing changed after this file was made. Select the current version and run the tool again."),
+    "SCHEDULE_COMPARISON_VERSION_MISMATCH": (409, "Select a schedule saved for each requested drawing version."),
+    "SCHEDULE_COMPARISON_ARTIFACT_KIND": (409, "Select two saved electrical schedules."),
     "ARTIFACT_ID_INVALID": (400, "The project artifact reference is invalid."),
     "ARTIFACT_NOT_FOUND": (404, "The project artifact was not found."),
     "ARTIFACT_CORRUPT": (500, "The stored project artifact failed its integrity check."),
@@ -523,6 +559,64 @@ def solar_read_route(project_id: str, drawing_id: str, input_version_id: str,
     return _output_dispatch(operation)
 
 
+def _bounded_comparison_response(result):
+    response = JSONResponse(content=with_envelope_fields({"result": result}), headers=_NO_STORE)
+    if len(response.body) > output_reads.MAX_OUTPUT_BYTES:
+        raise GraphValidationError("READ_OUTPUT_LIMIT_EXCEEDED")
+    return response
+
+
+@router.get("/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-engineering-comparison")
+def solar_engineering_comparison_route(
+        project_id: str, drawing_id: str, input_version_id: str, compare_version_id: str,
+        tenant=Depends(deps.require_active_tenant),
+        x_org_id: Optional[str] = Header(default=None), x_project_id: Optional[str] = Header(default=None)):
+    def operation():
+        if not output_policy.project_runs_enabled():
+            raise GraphValidationError("project_execution_disabled")
+        proj, drawing, before = _output_scope(tenant, project_id, drawing_id,
+            x_org_id, x_project_id, input_version_id)
+        try:
+            after = UUID(compare_version_id)
+        except ValueError:
+            raise GraphValidationError("SIP_R6_INVALID_REQUEST") from None
+        result = engineering_compare.compare(tenant, proj, drawing, before, after)
+        return _bounded_comparison_response(result)
+    return _output_dispatch(operation)
+
+
+@router.get("/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-schedule-comparison")
+def solar_schedule_comparison_route(
+        project_id: str, drawing_id: str, input_version_id: str,
+        compare_version_id: str, before_artifact_id: Optional[str] = None, after_artifact_id: Optional[str] = None,
+        cable_offset: Optional[str] = None,
+        tenant=Depends(deps.require_active_tenant),
+        x_org_id: Optional[str] = Header(default=None), x_project_id: Optional[str] = Header(default=None)):
+    def operation():
+        if not output_policy.project_runs_enabled():
+            raise GraphValidationError("project_execution_disabled")
+        proj, drawing, before = _output_scope(tenant, project_id, drawing_id,
+            x_org_id, x_project_id, input_version_id)
+        try:
+            after = UUID(compare_version_id)
+        except ValueError:
+            raise GraphValidationError("SIP_R6_INVALID_REQUEST") from None
+        if cable_offset is not None and not re.fullmatch(r"[0-9]{1,10}", cable_offset):
+            raise GraphValidationError("SIP_R6_INVALID_REQUEST")
+        if before_artifact_id is None and after_artifact_id is None and cable_offset is not None:
+            result = schedule_compare.compare_saved_cable_layouts(
+                tenant, proj, drawing, before, after, int(cable_offset))
+            return _bounded_comparison_response(result)
+        if before_artifact_id is None or after_artifact_id is None:
+            raise GraphValidationError("SIP_R6_INVALID_REQUEST")
+        result = schedule_compare.compare_saved_schedules(
+            tenant, proj, drawing, before_version_id=before, after_version_id=after,
+            before_artifact_id=before_artifact_id, after_artifact_id=after_artifact_id,
+            cable_offset=None if cable_offset is None else int(cable_offset))
+        return _bounded_comparison_response(result)
+    return _output_dispatch(operation)
+
+
 async def _project_solaredge_body(request, *, report):
     if not output_policy.project_runs_enabled():
         raise GraphValidationError("project_execution_disabled")
@@ -578,12 +672,37 @@ async def project_solaredge_report_route(project_id: str, drawing_id: str, input
         input_version_id, x_org_id, x_project_id, report=True)
 
 
+def _single_byte_range(value: str, size: int) -> Optional[tuple[int, int]]:
+    """Return a half-open slice. Empty slices are unsatisfiable. Ignore malformed ranges."""
+    match = re.fullmatch(r"bytes=([0-9]*)-([0-9]*)", value.strip(), re.IGNORECASE)
+    if not match or not any(match.groups()):
+        return None
+    first, last = match.groups()
+    # Compare normalized decimal strings before conversion. HTTP positions may exceed int limits.
+    def decimal_key(digits):
+        normalized = digits.lstrip("0") or "0"
+        return len(normalized), normalized
+
+    def bounded(digits):
+        return size if decimal_key(digits) >= decimal_key(str(size)) else int(decimal_key(digits)[1])
+
+    if not first:
+        return size - bounded(last), size
+    if last and decimal_key(last) < decimal_key(first):
+        return None
+    start = bounded(first)
+    stop = min(size, bounded(last) + 1) if last else size
+    return start, stop
+
+
 @router.get("/api/projects/{project_id}/drawings/{drawing_id}/solar-artifacts/{artifact_id}")
 def solar_artifact_route(project_id: str, drawing_id: str, artifact_id: str, current: str = "false",
                          tenant=Depends(deps.require_active_tenant),
                          x_org_id: Optional[str] = Header(default=None),
                          x_project_id: Optional[str] = Header(default=None),
-                         if_none_match: Optional[str] = Header(default=None)):
+                         if_none_match: Optional[str] = Header(default=None),
+                         byte_range: Annotated[Optional[str], Header(alias="Range")] = None,
+                         if_range: Annotated[Optional[str], Header()] = None):
     def operation():
         if not output_policy.project_runs_enabled():
             raise GraphValidationError("project_execution_disabled")
@@ -594,11 +713,22 @@ def solar_artifact_route(project_id: str, drawing_id: str, artifact_id: str, cur
             tenant, proj, drawing, artifact_id, current=current == "true")
         etag = '"' + meta["content_sha256"] + '"'
         headers = {**_NO_STORE, "ETag": etag, "X-Leaf-Artifact-Id": meta["artifact_id"],
-            "X-Content-Type-Options": "nosniff",
+            "X-Content-Type-Options": "nosniff", "Accept-Ranges": "bytes",
             "Content-Disposition": 'attachment; filename="' + meta["filename"] + '"'}
         if if_none_match is not None and any(value.strip() in (etag, "W/" + etag, "*")
                                             for value in if_none_match.split(",")):
             return Response(content=b"", status_code=304, headers=headers)
+        if byte_range and (if_range is None or if_range.strip() == etag):
+            size = len(content)
+            interval = _single_byte_range(byte_range, size)
+            if interval is not None:
+                start, stop = interval
+                if start == stop:
+                    headers["Content-Range"] = f"bytes */{size}"
+                    return Response(status_code=416, headers=headers)
+                headers["Content-Range"] = f"bytes {start}-{stop - 1}/{size}"
+                return Response(content=content[start:stop], status_code=206,
+                                media_type=meta["media_type"], headers=headers)
         return Response(content=content, media_type=meta["media_type"], headers=headers)
     return _output_dispatch(operation)
 

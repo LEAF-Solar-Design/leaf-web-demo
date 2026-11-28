@@ -1,6 +1,7 @@
 """Exact-cent TEST RATES material; no persistence or takeoff computation."""
 import copy
 from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -80,6 +81,57 @@ def _decimal(value):
     return number if number <= Decimal("1000000000000") else None
 
 
+def _increment(value):
+    decimal = _decimal(value)
+    if decimal is not None:
+        return Fraction(decimal) if decimal > 0 else None
+    if type(value) is not str or len(value) > 40 or re.fullmatch(r"[0-9]+/[0-9]+", value) is None:
+        return None
+    numerator, denominator = map(int, value.split("/"))
+    if not denominator or not 0 < numerator <= 1000000000000 * denominator:
+        return None
+    return Fraction(numerator, denominator)
+
+
+def _tier_schedule(rate):
+    bands = rate["tiers"]
+    if rate["tier_mode"] not in ("volume", "marginal") or type(bands) is not list or not 1 <= len(bands) <= 128:
+        _fail("ESTIMATE_RATE_CARD_INVALID")
+    lower = Fraction(0)
+    result = []
+    for index, band in enumerate(bands):
+        if type(band) is not dict or band.keys() != {"up_to", "rate"}:
+            _fail("ESTIMATE_RATE_CARD_INVALID")
+        price = _decimal(band["rate"])
+        upper = band["up_to"]
+        if price is None or (upper is None) != (index == len(bands) - 1):
+            _fail("ESTIMATE_RATE_CARD_INVALID")
+        if upper is not None:
+            bound = _decimal(str(upper) if type(upper) is int else upper)
+            if bound is None or bound <= lower:
+                _fail("ESTIMATE_RATE_CARD_INVALID")
+            upper = Fraction(bound)
+            lower = upper
+        result.append((upper, Fraction(price)))
+    return result
+
+
+def _tier_charge(quantity, schedule, mode):
+    lower = Fraction(0)
+    charge = Fraction(0)
+    for upper, rate in schedule:
+        last_band = upper is None or quantity <= upper
+        if mode == "volume":
+            if last_band:
+                return quantity * rate
+        else:
+            end = quantity if last_band else upper
+            charge += (end - lower) * rate
+            if last_band:
+                return charge
+        lower = upper
+
+
 def _binding(binding):
     ids = ("organization_id", "project_id", "drawing_id", "input_version_id")
     if type(binding) is not dict or set(binding) != set(ids) | {"intake_sha256", "graph_sha256"}:
@@ -138,12 +190,38 @@ def price_takeoff(summary, rate_card, *, source_binding):
     if len(rate_card["rates"]) > 128:
         _fail("ESTIMATE_LIMIT_EXCEEDED")
     rates = {}
+    increments = {}
+    tier_schedules = {}
+    required_rate_fields = {"line_id", "unit", "rate"}
+    minimum_fields = {"minimum_amount", "minimum_semantics"}
+    basis_fields = {"price_basis", "basis_unit"}
+    increment_fields = {"increment", "increment_semantics"}
+    tier_fields = {"tiers", "tier_mode"}
+    term_pairs = (minimum_fields, basis_fields, increment_fields, tier_fields)
+    allowed_fields = required_rate_fields | minimum_fields | basis_fields | increment_fields | tier_fields
     for rate in rate_card["rates"]:
-        if (type(rate) is not dict or set(rate) != {"line_id", "unit", "rate"}
+        if (type(rate) is not dict or not required_rate_fields <= rate.keys()
+                or rate.keys() - allowed_fields
+                or any(len(rate.keys() & pair) == 1 for pair in term_pairs)
                 or not _text(rate["line_id"], 96) or rate["line_id"] not in inventory
                 or rate["line_id"] in rates or not _text(rate["unit"], 120)
                 or _decimal(rate["rate"]) is None):
             _fail("ESTIMATE_RATE_CARD_INVALID")
+        if "minimum_amount" in rate:
+            if (_decimal(rate["minimum_amount"]) is None
+                    or re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2}0*)?", rate["minimum_amount"]) is None
+                    or rate["minimum_semantics"] != "per_line_floor_after_rounding"):
+                _fail("ESTIMATE_RATE_CARD_INVALID")
+        if "price_basis" in rate and (
+                not _decimal(rate["price_basis"]) or rate["basis_unit"] != rate["unit"]):
+            _fail("ESTIMATE_RATE_CARD_INVALID")
+        if "increment" in rate:
+            increment = _increment(rate["increment"])
+            if increment is None or rate["increment_semantics"] != "ceil_quantity_before_pricing":
+                _fail("ESTIMATE_RATE_CARD_INVALID")
+            increments[rate["line_id"]] = increment
+        if "tiers" in rate:
+            tier_schedules[rate["line_id"]] = _tier_schedule(rate)
         rates[rate["line_id"]] = rate
     takeoff = copy.deepcopy(summary)
     takeoff["lines"].sort(key=lambda row: row["line_id"])
@@ -170,14 +248,33 @@ def price_takeoff(summary, rate_card, *, source_binding):
             else:
                 reason = None
             amount = None
+            billed_quantity = None
             if reason is None:
-                amount = (quantity * _decimal(rate["rate"])).quantize(Decimal("0.01"))
+                increment = increments.get(line["line_id"])
+                schedule = tier_schedules.get(line["line_id"])
+                price = _decimal(rate["rate"])
+                if increment is not None or schedule is not None or "price_basis" in rate:
+                    billing = Fraction(quantity)
+                    if increment is not None:
+                        billing = math.ceil(billing / increment) * increment
+                        billed_quantity = str(billing)
+                    basis = Fraction(_decimal(rate["price_basis"])) if "price_basis" in rate else 1
+                    charge = (_tier_charge(billing, schedule, rate["tier_mode"]) if schedule is not None
+                              else billing * Fraction(price))
+                    charge_cents = charge * 100 / basis
+                    amount = Decimal(round(charge_cents)).scaleb(-2)
+                else:
+                    amount = (quantity * price).quantize(Decimal("0.01"))
+                if "minimum_amount" in rate:
+                    amount = max(amount, _decimal(rate["minimum_amount"]))
                 cents += int(amount * 100)
                 priced += 1
             row = copy.deepcopy(line)
             row.update(rate=rate["rate"] if rate else None,
                        amount=format(amount, ".2f") if amount is not None else None,
                        pricing_reason=reason)
+            if billed_quantity is not None:
+                row["billed_quantity"] = billed_quantity
             output.append(row)
         subtotal = format(Decimal(cents) / 100, ".2f") if priced else None
     estimate = {"schema": SCHEMA, "label": "TEST RATES", "currency": "USD",

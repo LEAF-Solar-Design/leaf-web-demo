@@ -16,8 +16,16 @@ const report = () => ({
 
 let createObjectURL
 let revokeObjectURL
+const blobs = new Map()
+const jsonLink = () => screen.getByRole('link', { name: 'Download result JSON' })
+const csvLink = () => screen.getByRole('link', { name: /^Download rows CSV$/i })
+
 beforeEach(() => {
-  createObjectURL = vi.fn().mockReturnValueOnce('blob:first').mockReturnValue('blob:next')
+  createObjectURL = vi.fn((blob) => {
+    const href = `blob:result-${blobs.size}`
+    blobs.set(href, blob)
+    return href
+  })
   revokeObjectURL = vi.fn()
   vi.stubGlobal('Blob', NodeBlob)
   vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
@@ -25,10 +33,11 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  blobs.clear()
 })
 
-async function exported(index = 0) {
-  const blob = createObjectURL.mock.calls[index][0]
+async function exported() {
+  const blob = blobs.get(jsonLink().getAttribute('href'))
   expect(blob.type).toBe('application/json')
   return JSON.parse(await blob.text())
 }
@@ -38,9 +47,10 @@ describe('generic result JSON download', () => {
     const result = report()
     const before = JSON.stringify(result)
     render(<ResultPanel running={false} result={result} />)
-    const link = screen.getByRole('link', { name: 'Download result JSON' })
-    expect(link).toHaveAttribute('href', 'blob:first')
-    expect(link).toHaveAttribute('download', 'result.json')
+    expect(jsonLink()).toHaveAttribute('download', 'result.json')
+    const csv = blobs.get(csvLink().getAttribute('href'))
+    expect(csv.type).toBe('text/csv;charset=utf-8')
+    expect(await csv.text()).toContain('"Large","123.123456789","-1.23456e-7"')
     expect(await exported()).toEqual(result)
     expect(JSON.stringify(result)).toBe(before)
   })
@@ -56,14 +66,23 @@ describe('generic result JSON download', () => {
   it('replaces the file on a filtered rerun and releases URLs on replacement and scope clear', async () => {
     const first = report()
     const view = render(<ResultPanel running={false} result={first} />)
+    const firstJson = jsonLink().getAttribute('href')
+    const firstCsv = csvLink().getAttribute('href')
     const next = { ...first, result: { rows: [first.result.rows[1]] } }
     view.rerender(<ResultPanel running={false} result={next} />)
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:first')
-    expect(screen.getByRole('link', { name: 'Download result JSON' })).toHaveAttribute('href', 'blob:next')
-    expect(await exported(1)).toEqual(next)
+    expect(revokeObjectURL).toHaveBeenCalledTimes(2)
+    expect(revokeObjectURL).toHaveBeenCalledWith(firstJson)
+    expect(revokeObjectURL).toHaveBeenCalledWith(firstCsv)
+    const nextJson = jsonLink().getAttribute('href')
+    const nextCsv = csvLink().getAttribute('href')
+    expect(new Set([firstJson, firstCsv, nextJson, nextCsv]).size).toBe(4)
+    expect(await exported()).toEqual(next)
     view.rerender(<ResultPanel running={false} result={null} />)
     expect(screen.queryByRole('link', { name: 'Download result JSON' })).toBeNull()
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:next')
+    expect(screen.queryByRole('link', { name: /^Download rows CSV$/i })).toBeNull()
+    expect(revokeObjectURL).toHaveBeenCalledTimes(4)
+    expect(revokeObjectURL).toHaveBeenCalledWith(nextJson)
+    expect(revokeObjectURL).toHaveBeenCalledWith(nextCsv)
   })
 
   it('uses the shared redaction policy for credential-shaped fields without changing drawing values', async () => {
@@ -92,8 +111,9 @@ describe('generic result JSON download', () => {
 
   it('releases the current file when the panel unmounts', () => {
     const view = render(<ResultJsonDownload result={report()} />)
+    const href = jsonLink().getAttribute('href')
     view.unmount()
-    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:first')
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith(href)
   })
 })
 

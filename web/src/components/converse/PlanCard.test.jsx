@@ -1,0 +1,129 @@
+import { afterEach, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { track } from '../../telemetry.js'
+import PlanCard from './PlanCard.jsx'
+
+vi.mock('../../telemetry.js', async original => ({ ...await original(), track: vi.fn(), trackErrorShown: vi.fn() }))
+
+const plan = { title: 'Label the roof', target: 'branch', change_kind: 'revise', target_tool_name: 'roof-label',
+  summary: '<img src=x>', behavior: ['Find roof panels', 'Label matching panels'],
+  inputs: [{ name: 'threshold', type: 'number', default: 0, description: 'Minimum area' }],
+  output: 'A count', capabilities: ['drawing.write', 'drawing.read'], undo: 'Use Undo',
+  assumptions: ['A drawing is open'], acceptance: ['Every panel has a label'],
+  answers: { q1: { labels: ['Selected'] }, q2: { other: 'Roof layer' } } }
+const props = { sessionId: 'session', proposal: { confirmation_id: 'plan', revision: 2, plan } }
+const response = (status, data) => ({ status, ok: status < 300, json: async () => data })
+const button = name => screen.getByRole('button', { name })
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); vi.clearAllMocks() })
+
+it('renders the plan contract as plain text and reports the replaced revision', () => {
+  const view = render(<PlanCard {...props} />)
+  for (const text of ['Label the roof', 'Runs inside AutoCAD', 'Revise roof-label', '<img src=x>',
+    'A count', 'Changes your drawing', 'Reads your drawing', 'Use Undo', 'A drawing is open', 'Every panel has a label', 'Selected', 'Roof layer']) {
+    expect(screen.getByText(text)).toBeVisible()
+  }
+  expect(screen.getByText('Find roof panels').parentElement.tagName).toBe('OL')
+  expect(screen.getByText('What to check after you run it')).toBeVisible()
+  expect(screen.getByText('Studio compiles this tool but does not run it. Its first run is in AutoCAD, on your drawing.')).toBeVisible()
+  expect(screen.getByRole('table')).toHaveTextContent('thresholdnumber0Minimum area')
+  expect(document.querySelector('img')).toBeNull()
+  expect(screen.queryByText(/q[12] · /)).toBeNull()
+  view.rerender(<PlanCard {...props} replacedBy={3} />)
+  expect(screen.getByRole('status')).toHaveTextContent('Replaced by revision 3')
+  expect(screen.queryByRole('button')).toBeNull()
+})
+
+it('shows the Studio target and omits an empty answers section', () => {
+  render(<PlanCard {...props} proposal={{ ...props.proposal, plan: { ...plan, target: 'studio', answers: {} } }} />)
+  expect(screen.getByText('Runs in Studio')).toBeVisible()
+  expect(screen.getByText('Acceptance checks')).toBeVisible()
+  expect(screen.queryByText('Studio compiles this tool but does not run it. Its first run is in AutoCAD, on your drawing.')).toBeNull()
+  expect(screen.queryByRole('heading', { name: 'Your answers' })).toBeNull()
+})
+
+it.each([
+  ['Approve and build', true, undefined, 'plan.approved'],
+  ['Keep planning', false, 'Use a table', 'plan.revised'],
+  ['Cancel', false, undefined, 'plan.cancelled'],
+])('%s records a decision and then posts one confirm turn', async (label, approved, feedback, event) => {
+  const fetch = vi.fn().mockResolvedValueOnce(response(200, { resolved: true }))
+    .mockResolvedValueOnce(response(202, { turn_id: 'next' }))
+  vi.stubGlobal('fetch', fetch)
+  render(<PlanCard {...props} />)
+  const action = button(label)
+  action.focus()
+  expect(action).toHaveFocus()
+  await act(async () => action.click())
+  if (feedback) {
+    expect(fetch).not.toHaveBeenCalled()
+    const box = screen.getByRole('textbox', { name: /What should change/ })
+    expect(box.maxLength).toBe(1000)
+    expect(button('Send feedback')).toBeDisabled()
+    fireEvent.change(box, { target: { value: feedback } })
+    await act(async () => fireEvent.click(button('Send feedback')))
+  }
+  expect(fetch.mock.calls.map(([url, opts]) => [new URL(url, 'http://test').pathname, JSON.parse(opts.body)]))
+    .toEqual([['/api/agent/approvals/plan', { approved }], ['/api/sessions/session/messages',
+      { confirm: { confirmationId: 'plan', approved, ...(feedback ? { feedback } : {}) } }]])
+  expect(track.mock.calls).toContainEqual(approved ? [event, { revision: 2 }] : [event])
+  expect(screen.queryByRole('button')).toBeNull()
+})
+
+it('retries only the missing confirm turn with the original feedback', async () => {
+  const fetch = vi.fn().mockResolvedValueOnce(response(200, { resolved: true }))
+    .mockRejectedValueOnce(new Error()).mockResolvedValueOnce(response(202, { turn_id: 'next' }))
+  vi.stubGlobal('fetch', fetch)
+  render(<PlanCard {...props} />)
+  fireEvent.click(button('Keep planning'))
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Use green labels' } })
+  await act(async () => fireEvent.click(button('Send feedback')))
+  await act(async () => fireEvent.click(button('Resume denial')))
+  expect(fetch.mock.calls[2][0]).toBe(fetch.mock.calls[1][0])
+  expect(fetch.mock.calls[2][1].body).toBe(fetch.mock.calls[1][1].body)
+  expect(screen.queryByRole('button')).toBeNull()
+})
+
+it('restores the recorded denial feedback on reload and removes it after the confirm turn', async () => {
+  const fetch = vi.fn().mockResolvedValueOnce(response(200, { resolved: true }))
+    .mockRejectedValueOnce(new Error('Disconnected'))
+    .mockResolvedValue(response(202, { turn_id: 'resumed' }))
+  vi.stubGlobal('fetch', fetch)
+  const first = render(<PlanCard {...props} />)
+  fireEvent.click(button('Keep planning'))
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Group by layer' } })
+  await act(async () => fireEvent.click(button('Send feedback')))
+  first.unmount()
+
+  const pending = { approved: false, resume_required: true }
+  const reloaded = render(<PlanCard {...props} pending={pending} />)
+  await act(async () => fireEvent.click(button('Resume denial')))
+  expect(fetch).toHaveBeenCalledTimes(3)
+  expect(fetch.mock.calls[2][0]).toBe(fetch.mock.calls[1][0])
+  expect(JSON.parse(fetch.mock.calls[2][1].body)).toEqual({
+    confirm: { confirmationId: 'plan', approved: false, feedback: 'Group by layer' },
+  })
+  expect(track).toHaveBeenCalledWith('plan.revised')
+  reloaded.unmount()
+  expect(Object.keys(sessionStorage).some(key => sessionStorage.getItem(key).includes('Group by layer'))).toBe(false)
+})
+
+it('expires an outstanding plan while it is visible', () => {
+  vi.useFakeTimers()
+  render(<PlanCard {...props} expiresAt={Date.now() + 1000} />)
+  expect(button('Approve and build')).toBeEnabled()
+  act(() => vi.advanceTimersByTime(1000))
+  expect(screen.getByRole('status')).toHaveTextContent('Expired, ask to re-propose')
+  expect(screen.queryByRole('button')).toBeNull()
+})
+
+it('checks freeform feedback before recording a denial', async () => {
+  const fetch = vi.fn()
+  vi.stubGlobal('fetch', fetch)
+  render(<PlanCard {...props} />)
+  fireEvent.click(button('Keep planning'))
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'api_key: ' + 'x'.repeat(24) } })
+  await act(async () => fireEvent.click(button('Send feedback')))
+  expect(screen.getByRole('alert')).toBeVisible()
+  expect(fetch).not.toHaveBeenCalled()
+  expect(button('Cancel')).toBeEnabled()
+})

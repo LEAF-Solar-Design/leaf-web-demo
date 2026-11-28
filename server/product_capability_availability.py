@@ -348,7 +348,7 @@ def w1_local_commit_inputs(graph):
 
 
 def w1_homeruns_current(graph, expected):
-    """True when the graph's homerun subset is exactly the regenerated terminal leads.
+    """True when saved homeruns cover the current terminal leads with consistent geometry.
 
     Only routes whose route_kind is a homerun kind (solar_solve_results.HOMERUN_KINDS) take part;
     feeders and trenches are other contracts and never make routing incomplete. The key count is
@@ -365,10 +365,25 @@ def w1_homeruns_current(graph, expected):
         found = actual.get((route["from_ref"], route["route_kind"]))
         if (found is None or found["validity"]["state"] != "valid"
                 or any(found[key] != route[key] for key in
-                       ("to_ref", "points", "wire_gauge", "point_units", "length_units"))
-                or not math.isclose(found["length_ft"], route["length_ft"], rel_tol=1e-9)
+                       ("to_ref", "wire_gauge", "point_units", "length_units"))
                 or any(found["extra"].get(key) != route["extra"][key]
                        for key in ("terminal_panel_ref", "mppt_letter", "input_number"))):
+            return False
+        points = found["points"]
+        length_ft = route["length_ft"]
+        if points != route["points"]:
+            routing = found["extra"].get("routing")
+            aisle = routing.get("aisle") if isinstance(routing, dict) else None
+            if (found["extra"].get("routing_policy") != "shared-aisle-terminal-lead-v1"
+                    or not isinstance(aisle, str) or not aisle.strip()
+                    or len(points) < 2
+                    or points[0] != route["points"][0] or points[-1] != route["points"][-1]):
+                return False
+            segments = [math.dist(a, b) for a, b in zip(points, points[1:])]
+            if 0 in segments:
+                return False
+            length_ft = math.fsum(segments) / .3048
+        if not math.isclose(found["length_ft"], length_ft, rel_tol=1e-9):
             return False
     return True
 
@@ -444,23 +459,16 @@ def w1_graph_readiness(graph):
             except (KeyError, ValueError, TypeError):
                 pass
     templates = [frame["ground_slots"]["panel"] for frame in graph["frames"] if "ground_slots" in frame]
-    grouped = (sized or manual_roof_sized) and not templates and bool(graph["frames"]) and bool(graph["panels"]) and all(
-        item["validity"]["state"] == "valid"
-        for item in graph["frames"] + graph["panels"] + graph["electrical_zones"]
-    ) and all(panel["frame_ref"] is not None for panel in graph["panels"])
-    mark(["solar-solve-proposal", "solar-commit-solve"], grouped,
-         "sized_panel_groups_required")
-    # The equipment chain also counts the slot panels of compact Ground frames (codec
-    # leaf.solar-ground-slots.v1): each frame's shared template is the validity of every one of its
-    # slot panels, and a slot panel always sits in its own frame, so this equals `grouped` on the
-    # graph's expansion without expanding. A graph with no block gives exactly `grouped`. The solve
-    # keeps `grouped`: its request binding refuses a compact frame.
-    panelled = sized and bool(graph["frames"]) and bool(graph["panels"] or templates) and all(
+    # Compact Ground slots share their stored panel template's validity. Their frame
+    # membership is implicit in the codec, so the same predicate covers both layouts.
+    panelled = bool(graph["frames"]) and bool(graph["panels"] or templates) and all(
         item["validity"]["state"] == "valid"
         for item in graph["frames"] + graph["panels"] + graph["electrical_zones"] + templates
     ) and all(panel["frame_ref"] is not None for panel in graph["panels"])
+    mark(["solar-solve-proposal", "solar-commit-solve"], panelled and (sized or manual_roof_sized),
+         "sized_panel_groups_required")
     basis = upstream_basis(graph)
-    strings_current = panelled and bool(graph["strings"]) and not any(coverage(graph).values()) and all(
+    strings_current = sized and panelled and bool(graph["strings"]) and not any(coverage(graph).values()) and all(
         isinstance(frame["extra"].get("solve", {}), dict) and
         frame["extra"].get("solve", {}).get("upstream_sha256", basis) == basis
         for frame in graph["frames"])

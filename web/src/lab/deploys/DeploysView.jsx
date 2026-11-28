@@ -12,11 +12,48 @@ const cardStyle = {
 
 const activationFetch = (...args) => globalThis.fetch(...args)
 
-function Activations({ client, published, fetchImpl }) {
+function ExecutionPlan({ plan }) {
+  return <section aria-label="Execution plan">
+    <p>Published r{plan.revision}. Proposed interval {plan.interval_s} seconds. Run limit {plan.max_run_wall_s} seconds.</p>
+    <p>Graph SHA-256 <code style={{ overflowWrap: 'anywhere' }}>{plan.graph_sha256}</code></p>
+    <details>
+      <summary>Execution policy and graph connections</summary>
+      <p>Worker policy {plan.ops_revision}. Registry SHA-256 <code style={{ overflowWrap: 'anywhere' }}>{plan.registry_digest}</code></p>
+      <p>External inputs SHA-256 <code style={{ overflowWrap: 'anywhere' }}>{plan.input_digest}</code></p>
+      {plan.pipes.map(({ from, to }) => <p key={JSON.stringify([from, to])}>
+        {from.node}.{from.port} to {to.node}.{to.port}</p>)}
+      {Object.entries(plan.outputs).map(([name, pin]) => <p key={name}>{name} from {pin.node}.{pin.port}</p>)}
+    </details>
+    <ul aria-label="Planned blocks">
+      {plan.blocks.map(block => <li key={block.id}>
+        <details>
+          <summary>{block.id} / {block.registry.id} {block.registry.version} / {block.effect || 'Effect unavailable'}</summary>
+          <p>Code SHA-256 <code style={{ overflowWrap: 'anywhere' }}>{block.registry.code_sha256}</code></p>
+          <p>Settings SHA-256 <code style={{ overflowWrap: 'anywhere' }}>{block.settings_sha256}</code></p>
+          {block.inputs && <p>Project access is unavailable to the scheduled worker.</p>}
+          {Object.entries(block.inputs || {}).map(([name, pin]) => <p key={name}>
+            {name === 'corpus' ? 'Corpus' : 'Suite'} material {pin.material_id}, {pin.byte_size} bytes.
+            SHA-256 <code style={{ overflowWrap: 'anywhere' }}>{pin.sha256}</code>
+          </p>)}
+        </details>
+      </li>)}
+    </ul>
+    {plan.blockers.map(({ code, block }) => <p role="status" key={JSON.stringify([code, block])}>
+      {code === 'lab_activation_corpus_authority_unavailable'
+        ? 'Scheduled workers cannot access project-scoped corpus inputs.'
+        : `This revision cannot be scheduled (${code}).`}{block && ` Block ${block}.`}
+    </p>)}
+  </section>
+}
+
+function Activations({ docId, published, fetchImpl }) {
   const [rows, setRows] = useState([])
   const [interval, setInterval] = useState('60')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [preview, setPreview] = useState(null)
+  const [previewError, setPreviewError] = useState(null)
+  const [previewBusy, setPreviewBusy] = useState(false)
   const generation = useRef(0)
   const changing = useRef(false)
   useEffect(() => {
@@ -74,15 +111,42 @@ function Activations({ client, published, fetchImpl }) {
     } finally { setBusy(false) }
   }
   const seconds = Number(interval)
-  const activationReason = busy ? 'Saving the scheduling change.' : published == null
+  const previewKey = JSON.stringify([docId, published, seconds])
+  const validInterval = Number.isInteger(seconds) && seconds >= 60 && seconds <= 86400
+  const plan = preview?.key === previewKey ? preview.plan : null
+  async function loadPreview() {
+    setPreviewBusy(true)
+    setPreviewError(null)
+    setPreview(null)
+    try {
+      const query = new URLSearchParams({ preview_doc_id: docId, revision: published, interval_s: seconds })
+      const data = await request('?' + query.toString())
+      if (data.doc_id !== docId || data.revision !== published || data.interval_s !== seconds
+          || !Array.isArray(data.blocks) || !Array.isArray(data.pipes) || !Array.isArray(data.blockers)
+          || !data.outputs) throw new Error('Execution plan unavailable. Reload Deploys and try again.')
+      setPreview({ key: previewKey, plan: data })
+    } catch (failure) {
+      setPreviewError({ key: previewKey, message: humanizeError(failure) })
+    } finally {
+      setPreviewBusy(false)
+    }
+  }
+  const baseReason = busy ? 'Saving the scheduling change.' : published == null
     ? 'Publish a saved revision from History before activating it.'
-    : !Number.isInteger(seconds) || seconds < 60 || seconds > 86400
+    : !validInterval
       ? 'Choose a whole number of seconds from 60 to 86400.' : ''
+  const activationReason = baseReason || (plan?.blockers.length
+    ? 'Resolve the execution plan blockers before activating this revision.' : '')
   return <section aria-label="Scheduled runs">
     <label>Interval (seconds) <input type="number" min="60" max="86400" step="1" value={interval}
       onChange={event => setInterval(event.target.value)} /></label>
-    <button type="button" disabled={Boolean(activationReason)} title={activationReason || undefined}
-      onClick={() => change('', { doc_id: client.currentDocId?.() || 'strategy', interval_s: seconds })}>
+    <button type="button" disabled={Boolean(baseReason) || previewBusy} onClick={loadPreview}>
+      {previewBusy ? 'Loading execution plan...' : 'Preview execution plan'}
+    </button>
+    {plan && <ExecutionPlan plan={plan} />}
+    {previewError?.key === previewKey && <p role="alert">{previewError.message}</p>}
+    <button type="button" disabled={Boolean(activationReason) || previewBusy} title={activationReason || undefined}
+      onClick={() => change('', { doc_id: docId, interval_s: seconds, expected_revision: published })}>
       {published == null ? 'Activate published revision' : `Activate published r${published}`}</button>
     {activationReason && <p role="status">{activationReason}</p>}
     {error && <p role="alert">{error}</p>}
@@ -120,6 +184,7 @@ export default function DeploysView({ hidden = false, client = labArtifactsClien
   if (hidden) return null
 
   const { head, published, lastSaved } = client.state
+  const docId = client.currentDocId?.() || 'strategy'
   const publication = published == null ? 'Unpublished' : `Published r${published}`
   const receipt = published != null && lastSaved?.revision === published && lastSaved?.receipt_id
     ? 'Publication confirmed' : 'Publication confirmation unavailable'
@@ -128,7 +193,7 @@ export default function DeploysView({ hidden = false, client = labArtifactsClien
       rail: <>{head == null ? 'No saved revision' : `Saved revision ${head}`}. {publication}.</>,
       receipt: <>{receipt}. {lastSaved == null ? 'No saved revision' : `Last saved r${lastSaved.revision}`}.</>,
       rollback: 'Restore the prior revision as a new revision' },
-    { title: 'Scheduled runs', trigger: <Activations client={client} published={published} fetchImpl={fetchImpl} />,
+    { title: 'Scheduled runs', trigger: <Activations docId={docId} published={published} fetchImpl={fetchImpl} />,
       rail: publication, receipt: 'Schedule status is shown above.',
       rollback: 'Pause scheduling or turn the schedule off.' },
     { title: 'Widget publication', trigger: <><button type="button" disabled title="Widget publication is not available in this workspace yet.">Publish widget</button><p>Widget publication is not available in this workspace yet.</p></>,

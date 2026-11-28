@@ -15,20 +15,28 @@ import logging
 import os
 import re
 import subprocess
+import threading
+import time
+import unicodedata
+from collections import OrderedDict, deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Literal
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, StrictBool, StrictInt, StrictStr
+from fastapi import APIRouter, Depends, Header, Request
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
 
 import author_quota
 import catalog
+import customization_flags
 import customization_service
+from branch_tools import online_signer, tenant_catalog, tenant_publish
 import deps
 import entitlements
 from customization_authority import AuthorityError, PublishRequest
-from customization_models import ChangeSetNotFoundError
+from customization_models import ChangeSetConflictError, ChangeSetNotFoundError, IdempotencyReplayError
 from customization_service import CustomizationServiceError, CustomizationService
 from customization_flags import enabled as customization_enabled
 from deps import fb
@@ -63,12 +71,14 @@ ANONYMOUS_QUOTA_PRINCIPAL = "_anonymous"
 # the validation layer before any harness/template work runs.
 MAX_AUTHOR_DESCRIPTION = 8_000
 DEFAULT_AUTHOR_TIMEOUT_S = 120.0
+AUTHOR_STATUS_GUIDANCE = "Progress shows live on the build card. Do not state build, compile or publish status, and do not promise to check later."
 
 
-class AuthorRequest(BaseModel):
+class _AuthorFields(BaseModel):
     description: str = Field(..., max_length=MAX_AUTHOR_DESCRIPTION)
     mode: Literal["build", "one_off"] = "build"
     target_tool_name: str | None = Field(default=None, min_length=1, max_length=64)
+    target: Literal["studio", "branch"] | None = None
     # Optional presentation the author chooses for the tool record itself (see
     # server/tool_record_fields.py). Length-bounded here as well as validated
     # there, so an over-long body is rejected before any validator runs.
@@ -79,12 +89,38 @@ class AuthorRequest(BaseModel):
     graph_input: Any = None
 
 
-class StageRequest(AuthorRequest):
+class AuthorRequest(_AuthorFields):
+    # A plan-bound build sends only the binding; the description comes from the
+    # approved plan. Every other caller must still send one (checked in author()).
+    description: str = Field("", max_length=MAX_AUTHOR_DESCRIPTION)
+    # Legacy callers could send arbitrary extras. Interpret these only when
+    # this tenant uses plan-bound authoring.
+    plan_confirmation_id: Any = None
+    retry_of_change_set_id: Any = None
+
+
+class StageRequest(_AuthorFields):
     mode: str = Field(..., max_length=20)
     idempotency_key: str = Field(..., min_length=1, max_length=200)
 
     class Config:
         extra = "forbid"
+
+
+def _stage_targets(req: _AuthorFields, plan_mode: bool) -> dict[str, str]:
+    if plan_mode:
+        targets = {}
+        for field in ("target", "target_tool_name"):
+            if field in req.model_fields_set:
+                value = getattr(req, field)
+                if value is None:
+                    raise CustomizationServiceError("plan_binding_mismatch", 422)
+                targets[field] = value
+        return targets
+    targets = {"target_tool_name": req.target_tool_name} if req.target_tool_name else {}
+    if req.target == "branch":
+        targets["target"] = "branch"
+    return targets
 
 
 class StageRecoveryRequest(BaseModel):
@@ -116,6 +152,23 @@ class PublicationRequest(BaseModel):
 
     class Config:
         extra = "forbid"
+
+
+class ReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    change_set_id: UUID
+    staged_commit: StrictStr = Field(min_length=40, max_length=40, pattern=r"^[0-9a-fA-F]{40}$")
+    catalog_digest: StrictStr = Field(max_length=128)
+    decision: Literal["approve", "request_changes"]
+    comment: StrictStr | None = Field(default=None, max_length=500)
+
+    @field_validator("comment")
+    @classmethod
+    def strip_controls(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return "".join(ch for ch in value if ch == "\n" or unicodedata.category(ch) != "Cc")
 
 
 class RollbackRequest(BaseModel):
@@ -280,6 +333,8 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
     """Generate a tool package from a description, PERSIST its code to a real
     file, register it so it appears in /api/tools, and return
     {tool, code, preview} (contract section 4)."""
+    if req.target == "branch":
+        return _customization_error(CustomizationServiceError("branch_target_unavailable", 422))
     # ENTITLEMENT GATE (§17): the Build lane requires the tenant tier's `build` capability.
     # Enforced FIRST — before the harness delegation or the templater — so a plan without
     # Build cannot author tools via either path. Off-auth/demo tier grants build.
@@ -358,7 +413,13 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
             except ImportError:
                 timed_out = False
             return _harness_unavailable_response(timed_out=timed_out)
-        tool, code, preview = fb.author_tool(req.description)
+        try:
+            tool, code, preview = fb.author_tool(req.description)
+        except fb.InvalidEdgeDistance as exc:
+            return JSONResponse(status_code=422, content=with_envelope_fields({
+                "error": error_obj("BAD_PARAMS", str(exc), retryable=False),
+                "reason_code": "invalid_edge_distance",
+            }))
         source = "template"
         if harness_url:
             preview = "[harness unreachable; templated fallback] " + preview
@@ -444,38 +505,7 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
     )
 
 
-_CUSTOMIZATION_ERROR_MESSAGES = {
-    "customization_stage_disabled": (
-        "Tool authoring is not enabled for this workspace in this environment. "
-        "The approved request was not executed."
-    ),
-    "customization_publish_disabled": (
-        "Tool publication is not enabled for this workspace in this environment. "
-        "The approved request was not executed."
-    ),
-    "invalid_stage_request": (
-        "The requested authoring mode is not supported by the protected authoring path. "
-        "Use build mode."
-    ),
-    "builder_entitlement_missing": (
-        "This workspace does not have the builder entitlement required for tool authoring."
-    ),
-    "customization_harness_unavailable": (
-        "Protected tool authoring is temporarily unavailable. "
-        "The approved request was not executed."
-    ),
-    "idempotency_key_required": (
-        "Tool authoring requires a request identity. The approved request was not executed."
-    ),
-    "tenant_identity_binding_unavailable": (
-        "Tool authoring requires a verified workspace identity for the requester. "
-        "The approved request was not executed."
-    ),
-    "stage_authority_invalid": (
-        "Tool authoring requires the requester's active app turn. "
-        "The approved request was not executed."
-    ),
-}
+_CUSTOMIZATION_ERROR_MESSAGES = customization_service.CUSTOMIZATION_ERROR_MESSAGES
 
 
 def _stage_authority_refusal_detail(
@@ -531,6 +561,8 @@ def _subject_scoped_key(idempotency_key: str, tenant: Any) -> str:
 # detail-free 503s, and those are exactly what an operator must see. Default to
 # visible; demote only what is provably caller-driven.
 _CALLER_DRIVEN_CODES = frozenset({
+    "plan_required", "plan_binding_mismatch", "retry_target_invalid",
+    "revision_target_missing",
     # Fixed deployment posture. Monitor these as configuration, not once per public
     # request: auth being off, or a rollout rung being closed, does not vary by call.
     "customization_auth_required",
@@ -547,9 +579,17 @@ _CALLER_DRIVEN_CODES = frozenset({
     # Ordinary request outcomes: a malformed or unsupported request, a lifecycle
     # state the caller polls for, a target that is not eligible. All expected.
     "invalid_stage_request",
+    "invalid_stage_source_request",
     "invalid_publish_request",
     "invalid_publication_request",
+    "inline_review_disabled",
+    "approver_role_denied",
+    "review_target_stale",
+    "self_approval_not_allowed",
+    "review_already_decided",
+    "review_rate_limited",
     "stage_not_available",
+    "stage_source_not_available",
     "publish_not_available",
     "publication_request_not_available",
     "publication_denial_not_available",
@@ -623,9 +663,14 @@ def _customization_error(
         exc.code,
         "Protected tool authoring could not complete. The approved request was not executed.",
     )
-    return JSONResponse(status_code=exc.status_code, content=with_envelope_fields({
-        "error": error_obj("BAD_PARAMS", message, retryable=False),
+    retryable = exc.code in {"customization_stage_queue_full", "customization_stage_queue_unavailable"}
+    return JSONResponse(status_code=exc.status_code,
+                        headers={"Retry-After": "60"} if retryable else None,
+                        content=with_envelope_fields({
+        "error": error_obj("BAD_PARAMS", message, retryable=retryable),
         "reason_code": exc.code,
+        **({"harness_not_called": True} if exc.harness_not_called else {}),
+        **({"failures": exc.failures} if exc.code in {"branch_package_invalid", "capability_not_allowed"} else {}),
     }))
 
 
@@ -760,6 +805,11 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
     authority_turn_id = (
         authority_turn_id if isinstance(authority_turn_id, str) else None
     )
+    plan_mode = customization_flags.plan_mode_enabled(str(tenant).strip())
+    if not plan_mode and "description" not in req.model_fields_set:
+        return _customization_error(CustomizationServiceError("description_required", 422))
+    if plan_mode and not (authority_session_id and authority_turn_id):
+        return _customization_error(CustomizationServiceError("plan_required", 409))
     if bool(authority_session_id) != bool(authority_turn_id):
         return _customization_error(
             CustomizationServiceError("invalid_stage_authority", 422)
@@ -771,6 +821,8 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
     _emit_author_event("author.requested", tenant, {
         "mode": req.mode, "desc_len": len(req.description or "")})
     if not deps.auth_live() and not customization_enabled(5, str(tenant).strip()):
+        if req.target == "branch":
+            return _customization_error(CustomizationServiceError("branch_target_unavailable", 422))
         try:
             _validated_record_fields(req)
         except ToolRecordFieldError as exc:
@@ -793,6 +845,8 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
     tenant = deps.stage_author_identity(
         tenant, authority_session_id, authority_turn_id)
     if tenant is None:
+        if plan_mode:
+            return _customization_error(CustomizationServiceError("plan_required", 409))
         return _customization_error(
             CustomizationServiceError(
                 "stage_authority_invalid", 409,
@@ -814,16 +868,17 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         result = enqueue(
             tenant=tenant, description=req.description, mode=req.mode,
             idempotency_key=_subject_scoped_key(idempotency_key.strip(), tenant),
+            **({"plan_confirmation_id": req.plan_confirmation_id,
+                "retry_of_change_set_id": req.retry_of_change_set_id} if plan_mode else {}),
             **({
                 "authority_session_id": authority_session_id,
                 "authority_turn_id": authority_turn_id,
             } if authority_session_id and authority_turn_id else {}),
-            **({"target_tool_name": req.target_tool_name}
-               if req.target_tool_name else {}),
+            **_stage_targets(req, plan_mode),
             **({"graph_input": req.graph_input} if req.graph_input is not None else {}),
         )
         if result.get("contract") == "leaf.customization-stage-job.v1":
-            return JSONResponse(status_code=202, content=result)
+            return JSONResponse(status_code=202, content={**result, "guidance": AUTHOR_STATUS_GUIDANCE})
         return result
     # The daily authoring cap is charged inside stage(), immediately before the
     # harness call, so everything it refuses first costs nothing.
@@ -894,8 +949,7 @@ def stage(
                 "authority_session_id": authority_session_id,
                 "authority_turn_id": authority_turn_id,
             } if authority_session_id and authority_turn_id else {}),
-            **({"target_tool_name": req.target_tool_name}
-               if req.target_tool_name else {}),
+            **_stage_targets(req, customization_flags.plan_mode_enabled(str(tenant))),
             **({"graph_input": req.graph_input} if req.graph_input is not None else {}),
         )
         if result.get("contract") == "leaf.customization-stage-job.v1":
@@ -974,10 +1028,73 @@ def recover_stage(
     return JSONResponse(status_code=status_code, content=outcome)
 
 
+@router.post("/api/author/stages/{change_set_id}/withdraw")
+def withdraw_stage(change_set_id: str, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    try:
+        if not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", change_set_id):
+            raise CustomizationServiceError("invalid_recovery_request", 422)
+        binding = customization_service._binding(tenant)
+        service = CustomizationService.configured()
+        change = service.store.get_change_set(tenant_id=str(tenant), change_set_id=change_set_id)
+        if change.author_subject != binding.subject:
+            return _customization_error(CustomizationServiceError("change_set_not_found", 404))
+        result = service.store.withdraw_stage(
+            tenant_id=str(tenant), change_set_id=change_set_id,
+            author_subject=binding.subject, now_ms=int(time.time() * 1000),
+        )
+        if result["withdrawn"]:
+            if author_quota.refund_enabled():
+                customization_service.refund_unstarted_build(str(tenant), change_set_id)
+            try:
+                change = service.store.get_change_set(tenant_id=str(tenant), change_set_id=change_set_id)
+                customization_service.finish_stage_authority_for_change(change)
+            except Exception:
+                pass
+        return {"contract": "leaf.customization-stage-withdraw.v1", **result}
+    except ChangeSetNotFoundError:
+        return _customization_error(CustomizationServiceError("change_set_not_found", 404))
+    except CustomizationServiceError as exc:
+        return _customization_error(exc)
+    except Exception as exc:
+        return _customization_error(CustomizationServiceError("customization_stage_failed", 503), cause=exc)
+
+
 @router.get("/api/author/stages/{change_set_id}")
-def stage_status(
-    change_set_id: str, tenant=Depends(deps.require_tenant)
+def stage_status_route(
+    change_set_id: str, request: Request, tenant=Depends(deps.require_tenant)
 ) -> Dict[str, Any]:
+    """HTTP route: ?view=source returns the staged source; otherwise the stage status."""
+    if "view" not in request.query_params:
+        return stage_status(change_set_id, tenant=tenant)
+    headers = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
+    try:
+        denied = _customization_gate(5, tenant)
+        if denied is not None:
+            denied.headers.update(headers)
+            return denied
+        if (len(request.scope.get("query_string", b"")) > 1024
+                or request.query_params.multi_items() != [("view", "source")]):
+            raise CustomizationServiceError("invalid_stage_source_request", 422)
+        data, binding = CustomizationService.configured().stage_source(
+            tenant=tenant, change_set_id=change_set_id)
+        return Response(data, media_type="application/octet-stream", headers={**binding, **headers})
+    except ChangeSetNotFoundError:
+        response = _customization_error(CustomizationServiceError("stage_source_not_available", 404))
+    except (CustomizationServiceError, AuthorityError) as exc:
+        if isinstance(exc, AuthorityError):
+            response = _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
+        else:
+            response = _customization_error(exc)
+    except Exception as exc:
+        response = _customization_error(CustomizationServiceError("stage_source_failed", 503), cause=exc)
+    response.headers.update(headers)
+    return response
+
+
+def stage_status(change_set_id: str, tenant) -> Dict[str, Any]:
+    """Plain call (also used by campaign_acquisition_service): the stage status read model."""
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
@@ -1026,6 +1143,137 @@ def register(req: RegisterRequest, tenant=Depends(deps.require_tenant)) -> Dict[
                 CustomizationServiceError(exc.reason_code, 403), from_authority=True
             )
         return _customization_error(CustomizationServiceError("invalid_publish_request", 422))
+
+
+_review_calls: OrderedDict[str, deque[float]] = OrderedDict()
+_review_calls_lock = threading.Lock()
+
+
+class BranchRevokeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: StrictStr = Field(min_length=1, max_length=200)
+
+
+@router.get("/api/author/branch-tools")
+def branch_tools(tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not customization_flags.plugin_builder_enabled(str(tenant)):
+        return JSONResponse({"detail": "tool_not_published"}, status_code=404,
+                            headers={"Cache-Control": "no-store"})
+    return JSONResponse({"tools": tenant_catalog.list_versions(
+        os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant), include_revoked=True)},
+        headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/author/branch-tools/{name}/{version}/revoke")
+def revoke_branch_tool(name: str, version: str, req: BranchRevokeRequest,
+                       tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not customization_flags.plugin_builder_enabled(str(tenant)):
+        return JSONResponse({"detail": "tool_not_published"}, status_code=404,
+                            headers={"Cache-Control": "no-store"})
+    try:
+        binding = customization_service._binding(tenant)
+        if binding.role not in {"owner", "editor"}:
+            raise CustomizationServiceError("tenant_role_denied", 403)
+        if not _admit_review_call(binding.subject):
+            raise CustomizationServiceError("review_rate_limited", 429)
+        root = os.environ["LEAF_TENANT_TOOLS_DIR"]
+        # Resolve only this tenant's version before contacting the signer.
+        try:
+            tenant_publish.read_publication(root, str(tenant), name, version)
+        except tenant_publish.TenantPublishError:
+            return JSONResponse({"detail": "tool_not_published"}, status_code=404,
+                                headers={"Cache-Control": "no-store"})
+        result = tenant_publish.revoke_tenant_tool(
+            root, str(tenant), name, version, req.reason,
+            online_signer.configured_signer(), datetime.now(timezone.utc))
+        return JSONResponse({"name": name, "version": version,
+                             "package_digest": result.package_digest, "revoked": True},
+                            headers={"Cache-Control": "no-store"})
+    except CustomizationServiceError as exc:
+        return _customization_error(exc)
+    except tenant_publish.TenantPublishError as exc:
+        return _customization_error(CustomizationServiceError(exc.code, exc.status_code))
+    except online_signer.SignerUnavailable:
+        return _customization_error(CustomizationServiceError("signer_unavailable", 503))
+    except (tenant_catalog.TenantCatalogError, OSError):
+        return _customization_error(CustomizationServiceError("tenant_catalog_unavailable", 503))
+
+
+def _admit_review_call(subject: str) -> bool:
+    # Each of the subject's 30 tokens returns one minute after use.
+    with _review_calls_lock:
+        now = time.monotonic()
+        if subject not in _review_calls and len(_review_calls) >= 10_000:
+            _review_calls.popitem(last=False)
+        calls = _review_calls.setdefault(subject, deque())
+        while calls and calls[0] <= now - 60:
+            calls.popleft()
+        if len(calls) >= 30:
+            return False
+        calls.append(now)
+        return True
+
+
+def _review_gate(tenant: Any) -> JSONResponse | None:
+    denied = _customization_gate(6, tenant)
+    if denied is not None:
+        return denied
+    if not customization_flags.inline_review_enabled(str(tenant)):
+        return _customization_error(CustomizationServiceError("inline_review_disabled", 404))
+    return None
+
+
+@router.post("/api/author/reviews")
+def decide_review(req: ReviewRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    denied = _review_gate(tenant)
+    if denied is not None:
+        return denied
+    subject = getattr(tenant, "subject", None)
+    if subject and not _admit_review_call(subject):
+        return _customization_error(CustomizationServiceError("review_rate_limited", 429))
+    try:
+        return CustomizationService.configured().decide_review(
+            tenant=tenant, change_set_id=str(req.change_set_id), staged_commit=req.staged_commit,
+            catalog_digest=req.catalog_digest, decision=req.decision, comment=req.comment,
+        )
+    except (CustomizationServiceError, AuthorityError) as exc:
+        if isinstance(exc, AuthorityError):
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
+        return _customization_error(exc)
+    except (ChangeSetConflictError, IdempotencyReplayError):
+        return _customization_error(CustomizationServiceError("review_target_stale", 409))
+    except Exception as exc:
+        return _customization_error(CustomizationServiceError("customization_review_failed", 503), cause=exc)
+
+
+@router.get("/api/author/inline-authoring")
+def inline_authoring_flags(tenant=Depends(deps.require_tenant)) -> dict[str, bool]:
+    return {
+        "plan_mode": customization_flags.plan_mode_enabled(tenant),
+        "inline_review": customization_flags.inline_review_enabled(tenant),
+        "self_approval": customization_flags.self_approval_allowed(tenant),
+    }
+
+
+@router.get("/api/author/reviews/context")
+def review_context(change_set_id: UUID, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    denied = _review_gate(tenant)
+    if denied is not None and denied.status_code != 404:
+        return denied
+    try:
+        return CustomizationService.configured().review_context(
+            tenant=tenant, change_set_id=str(change_set_id), gate_open=denied is None,
+        )
+    except (CustomizationServiceError, AuthorityError) as exc:
+        if isinstance(exc, AuthorityError):
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
+        return _customization_error(exc)
+    except Exception as exc:
+        return _customization_error(CustomizationServiceError("customization_review_failed", 503), cause=exc)
 
 
 @router.post("/api/author/publication-requests")

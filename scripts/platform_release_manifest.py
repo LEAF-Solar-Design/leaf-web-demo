@@ -7,6 +7,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 from pathlib import Path
 from pathlib import PurePosixPath
 import re
@@ -136,9 +137,21 @@ def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
-def load_json(path: Path) -> dict[str, Any]:
+def load_json(path: Path, *, require_finite_numbers: bool = False) -> dict[str, Any]:
+    def parse_finite_number(literal: str) -> float:
+        number = float(literal)
+        if not math.isfinite(number):
+            raise ContractError(f"{path} contains nonfinite JSON number {literal}")
+        return number
+
+    parse_number = parse_finite_number if require_finite_numbers else None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_object)
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_object,
+            parse_constant=parse_number,
+            parse_float=parse_number,
+        )
     except (OSError, json.JSONDecodeError) as exc:
         raise ContractError(f"cannot read JSON contract: {path}") from exc
     if not isinstance(value, dict):
@@ -1631,7 +1644,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "re-envelope-speculative-v3":
             value = re_envelope_speculative_v3_manifest(
-                load_json(args.manifest),
+                load_json(args.manifest, require_finite_numbers=True),
                 web_restamp_receipt=load_json(args.web_restamp_receipt),
                 speculative_run_id=args.speculative_run_id,
                 speculative_run_attempt=args.speculative_run_attempt,
@@ -1715,7 +1728,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             validate_speculative_manifest(value)
         elif args.command == "verify-speculative":
-            value = load_json(args.manifest)
+            value = load_json(args.manifest, require_finite_numbers=True)
             validate_speculative_manifest(value, expect_tree=args.expect_tree)
         else:
             value = verify_staging_receipt(

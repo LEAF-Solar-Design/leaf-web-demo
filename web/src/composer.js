@@ -3,9 +3,8 @@
 // (a .jsx file cannot be loaded by the node test runner), and the component
 // stays responsible only for turning that data into elements.
 
-// Autogrow without measuring the DOM: the well is a fixed 40 px row until the
-// text needs a second line, then it grows by line count to a ceiling (past
-// that the textarea scrolls, so a pasted wall of text never eats the viewport).
+// Newline-based baseline; PromptBox also measures wrapped rows in the DOM.
+// Past the row ceiling the textarea scrolls to preserve the viewport.
 export const LINE_PX = 20
 export const MAX_ROWS = 8
 export const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])

@@ -83,7 +83,7 @@ INTAKE_COORD_QUANTUM = 0.0005
 _INTAKE_POINT_ERR = INTAKE_COORD_QUANTUM * math.sqrt(2)
 # A segment length moves by at most 2 * _INTAKE_POINT_ERR, so the difference of
 # two lengths by at most 4 * _INTAKE_POINT_ERR on top of the plugin's 0.001.
-_INTAKE_LENGTH_TOL = _GEOM_TOL + 4 * _INTAKE_POINT_ERR
+INTAKE_LENGTH_TOL = _GEOM_TOL + 4 * _INTAKE_POINT_ERR
 # Separating-axis slack: rectangles closer than this are treated as touching.
 _TOUCH_EPS = 1e-9
 
@@ -303,8 +303,8 @@ def _is_rectangular(segs) -> bool:
     if segs is None or len(segs) != 4:
         return False
     s1, s2, s3, s4 = segs
-    if not v_close(_seg_len(s1), _seg_len(s3), _INTAKE_LENGTH_TOL) or not v_close(
-        _seg_len(s2), _seg_len(s4), _INTAKE_LENGTH_TOL
+    if not v_close(_seg_len(s1), _seg_len(s3), INTAKE_LENGTH_TOL) or not v_close(
+        _seg_len(s2), _seg_len(s4), INTAKE_LENGTH_TOL
     ):
         return False
     for u, v, test in (

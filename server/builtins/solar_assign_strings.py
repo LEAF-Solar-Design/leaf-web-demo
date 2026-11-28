@@ -12,7 +12,7 @@ revision.
 
 Host inputs the plugin reads from the capture host's settings or session, derived here:
   UseL2Collectors      the graph's settings.use_l2_collectors (the bridge's mode; never the state's)
-  UsePatternStringAssignment  True: the pattern matcher is the only ported path
+  UsePatternStringAssignment  True: whole-string balancing optionally constrains the pattern matcher
   UseCombinerBox       False: a combiner box's capacity is its own input count (the bridge's
                        box_input_count), never the host's CombinerBoxConnections
   L2NumMppt, L2StringsPerMppt / NumMppt, StringsPerMppt
@@ -56,6 +56,7 @@ TOOL = "solar-assign-strings"
 REASON = "strings_assigned"
 MAX_STRING_NUMBER = 1_000_000
 REQUEST_KEYS = frozenset({"expected_rev", "accept_excess_capacity"})
+OPTIONAL_REQUEST_KEYS = frozenset({"balance_whole_strings"})
 # The four collector labels AssignStrings can print; one dialog answer each, so the kernel finds its own.
 LABELS = ("inverter", "combiner box", "central inverter", "L1/L2 collector")
 CANCELLED = "Auto-assignment cancelled."
@@ -175,14 +176,20 @@ def _invalidate(before, after):
     return edited
 
 
-def _assignment_plan(graph, request):
-    """Run the common kernel on a private graph; retain remainders before atomic refusal."""
+def _assignment_source(graph, request):
+    """Validate the request and revision shared by assignment and saved input reads."""
     _bounded_json(request)
-    if (type(request) is not dict or set(request) != REQUEST_KEYS
+    if (type(request) is not dict or not REQUEST_KEYS <= request.keys()
+            or request.keys() - REQUEST_KEYS - OPTIONAL_REQUEST_KEYS
             or type(request["expected_rev"]) is not int
-            or type(request["accept_excess_capacity"]) is not bool):
+            or type(request["accept_excess_capacity"]) is not bool
+            or type(request.get("balance_whole_strings", False)) is not bool):
         _refuse("INVALID_STRING_ASSIGNMENT_REQUEST")
-    before = checked_graph(graph, request["expected_rev"])
+    return checked_graph(graph, request["expected_rev"])
+
+
+def _assignment_plan(before, request):
+    """Run the common kernel on a validated graph; retain remainders before atomic refusal."""
     if before["electrical_zones"]:
         _refuse("ELECTRICAL_ZONES_UNSUPPORTED")
     unassigned = [string for string in before["strings"] if string["inverter_ref"] is None]
@@ -204,7 +211,10 @@ def _assignment_plan(graph, request):
             detail["box_input_count"] = _hardware_count(detail["box_input_count"])
     _number_strings(state)
     try:
-        after_state, lines = kernel.assign_strings(state, host, _forms(request["accept_excess_capacity"]))
+        after_state, lines = kernel.assign_strings(
+            state, host, _forms(request["accept_excess_capacity"]),
+            balance_whole_strings=request.get("balance_whole_strings", False),
+        )
     except kernel.InverterStringNotPortedError:
         raise GraphValidationError("STRING_ASSIGNMENT_NOT_PORTED") from None
     except kernel.InverterStringError:
@@ -221,7 +231,7 @@ def _assignment_plan(graph, request):
                   "STRING_CAPACITY_INSUFFICIENT" if lines == [] else "STRING_ASSIGNMENT_MAPPING_FAILED")
     elif remaining:
         reason = "STRING_ASSIGNMENT_INCOMPLETE"
-    return before, binding, after_state, rows, assigned, remaining, reason, lines
+    return binding, after_state, rows, assigned, remaining, reason, lines
 
 
 def _assignment_candidate(before, binding, after_state, rows, assigned):
@@ -241,7 +251,8 @@ def _assignment_candidate(before, binding, after_state, rows, assigned):
 
 
 def assign_strings(graph, request):
-    before, binding, after_state, rows, assigned, remaining, reason, lines = _assignment_plan(graph, request)
+    before = _assignment_source(graph, request)
+    binding, after_state, rows, assigned, _, reason, lines = _assignment_plan(before, request)
     if reason is not None:
         _refuse(reason)
     result = _assignment_candidate(before, binding, after_state, rows, assigned)

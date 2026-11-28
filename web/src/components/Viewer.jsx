@@ -1,18 +1,19 @@
 import { observationDrawingKey } from '../lib/projectDrawingObservation.js'
-import { useEffect, useLayoutEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
-import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, forwardRef, useImperativeHandle } from 'react'
+import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, insertGlyphScale, nextFitState, pickLineThreshold, resizeCameraAction, rollDrawingCamera, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { blockDefinitions } from './viewerIntake.js'
 import { drawingOrigin, finiteXY, localPositions } from './viewerLocalFrame.js'
 import { vertexZ, vertexSegments } from './viewerVertexZ.js'
 import { createCameraChannel } from './cameraChannel.js'
 import { viewportFromCamera } from './viewerMath.js'
 import { validObjectBounds } from '../lib/drawingObjectIndex.js'
-import { expandBulgedPolylines, intakeRoundPolylines, projectServerBlocks } from '../cadedit/engineIntake.js'
+import { expandBulgedPolylines, intakeDimensionPolylines, intakeRoundPolylines, projectServerBlocks } from '../cadedit/engineIntake.js'
 import { snapMarkerSegments } from '../cadedit/snapMarker.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { marqueeMode, marqueeMapping, marqueeHandles } from '../lib/marqueeSelection.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { buildSolarGraphOverlayLayer } from '../solar/solarGraphOverlayLayer.js'
+import SolarRouteInspector from '../solar/SolarRouteInspector.jsx'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
@@ -253,6 +254,7 @@ const Viewer = forwardRef(function Viewer(
     s.camera.updateMatrixWorld(true)
     const rect = s.renderer.domElement.getBoundingClientRect()
     channel().publish({ pose: cameraPose(s.camera, s.controls.target, rect),
+      canRoll: !s.sculpture && controlsEnabledRef.current && !rotateEnabledRef.current,
       viewport: viewportFromCamera(s.camera, { ...(safeRectRef.current || { left: 0, top: 0, width: rect.width, height: rect.height }),
         canvasWidth: rect.width, canvasHeight: rect.height }) })
   }
@@ -319,6 +321,20 @@ const Viewer = forwardRef(function Viewer(
   useEffect(() => { setInternalIntake(null); onIntakeOverrideRef.current?.(null, intake) }, [intake])
   const activeIntake = internalIntake || intake
   const sceneDrawingKey = activeIntake?.source === 'engine' ? `engine:${activeIntake.documentId}` : drawingKey
+  const { intake: overlayIntake, drawingKey: overlayDrawingKey, polylines: overlayLines } = solarOverlay ?? {}
+  const visibleSolarOverlay = useMemo(() => {
+    if (!overlayLines?.length || overlayIntake !== activeIntake || overlayDrawingKey !== sceneDrawingKey) return null
+    return {
+      intake: overlayIntake, drawingKey: overlayDrawingKey,
+      polylines: overlayLines.filter(line => line.pts.length >= 2 && line.pts.every(finiteXY)),
+    }
+  }, [overlayLines, overlayIntake, overlayDrawingKey, activeIntake, sceneDrawingKey])
+  const [solarRouteLayer, setSolarRouteLayer] = useState(null)
+  const inspectorLayer = solarRouteLayer?.overlay === visibleSolarOverlay ? solarRouteLayer : null
+  function selectSolarRoute(layer, id) {
+    layer.selectRoute(id)
+    setSolarRouteLayer(current => current?.layer === layer && current.id !== id ? { ...current, id } : current)
+  }
   const observationBindingRef = useRef(null)
   observationBindingRef.current = { binding: engineObservationBinding, parentDrawingKey: drawingKey }
   desiredSceneRef.current = { intake: activeIntake, drawingKey: sceneDrawingKey }
@@ -381,11 +397,12 @@ const Viewer = forwardRef(function Viewer(
     // additive lists) draw as sampled polylines; an intake without them
     // draws exactly as before ([] appended).
     const roundPolylines = intakeRoundPolylines(activeIntake)
+    const { polylines: dimensionPolylines, truncated: truncatedDimensions } = intakeDimensionPolylines(activeIntake)
     const validPolyline = pl => Array.isArray(pl?.pts) && pl.pts.length >= 2 && Array.from(pl.pts).every(finiteXY)
     const intakePolylines = expandBulgedPolylines((activeIntake.polylines || []).filter(validPolyline))
     const blocks = projectServerBlocks(activeIntake)
-    const polylines = (roundPolylines.length || blocks.polylines.length
-      ? [...intakePolylines, ...roundPolylines, ...blocks.polylines]
+    const polylines = (roundPolylines.length || dimensionPolylines.length || blocks.polylines.length
+      ? [...intakePolylines, ...roundPolylines, ...dimensionPolylines, ...blocks.polylines]
       : intakePolylines).filter(validPolyline)
     const inserts = blocks.inserts.filter(ins => finiteXY(ins?.pt))
     const faces3d = (activeIntake.faces3d || []).filter(f => f && [f.p1, f.p2, f.p3].every(finiteXY)
@@ -571,7 +588,8 @@ const Viewer = forwardRef(function Viewer(
       }
       return groups.get(layer)
     }
-    const hs = dataSpan * 0.02 // base half-size of the glyph
+    // A small marker (0.5% of the span): 88 roof circuit-tag dots at 2% covered a whole array as translucent tiles.
+    const hs = dataSpan * 0.005 // base half-size of the glyph
     let nInserts = 0
     const definitions = blockDefinitions(activeIntake)
     for (const ins of inserts) {
@@ -587,9 +605,8 @@ const Viewer = forwardRef(function Viewer(
       const mesh = new THREE.Mesh(geom, mat)
       mesh.position.set(ins.pt[0] - origin.x, ins.pt[1] - origin.y, 2)
       mesh.rotation.z = THREE.MathUtils.degToRad(ins.rot || 0)
-      const sx = ins.scale?.[0] ?? 1
-      const sy = ins.scale?.[1] ?? 1
-      mesh.scale.set(sx || 1, sy || 1, 1)
+      const [sx, sy] = insertGlyphScale(ins.scale)
+      mesh.scale.set(sx, sy, 1)
       mesh.userData = { kind: 'insert', handle: ins.handle }
       // outline square + a tick toward local +X so rotation reads visually
       const o = hs
@@ -605,7 +622,7 @@ const Viewer = forwardRef(function Viewer(
       entityLayerGroup(insertLayerGroups, ins.layer).add(mesh)
       pickables.push(mesh)
       nInserts++
-      addPickDescriptor(pickIndex, ins.handle, { kind: 'insert', layer: ins.layer, pt: ins.pt, rot: ins.rot || 0, scale: [sx || 1, sy || 1], hs })
+      addPickDescriptor(pickIndex, ins.handle, { kind: 'insert', layer: ins.layer, pt: ins.pt, rot: ins.rot || 0, scale: [sx, sy], hs })
     }
 
     // --- 3DFACEs: filled triangle-pair surfaces -----------------------------
@@ -788,6 +805,7 @@ const Viewer = forwardRef(function Viewer(
     }
 
     function fitToBounds() {
+      if (!sculpture) camera.up.set(0, 1, 0)
       const fit = applyFrustum()
       const centerX = fit?.centerX ?? cx, centerY = fit?.centerY ?? cy
       const targetZ = bridge ? bridgeMinZ / 2 + bridgeMaxZ / 2
@@ -854,6 +872,8 @@ const Viewer = forwardRef(function Viewer(
     const activeTouches = new Set()
     let suppressTouchPick = false
     const stackedPick = createStackedPickCycle()
+    const stackedRoutePick = createStackedPickCycle()
+    let lastRouteLayer = null
     function onPointerDown(e) {
       if (e.button !== 0) return // only left-click selects
       if (e.pointerType === 'touch' && (suppressTouchPick || e.isPrimary === false)) return
@@ -878,8 +898,20 @@ const Viewer = forwardRef(function Viewer(
         ? Math.hypot(adjacent.x - world.x, adjacent.y - world.y) : undefined
       raycaster.params.Line.threshold = pickLineThreshold(worldPerPixel)
       scene.updateMatrixWorld(true)
-      const hits = raycaster.intersectObjects(pickables, false)
       const additive = e.shiftKey || e.ctrlKey || e.metaKey
+      const routeLayer = stateRef.current?.solarLayer ?? null
+      if (routeLayer !== lastRouteLayer || additive) stackedRoutePick.reset()
+      lastRouteLayer = routeLayer
+      if (!additive && routeLayer?.pickObjects.length) {
+        const routeHits = raycaster.intersectObjects(routeLayer.pickObjects, false)
+        const routeId = stackedRoutePick.pick(routeLayer.routesFromHits(routeHits), e.clientX, e.clientY, performance.now())
+        selectSolarRoute(routeLayer, routeId)
+        if (routeId !== null) {
+          stackedPick.reset()
+          return
+        }
+      }
+      const hits = raycaster.intersectObjects(pickables, false)
       let handle
       if (additive) {
         stackedPick.reset()
@@ -897,7 +929,10 @@ const Viewer = forwardRef(function Viewer(
     function onPointerCancel(e) {
       if (down && down.pointerId === e.pointerId) down = null
     }
-    function onPickMove(e) { stackedPick.move(e.clientX, e.clientY) }
+    function onPickMove(e) {
+      stackedPick.move(e.clientX, e.clientY)
+      stackedRoutePick.move(e.clientX, e.clientY)
+    }
     const dom = renderer.domElement
     let candidate = null
     let marquee = null
@@ -1081,12 +1116,13 @@ const Viewer = forwardRef(function Viewer(
         layers: Array.isArray(activeIntake.layers) ? activeIntake.layers.length
           : new Set([...layerGroups.keys(), ...insertLayerGroups.keys(), ...faceLayerGroups.keys()]).size,
         markerReferences: nInserts,
-        omitted: blocks.truncated + (activeIntake.truncated || 0),
+        omitted: blocks.truncated + truncatedDimensions + (activeIntake.truncated || 0),
       },
       scene, root, origin, camera, renderer, controls, layerGroups, insertLayerGroups, faceLayerGroups, pickIndex,
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
       stringGroup, rubberGroup, snapGroup, stringAnim: null,
       fitToBounds, dataSpan, tokens, sculpture, bridge,
+      canRoll: () => !candidate && !marquee,
       solarGroup, solarLayer: null,
       observation,
     }
@@ -1105,7 +1141,7 @@ const Viewer = forwardRef(function Viewer(
         }
         return { drawingKey: observationDrawingKey(sceneDrawingKey, activeIntake,
           observationBindingRef.current.binding, observationBindingRef.current.parentDrawingKey), handles: [...rows.values()],
-          omitted: { blocks: blocks.truncated, activeIntake: activeIntake.truncated || 0 },
+          omitted: { blocks: blocks.truncated, activeIntake: truncatedDimensions + (activeIntake.truncated || 0) },
           selections: observation.history.map(record => ({ ...record,
             selected_handles: [...record.selected_handles], requested_handles: [...record.requested_handles] })) }
       },
@@ -1224,18 +1260,20 @@ const Viewer = forwardRef(function Viewer(
 
   useEffect(() => {
     const s = stateRef.current
-    if (!s || solarOverlay == null || solarOverlay.polylines.length === 0
-      || s.intake !== solarOverlay.intake || s.drawingKey !== solarOverlay.drawingKey) return
-    const layer = buildSolarGraphOverlayLayer(solarOverlay.polylines.filter(polyline => polyline.pts.every(finiteXY)).map(polyline => ({
-      ...polyline, pts: polyline.pts.map(point => [point[0] - s.origin.x, point[1] - s.origin.y, ...point.slice(2)]),
-    })))
+    if (!s || !visibleSolarOverlay?.polylines.length || s.intake !== visibleSolarOverlay.intake
+      || s.drawingKey !== visibleSolarOverlay.drawingKey) {
+      setSolarRouteLayer(null)
+      return
+    }
+    const layer = buildSolarGraphOverlayLayer(visibleSolarOverlay.polylines, s.origin)
     s.solarGroup.add(layer.group)
     s.solarLayer = layer
+    setSolarRouteLayer(layer.pickObjects.length ? { layer, overlay: visibleSolarOverlay, id: null } : null)
     return () => {
       layer.dispose()
       if (s.solarLayer === layer) s.solarLayer = null
     }
-  }, [solarOverlay?.polylines, solarOverlay?.intake, solarOverlay?.drawingKey, buildTick])
+  }, [visibleSolarOverlay, buildTick])
 
   useEffect(() => {
     if (paletteRevision === undefined || !stateRef.current) return
@@ -1326,6 +1364,15 @@ const Viewer = forwardRef(function Viewer(
       publishCamera()
       return changed
     },
+    rollDrawing: (direction) => {
+      const s = stateRef.current
+      if (!sceneReady() || s.sculpture || !controlsEnabledRef.current || rotateEnabledRef.current || !s.canRoll()) return false
+      if (!rollDrawingCamera(s.camera, s.controls.target, direction)) return false
+      fittedRef.current = false
+      s.controls.update()
+      publishCamera()
+      return true
+    },
     // Camera pose as plain data (position/target/zoom/near/far/worldPerPixel)
     // or null before layout — the scale readout's input.
     getPose: () => {
@@ -1400,7 +1447,10 @@ const Viewer = forwardRef(function Viewer(
   // --- controls enable/disable (site stage: static hero) --------------------
   useEffect(() => {
     const s = stateRef.current
-    if (s) configureControls(s.controls, controlsEnabled, rotateEnabled)
+    if (s) {
+      configureControls(s.controls, controlsEnabled, rotateEnabled)
+      publishCamera()
+    }
   }, [controlsEnabled, rotateEnabled, buildTick])
 
   // --- string routes (site stage draw-on animation) --------------------------
@@ -1764,6 +1814,15 @@ const Viewer = forwardRef(function Viewer(
       // selection means no attribute, never a fabricated handle.
       data-element-id={(selectedHandle && formatElementId('entity', selectedHandle)) || undefined}
     >
+      {inspectorLayer && (
+        <div className="selection-readout" style={{
+          left: (safeRect?.left ?? 0) + 14, top: (safeRect?.top ?? 0) + 14,
+          bottom: 'auto', minWidth: 0, width: 'max-content', cursor: 'auto',
+        }}>
+          <SolarRouteInspector overlay={inspectorLayer.overlay} selectedRouteId={inspectorLayer.id}
+            onRouteSelect={id => selectSolarRoute(inspectorLayer.layer, id)} />
+        </div>
+      )}
       {glError && (
         <div className="viewer-fallback">
           3D preview needs WebGL, which is unavailable in this browser.

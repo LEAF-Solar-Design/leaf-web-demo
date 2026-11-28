@@ -994,6 +994,7 @@ def test_d_b_start_cleanup_after_transport_failure(monkeypatch):
 
 def _native_case(tmp_path, monkeypatch):
     """No PG executables, sockets, processes or platform-specific paths required."""
+    monkeypatch.setattr(pg, "_NATIVE_WINDOWS", False)
     c = SimpleNamespace(root=tmp_path, calls=[], alive=False, fail_stop=False, keep_alive=False,
         fail_init=False, fail_start=False, epoch=1700000000, password_seen=None, configs=[], server_version=160006)
     c.binaries = {name: str(tmp_path / "fake-bin" / name) for name in ("initdb", "pg_ctl", "postgres")}
@@ -1059,28 +1060,35 @@ def _native_case(tmp_path, monkeypatch):
     return c
 
 
-def test_h_binary_override(tmp_path):
+@pytest.mark.parametrize("windows", [False, True])
+def test_h_binary_override(tmp_path, monkeypatch, windows):
+    monkeypatch.setattr(pg, "_NATIVE_WINDOWS", windows)
     override, path = str(tmp_path / "override"), str(tmp_path / "path")
     seen = []
     bins = pg.resolve_native_binaries(environ={"LEAF_PG_BIN": override, "PATH": path},
         executable=lambda name: seen.append(name) or True,
-        runner=lambda argv, **k: SimpleNamespace(returncode=0, stdout=Path(argv[0]).name + " (PostgreSQL) 16.6\n"))
-    assert bins == {name: str(Path(override) / name) for name in ("initdb", "pg_ctl", "postgres")}
+        runner=lambda argv, **k: SimpleNamespace(returncode=0, stdout=Path(argv[0]).stem + " (PostgreSQL) 16.6\n"))
+    extension = ".exe" if windows else ""
+    assert bins == {name: str(Path(override) / (name + extension)) for name in ("initdb", "pg_ctl", "postgres")}
 
 
-def test_h_binary_path(tmp_path):
+@pytest.mark.parametrize("windows", [False, True])
+def test_h_binary_path(tmp_path, monkeypatch, windows):
+    monkeypatch.setattr(pg, "_NATIVE_WINDOWS", windows)
     first, second = str(tmp_path / "missing"), str(tmp_path / "path")
     seen = []
     def executable(path):
         seen.append(path)
         return Path(path).parent == Path(second)
     bins = pg.resolve_native_binaries(environ={"LEAF_PG_BIN": first, "PATH": second}, executable=executable,
-        runner=lambda argv, **k: SimpleNamespace(returncode=0, stdout=Path(argv[0]).name + " (PostgreSQL) 16.6\n"))
+        runner=lambda argv, **k: SimpleNamespace(returncode=0, stdout=Path(argv[0]).stem + " (PostgreSQL) 16.6\n"))
     assert all(Path(value).parent == Path(second) for value in bins.values())
-    assert seen[:2] == [str(Path(first) / "initdb"), str(Path(second) / "initdb")]
+    binary = "initdb.exe" if windows else "initdb"
+    assert seen[:2] == [str(Path(first) / binary), str(Path(second) / binary)]
 
 
-def test_h_binary_fallbacks():
+def test_h_binary_fallbacks(monkeypatch):
+    monkeypatch.setattr(pg, "_NATIVE_WINDOWS", False)
     seen = []
     def executable(path):
         seen.append(Path(path).as_posix())
@@ -1312,6 +1320,7 @@ def test_h_dsn_private(tmp_path, monkeypatch, capsys):
 
 
 def test_h_process_table(monkeypatch):
+    monkeypatch.setattr(pg, "_NATIVE_WINDOWS", False)
     calls = []
     def runner(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -1327,7 +1336,8 @@ def test_h_process_table(monkeypatch):
         runner=lambda *a, **kw: SimpleNamespace(returncode=1, stdout="", stderr="")) is None
 
 
-def test_h_process_table_foreign():
+def test_h_process_table_foreign(monkeypatch):
+    monkeypatch.setattr(pg, "_NATIVE_WINDOWS", False)
     with pytest.raises(RuntimeError, match="identity unavailable"):
         pg.native_process_identity(12345,
             runner=lambda *a, **kw: SimpleNamespace(returncode=0, stdout="Tue Nov 14 22:13:20 2023 /fake/python\n"))
@@ -1396,6 +1406,7 @@ def test_h_c1_validated_tombstone(tmp_path, monkeypatch):
 
 
 def test_h_c1_failed_ps(tmp_path, monkeypatch):
+    monkeypatch.setattr(pg, "_NATIVE_WINDOWS", False)
     calls = []
     def probe(pid, sig):
         calls.append((pid, sig))  # The captured process is still alive.
@@ -1427,6 +1438,7 @@ def test_h_c1_failed_ps(tmp_path, monkeypatch):
 
 
 def test_h_c1_kill_probe_absence(tmp_path, monkeypatch):
+    monkeypatch.setattr(pg, "_NATIVE_WINDOWS", False)
     calls = []
     def absent(pid, sig):
         calls.append((pid, sig))
@@ -1445,7 +1457,7 @@ def test_h_c1_mixed_versions(tmp_path):
     for wrong in names:
         calls = []
         def version(argv, **kwargs):
-            name = Path(argv[0]).name
+            name = Path(argv[0]).stem
             calls.append(name)
             return SimpleNamespace(returncode=0,
                 stdout=name + " (PostgreSQL) " + ("17.1" if name == wrong else "16.6") + "\n")
@@ -1455,9 +1467,13 @@ def test_h_c1_mixed_versions(tmp_path):
         assert wrong in calls
 
 
-def test_h_c1_split_directories(tmp_path):
+@pytest.mark.parametrize("windows", [False, True])
+def test_h_c1_split_directories(tmp_path, monkeypatch, windows):
+    monkeypatch.setattr(pg, "_NATIVE_WINDOWS", windows)
     override, path = tmp_path / "pg16", tmp_path / "pg17"
-    available = {str(override / "pg_ctl"), str(path / "initdb"), str(path / "postgres")}
+    extension = ".exe" if windows else ""
+    available = {str(folder / (name + extension)) for folder, name in
+                 [(override, "pg_ctl"), (path, "initdb"), (path, "postgres")]}
     def version(argv, **kwargs):
         return SimpleNamespace(returncode=0, stdout=Path(argv[0]).name + " (PostgreSQL) 16.6\n")
     with pytest.raises(RuntimeError, match="must share a directory"):

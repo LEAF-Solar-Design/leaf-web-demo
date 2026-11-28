@@ -25,8 +25,9 @@
 // image dropped on that same G2 well, or one picked through the "+ add" chip
 // lands as a quiet chip carrying its name and size.
 
-import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
+import PlanToggle from './converse/PlanToggle.jsx'
 import useExit from '../useExit.js'
 import { digest, trackUsage } from '../telemetry.js'
 import { byId } from '../lib/actionRegistry.js'
@@ -41,6 +42,8 @@ import CockpitIcon from '../site/CockpitIcon.jsx'
 import {
   appendPromptHistory,
   autoGrowHeight,
+  LINE_PX,
+  MAX_ROWS,
   createPromptHistoryState,
   filterRunnable,
   historyKeydown,
@@ -124,6 +127,7 @@ const IMAGE_ACCEPT = [...IMAGE_MEDIA_TYPES].join(',')
 export default function PromptBox({
   value, onChange, onDispatch: dispatchWithContext, routing, hintLane, projectName, inputRef, routeActive,
   onOpenAuthor, tools = [], skills = [], sessionId = null,
+  planMode = false, onTogglePlanMode,
   // action name -> handler, for registry entries of kind "command". An entry
   // whose action has no handler here is filtered out of the menu entirely
   // (composer.js filterRunnable), so the picker can never offer something this
@@ -138,6 +142,7 @@ export default function PromptBox({
   // like the authority while paths it never sees stayed open. Render the
   // verdict that was actually enforced, and nothing else.
   secretRefusal = null,
+  starter = null,
   // W4d Slice E: the reference's one-line docked "Command:" prompt. The DOM
   // is the same well; this only adds a class the studio's drafting-surface
   // CSS lays out as one row, and swaps the caret glyph for the prompt word.
@@ -224,6 +229,34 @@ export default function PromptBox({
   const [dropErr, setDropErr] = useState(null)
   const dragDepth = useRef(0) // dragenter/leave pair counter (children re-fire them)
   const rootRef = useRef(null)
+  const fieldRef = useRef(null)
+  const starterSelectionRef = useRef(null)
+  useLayoutEffect(() => {
+    const pending = starterSelectionRef.current
+    if (pending && value === pending.text) {
+      starterSelectionRef.current = null
+      fieldRef.current?.focus()
+      fieldRef.current?.setSelectionRange(...pending.select)
+    }
+  }, [value])
+  const [wrapped, setWrapped] = useState(false)
+  const setFieldRef = useCallback((node) => {
+    fieldRef.current = node
+    if (typeof inputRef === 'function') inputRef(node)
+    else if (inputRef) inputRef.current = node
+  }, [inputRef])
+  useLayoutEffect(() => {
+    const field = fieldRef.current
+    if (!field) return
+    const baseline = autoGrowHeight(value)
+    field.style.height = baseline || ''
+    const computedLineHeight = getComputedStyle(field).lineHeight
+    const parsedLineHeight = computedLineHeight.endsWith('px') ? Number.parseFloat(computedLineHeight) : NaN
+    const lineHeight = Number.isFinite(parsedLineHeight) && parsedLineHeight > 0 ? parsedLineHeight : LINE_PX
+    const needsGrowth = field.scrollHeight > field.clientHeight + 1
+    if (needsGrowth) field.style.height = `${Math.min(field.scrollHeight, MAX_ROWS * lineHeight)}px`
+    setWrapped(Boolean(baseline) || needsGrowth)
+  }, [value])
   const scopeMenu = useExit(scopeOpen) // 180 ms M1 exit fade
   const [menuIdx, setMenuIdx] = useState(0)
   const [menuDismissed, setMenuDismissed] = useState(false)
@@ -571,6 +604,11 @@ export default function PromptBox({
 
   const onKeyDown = (e) => {
     if (isCompositionKey(e)) return
+    if (onTogglePlanMode && e.key === 'Tab' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault()
+      if (!e.repeat) onTogglePlanMode()
+      return
+    }
     // Slice 10b/10c: the act/find resolver takes the SAME arrow/Enter/Esc
     // keys the "/" picker uses (menuOpen below) — the two never overlap
     // (scopeMenuOpen stands down the instant `trigger` fires), so this
@@ -767,6 +805,7 @@ export default function PromptBox({
       <div
         className={withAlias(`bar${dragging ? ' drag' : ''}${commandLine ? ' bar-command-line' : ''}`, classNames.bar)}
         data-tour="command-bar"
+        data-wrapped={wrapped ? 'true' : undefined}
         ref={rootRef}
         onDragEnter={dropIngestEnabled ? onDragEnter : undefined}
         onDragOver={dropIngestEnabled ? onDragOver : undefined}
@@ -942,7 +981,7 @@ export default function PromptBox({
               half the feature. rows=1 plus the autogrow below keeps the 40 px
               single-line well until the text actually needs a second row. */}
           <textarea
-            ref={inputRef}
+            ref={setFieldRef}
             rows={1}
             // The well's styling hangs off `.bar-input input` (an ELEMENT
             // selector), so a <textarea> matches none of it — width, border
@@ -977,6 +1016,12 @@ export default function PromptBox({
             style={{ height: autoGrowHeight(value), resize: 'none', overflowY: 'auto' }}
           />
         </div>
+        {starter && !value.trim() && (
+          <button type="button" className="chip-neutral" data-testid="prompt-starter" onClick={() => {
+            starterSelectionRef.current = starter
+            changePrompt(starter.text)
+          }}>{starter.label}</button>
+        )}
         {secretRefusal && (
           <div className="bar-secret-notice" role="alert" data-testid="secret-notice">
             <span className="dot red" aria-hidden="true" />
@@ -1035,6 +1080,7 @@ export default function PromptBox({
           </div>
         )}
         <div className="bar-controls">
+          {onTogglePlanMode && <PlanToggle pressed={planMode} onToggle={onTogglePlanMode} />}
           <button
             type="button"
             className="bar-add"

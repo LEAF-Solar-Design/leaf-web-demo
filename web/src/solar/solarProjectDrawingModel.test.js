@@ -99,6 +99,32 @@ describe('projectSolarDrawingView', () => {
     expect(Object.isFrozen(SOLAR_PROJECT_DRAWING_CODES)).toBe(true)
   })
 
+  it('draws a completed group beside saved strings only while the exact preview is present', () => {
+    const input = fixture()
+    const graph = graphOf(input)
+    graph.rev = 3
+    graph.frames.push({ id: 'roof' })
+    graph.panels[0].frame_ref = 'roof'
+    graph.panels.push({ id: 'other', frame_ref: 'roof', centre: [6, 8] })
+    freeze(input)
+    const saved = projectSolarDrawingView(input)
+    const solvePreview = freeze({
+      graph_sha256: input.contextView.intake.solar_design_graph_sha256,
+      graph_revision: 3, frame_id: 'roof', groups: [['other', 'panel']],
+    })
+    const shown = projectSolarDrawingView({ ...input, solvePreview })
+    expect(shown.intake).toBe(saved.intake)
+    expect(shown.overlay.polylines).toEqual([...lines, { pts: [[3, 4], [1, 2]], color: '#60a5fa' }])
+    for (const changes of [
+      { graph_sha256: 'c'.repeat(64) }, { graph_revision: 2 }, { frame_id: 'other' },
+      { groups: [['missing', 'panel']] }, { groups: [['other', 'other']] },
+    ]) {
+      expect(projectSolarDrawingView({ ...input, solvePreview: { ...solvePreview, ...changes } })).toEqual(saved)
+    }
+    expect(projectSolarDrawingView(getter({ ...input }, 'solvePreview'))).toEqual(saved)
+    expect(projectSolarDrawingView({ ...input, solvePreview: null })).toEqual(saved)
+  })
+
   it('R13E-02 refuses missing or malformed canonical binding', () => {
     const good = fixture().solarBinding
     const cases = [

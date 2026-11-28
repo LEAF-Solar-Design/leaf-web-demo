@@ -499,16 +499,53 @@ def test_sip_r3b_feeders(memory):
     assert r["after_rev"] == 2
 
 
-def test_sip_r3b_homeruns(memory, case, monkeypatch):
+@pytest.mark.parametrize("constrained", [False, True])
+def test_sip_r3b_homeruns(memory, case, monkeypatch, constrained):
     ctx = assigned_parent(memory, case)
     ctx = canonical_custody(memory, monkeypatch, ctx.graph)
     params = {"expected_rev": ctx.graph["rev"]}
+    if constrained:
+        from test_solar_tool_solar_homeruns import route_constraints
+
+        params["routing_constraints"] = route_constraints()
     expected = direct(ctx, "solar-homeruns", params)
     p = prepare(memory, "solar-homeruns", params, ctx)
     assert prepare(memory, "solar-homeruns", params, ctx) == p
     r = publish(memory, p)
     assert output(memory, r).graph == expected
     assert r["after_rev"] == ctx.graph["rev"] + 1
+
+
+@pytest.mark.parametrize("space", ["model", "paper"])
+def test_sip_r3b_homeruns_reads_keepouts_from_pinned_parent(memory, case, monkeypatch, space):
+    ctx = assigned_parent(memory, case)
+    ctx = canonical_custody(memory, monkeypatch, ctx.graph)
+    params = {"expected_rev": ctx.graph["rev"]}
+    baseline = direct(ctx, "solar-homeruns", params)
+    leads = [route for route in baseline["routes"] if route["route_kind"].endswith("homerun")]
+    assert leads
+    scale = ctx.graph["project"]["units"]["meters_per_unit"]
+    xs, ys = zip(*(point[:2] for route in leads for point in route["points"]))
+    left, right = min(xs) / scale - 1, max(xs) / scale + 1
+    bottom, top = min(ys) / scale - 1, max(ys) / scale + 1
+    memory.set_parent({**ctx.intake, "polylines": [{
+        "handle": "A8", "layer": "PV_KEEP_OUT", "closed": True, "space": space,
+        "pts": [[left, bottom], [right, bottom], [right, top], [left, top]],
+    }]})
+    pinned = adapter.resolve_project_graph_context(memory.context())
+    if space == "paper":
+        prepared = prepare(memory, "solar-homeruns", params, pinned)
+        assert json.loads(prepared.output_intake_bytes)["solar_design_graph"] == baseline
+        return
+
+    head, writes = memory.head, list(memory.writes)
+    with pytest.raises(GraphValidationError) as exc:
+        prepare(memory, "solar-homeruns", params, pinned)
+    assert exc.value.code == "JOINT_ROUTING_INFEASIBLE"
+    assert set(exc.value.path.split(", ")) == {
+        f"{route['from_ref']}/{route['route_kind']}" for route in leads
+    }
+    assert memory.head == head and memory.writes == writes
 
 
 def test_sip_r3b_correction_membership(memory, case, monkeypatch):

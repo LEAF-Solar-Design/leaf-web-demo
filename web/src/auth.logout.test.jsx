@@ -201,6 +201,7 @@ it('does not clean history on an SDK rejection from a retired callback', async (
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.unstubAllEnvs()
   vi.resetModules()
@@ -255,6 +256,74 @@ async function mountLogout(sdkEnabled) {
   }
   return { auth, sdk, createClient, reload, assertCleared, offThrow, origin: realWindow.location.origin }
 }
+
+it('human logout removes the display-only account email', async () => {
+  const h = await mountLogout(false)
+  const { setAccountEmail } = await import('./auth/accountIdentity.js')
+  localStorage.setItem('leaf.jwt', `header.${btoa(JSON.stringify({ sub: 'account-a' }))}.signature`)
+  setAccountEmail('a@example.com')
+  expect(JSON.parse(localStorage.getItem('leaf.account_email'))).toEqual({ sub: 'account-a', email: 'a@example.com' })
+  try {
+    await act(async () => { await h.auth.logout() })
+    expect(localStorage.getItem('leaf.account_email')).toBeNull()
+  } finally { h.offThrow(); localStorage.removeItem('leaf.account_email') }
+})
+
+it('a synchronous before-logout listener adds no wait before local authority is cleared', async () => {
+  const h = await mountLogout(false)
+  const listener = vi.fn()
+  const off = h.auth.subscribeBeforeLogout(listener)
+  try {
+    let pending
+    act(() => {
+      pending = h.auth.logout()
+      expect(listener).toHaveBeenCalledOnce()
+      expect(localStorage.getItem('leaf.jwt')).toBeNull()
+    })
+    await act(async () => { await pending })
+    expect(h.reload).toHaveBeenCalledOnce()
+  } finally { off(); h.offThrow() }
+})
+
+it('awaits an asynchronous before-logout listener before navigation', async () => {
+  const h = await mountLogout(false)
+  let release
+  const off = h.auth.subscribeBeforeLogout(() => new Promise(resolve => { release = resolve }))
+  try {
+    let pending
+    act(() => { pending = h.auth.logout() })
+    await act(async () => {})
+    expect(h.reload).not.toHaveBeenCalled()
+    expect(localStorage.getItem('leaf.jwt')).toBe('principal-a')
+    await act(async () => { release(); await pending })
+    expect(h.reload).toHaveBeenCalledOnce()
+    expect(localStorage.getItem('leaf.jwt')).toBeNull()
+  } finally { off(); h.offThrow() }
+})
+
+it('a never-settling before-logout listener releases sign-out at 1500 ms', async () => {
+  const h = await mountLogout(false)
+  vi.useFakeTimers()
+  const off = h.auth.subscribeBeforeLogout(() => new Promise(() => {}))
+  try {
+    let pending
+    act(() => { pending = h.auth.logout() })
+    await act(async () => { await vi.advanceTimersByTimeAsync(1499) })
+    expect(h.reload).not.toHaveBeenCalled()
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); await pending })
+    expect(h.reload).toHaveBeenCalledOnce()
+  } finally { off(); h.offThrow() }
+})
+
+it('a rejecting before-logout listener cannot prevent sign-out', async () => {
+  const h = await mountLogout(false)
+  const off = h.auth.subscribeBeforeLogout(() => Promise.reject(new Error('Observer refused')))
+  try {
+    await act(async () => { await h.auth.logout() })
+    expect(h.reload).toHaveBeenCalledOnce()
+    expect(localStorage.getItem('leaf.jwt')).toBeNull()
+  } finally { off(); h.offThrow() }
+})
 
 it('URL307B-05 explicit logout clears before fallback reload', async () => {
   const h = await mountLogout(false)

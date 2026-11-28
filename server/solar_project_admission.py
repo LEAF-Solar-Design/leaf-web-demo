@@ -40,6 +40,7 @@ _FAILURES = {
     "SIP_R1_INTAKE_DIGEST_MISMATCH": (500, False), "SIP_R1_INTAKE_INVALID": (500, False),
     "SIP_R1_INTAKE_UNAVAILABLE": (503, True), "SIP_R1_STORE_UNAVAILABLE": (503, True),
     "SIP_R1_CHECKOUT_PARAMS_INVALID": (400, False), "SIP_R1_CHECKOUT_CONFLICT": (409, True),
+    "SIP_R1_PROJECT_ARCHIVED": (409, False),
     "SIP_R1_CHECKOUT_REQUIRED": (409, False), "SIP_R1_CHECKOUT_EXPIRED": (409, False),
     "SIP_R1_CHECKOUT_DENIED": (403, False), "SIP_R1_CHECKOUT_STALE": (409, False),
     "SIP_R1_CHECKOUT_UNAVAILABLE": (503, True), "SIP_R1_FENCE_EXHAUSTED": (409, False),
@@ -278,6 +279,19 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
     except GraphValidationError as exc:
         # Import lazily because the producer also uses this admission module.
         from solar_project_solaredge import SolarEdgeGridRefusal
+        from solar_combiner_graph import CombinerCapacityError
+        from solar_joint_homerun_routing import JointRoutingInfeasible
+
+        if isinstance(exc, JointRoutingInfeasible):
+            response = _refusal(exc.code, message=exc.user_message)
+            response["content"]["error"]["affected_leads"] = [
+                f"{lead['string_ref']}/{lead['route_kind']}" for lead in exc.unassigned_leads
+            ]
+            return response
+        if isinstance(exc, CombinerCapacityError):
+            response = _refusal(exc.code, message="Combiner placement exceeds inverter collector capacity.")
+            response["content"]["error"]["unplaced_string_refs"] = list(exc.unplaced_string_refs)
+            return response
         if isinstance(exc, SolarEdgeGridRefusal):
             # Revalidate the typed diagnostic before it crosses the response boundary.
             try:

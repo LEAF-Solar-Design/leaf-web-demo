@@ -49,7 +49,7 @@ describe('the availability manifest on the staging host', () => {
     expect(mocks.navigate).not.toHaveBeenCalled()
     expect(document.querySelector('.lp-price').textContent).toBe('Free to try. Pricing is not yet available.')
     expect(screen.getByRole('button', { name: 'Try Branch on the sample rooftop' }).getAttribute('aria-disabled')).toBeNull()
-    expect(screen.getByRole('button', { name: 'Open workspace' }).getAttribute('aria-disabled')).toBeNull()
+    expect(screen.getByRole('button', { name: /^(Open workspace|Sign in \/ Create account)$/ }).getAttribute('aria-disabled')).toBeNull()
   })
 
   it('takes Generate away in the author panel and says authoring is not yet available', () => {

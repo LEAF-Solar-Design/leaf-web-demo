@@ -1,0 +1,26 @@
+{
+  "exit_code": 1,
+  "stdout": {
+    "schema": "leaf.tool-check.v1",
+    "ok": false,
+    "decision": "compile_failed",
+    "diagnostics": [
+      "main.csx(11,17): scan: denied namespace: System.IO",
+      "main.csx(11,17): scan: denied namespace: System.IO.File",
+      "main.csx(11,17): scan: denied namespace: System.IO.File.ReadAllText(string)",
+      "main.csx(11,17): scan: not allowlisted: System.IO.File",
+      "main.csx(11,17): scan: not allowlisted: System.IO.File.ReadAllText",
+      "main.csx(11,24): scan: denied namespace: System.IO",
+      "main.csx(11,27): scan: denied namespace: System.IO.File",
+      "main.csx(11,27): scan: not allowlisted: System.IO.File",
+      "main.csx(11,32): scan: denied namespace: System.IO.File",
+      "main.csx(11,32): scan: denied namespace: System.IO.File.ReadAllText(string)",
+      "main.csx(11,32): scan: not allowlisted: System.IO.File",
+      "main.csx(11,32): scan: not allowlisted: System.IO.File.ReadAllText"
+    ],
+    "package_digest": "b2119dc0392832aeb33e066512bdd51b6a5eaa433ca728ad129d2a7864f054ff",
+    "allowlist_sha256": "716d548887ce792f4f9950d0ba8b0e531b3d7f9b80b7399cf3fcd59d622a3285",
+    "framework": "<framework>"
+  },
+  "source": "Windows tools/tool-check (net8.0-windows) at Branch2025 59c81299, LeafAcadRefSource=nuget, 2026-11-20"
+}

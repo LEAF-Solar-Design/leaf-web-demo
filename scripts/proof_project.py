@@ -251,6 +251,7 @@ class HostFacts:
     environment: Mapping[str, str] = field(repr=False)
     engine_outputs: tuple[FileProof, ...] = ()
     toolchain: tuple[tuple[str, str], ...] = ()
+    windows_library_paths: str = field(default="", repr=False)
 
     def __post_init__(self):
         object.__setattr__(self, "environment", _RedactedEnvironment(self.environment))
@@ -873,6 +874,7 @@ def preflight(config: Config, *, effects: Effects) -> Plan:
 _OS_KEYS = frozenset({"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
                       "USERPROFILE", "LOCALAPPDATA", "APPDATA", "HOME", "LANG", "LC_ALL"})
 _AUTHORITY_KEYS = ("LEAF_PROOF_PROJECT_AUTHORITY", "LEAF_PG_BIN")
+_WINDOWS_RUNTIME_HOST = os.name == "nt"
 
 
 class _PrivateEnvironment(dict):
@@ -893,6 +895,11 @@ def _host_environment(environ):
     env = _essential_environment(environ)
     env.update({key: environ[key] for key in _AUTHORITY_KEYS if key in environ})
     return env
+
+
+def _windows_library_paths(environ):
+    paths = environ.get("LIB", "") if _WINDOWS_RUNTIME_HOST else ""
+    return paths if paths.strip() else ""
 
 
 def _load_file(name, path, *, package=False):
@@ -1033,9 +1040,13 @@ def prepare_runtime(plan: Plan, *, effects: Effects, scope: RunScope) -> Runtime
         for name in TOOLS:
             _await_runtime(ProcessSpec("runtime-version", (tools[name], "--version"), REPO, env,
                 effects.clock.monotonic() + VERSION_TIMEOUT_S, root / (name + "-version.txt")), effects, scope)
+        # Cargo links native build scripts using the Windows developer environment.
+        build_env = env
+        if facts.windows_library_paths:
+            build_env = env | {"LIB": facts.windows_library_paths}
         _await_runtime(ProcessSpec("runtime-build", (tools["wasm-pack"], "build", "--release",
             "--target", "web", ".", "--out-dir", str(root / "cad-engine"), "--out-name", "engine"),
-            root / "vendor-source", env, effects.clock.monotonic() + BUILD_TIMEOUT_S), effects, scope)
+            root / "vendor-source", build_env, effects.clock.monotonic() + BUILD_TIMEOUT_S), effects, scope)
         built = effects.host.inspect(plan.config)
         if {f.path for f in built.engine_outputs} != set(ENGINE_OUTPUTS):
             _refuse(FailureCode.RUNTIME, Stage.RUNTIME)
@@ -1340,7 +1351,8 @@ def _validate_ownership(owned, run_id, *, allocated):
                 or owned.present is not allocated or type(owned.pid) is not int
                 or type(owned.started_at) is not int
                 or (allocated and (owned.pid <= 0 or owned.started_at <= 0
-                    or type(owned.start_id) is not str or re.fullmatch(r"ps:[0-9]{1,12}", owned.start_id) is None))
+                    or type(owned.start_id) is not str
+                    or re.fullmatch(r"(?:ps:[0-9]{1,12}|win:[0-9]{17,20})", owned.start_id) is None))
                 or (not allocated and (owned.pid != 0 or owned.start_id != "" or owned.started_at != 0))):
             _refuse(FailureCode.ALLOCATION, Stage.ALLOCATION)
         return owned
@@ -2196,7 +2208,8 @@ def _canonical_child_entry():
             sizing = _sizing_module()
             if sizing.CONFIG_KEY in environment:
                 replay = sizing.read_private_plan(environment)
-                environment = sizing.bootstrap_child(replay, "canonical", environment)
+                role = "canonical-heartbeat" if request.purpose == "heartbeat" else "canonical"
+                environment = sizing.bootstrap_child(replay, role, environment)
             if request.purpose == "heartbeat":
                 with _project_connection(environment, request.deadline) as conn:
                     row = conn.execute("SELECT worker_id, tool_name, runtime, source_revision, source_sha256, observed_at "
@@ -2839,7 +2852,8 @@ class _Host:
             tuple(name for name in (".env", ".env.local", ".env.development", ".env.development.local")
                   if (REPO / "web" / name).exists()), candidates, requirements,
             sys.version.split()[0], tuple((name, shutil.which(name) or "") for name in TOOLS),
-            _host_environment(os.environ), tuple(outputs), tuple(versions))
+            _host_environment(os.environ), tuple(outputs), tuple(versions),
+            windows_library_paths=_windows_library_paths(os.environ))
 
     def source_snapshot(self):
         commit = _git("rev-parse", "HEAD").decode().strip()
@@ -3062,6 +3076,15 @@ def _group_empty(pgid, deadline):
         time.sleep(min(0.05, remaining))
 
 
+def _retained_python_command(argv, environment):
+    # A Windows venv launcher creates another process. Use CPython directly
+    # while preserving the venv so identity and handles stay with the child.
+    if _PLATFORM == "win32" and argv[0] == sys.executable and sys.prefix != sys.base_prefix:
+        environment["__PYVENV_LAUNCHER__"] = sys.executable
+        return (sys._base_executable, *argv[1:])
+    return argv
+
+
 class _RuntimeProcess:
     def __init__(self, spec):
         self.spec = spec
@@ -3093,7 +3116,11 @@ class _RuntimeProcess:
                 self.output = spec.output_path.open("xb")
             if os.name == "nt":
                 self.job = _WindowsJob()
-            process = subprocess.Popen(spec.argv, cwd=spec.cwd, env=dict(spec.environment),
+            argv = spec.argv
+            environment = dict(spec.environment)
+            if spec.role in {"stack-launcher", "canonical-child"}:
+                argv = _retained_python_command(argv, environment)
+            process = subprocess.Popen(argv, cwd=spec.cwd, env=environment,
                 stdin=subprocess.DEVNULL, stdout=self.output or subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=(0x08000000 | 0x4) if os.name == "nt" else 0,
                 start_new_session=os.name != "nt")
@@ -4834,7 +4861,9 @@ class _GuardianLease:
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         options = ({"creationflags": 0x08000000} if _PLATFORM == "win32"
                    else {"start_new_session": True})
-        self.process = subprocess.Popen((sys.executable, "-B", "-c", code, str(REPO / "scripts/proof_project.py")),
+        argv = _retained_python_command(
+            (sys.executable, "-B", "-c", code, str(REPO / "scripts/proof_project.py")), environment)
+        self.process = subprocess.Popen(argv,
             cwd=REPO.parent, env=dict(environment), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, **options)
         def read():
@@ -4983,6 +5012,8 @@ def _guardian_process_main():
     disarm into a failure; os._exit skips finalization after an explicit flush.
     """
     try:
+        # The parent reads a binary pipe and requires an exact LF acknowledgment.
+        sys.stdout.reconfigure(newline="\n")
         result = _guardian_entry()
         code = result if type(result) is int and 0 <= result <= 255 else 1
     except BaseException:

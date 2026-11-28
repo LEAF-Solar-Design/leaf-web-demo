@@ -12,7 +12,7 @@ import { config } from '../../api.js'
 import { addBlock, emptyGraph } from './graphDoc.js'
 import { registry } from './registry.js'
 import { setLayoutEngineLoader } from './dependencyLayout.js'
-import { createLabArtifactsClient } from '../history/labArtifactsClient.js'
+import { createLabArtifactsClient, labArtifactsClient } from '../history/labArtifactsClient.js'
 import { labValueStore } from '../runs/valueStore.js'
 import { canonicalJSON } from '../contract.js'
 import { colorLiteralsIn, replacedWordsIn } from '../standardsChecks.js'
@@ -133,6 +133,398 @@ describe('project corpus evaluation flow', () => {
     client.setDocId('shared-corpus-graph')
     return client
   }
+
+  it.each([
+    [1, project, 200],
+    [3, project, 200],
+    [2, '22222222-3333-4444-8555-666666666666', 200],
+    [1, project, 422],
+    [0, '', 200],
+  ])('waits for saved scope hydration before Runs discovery (%i corpus blocks, project %s, status %i)', async (count, savedProject, status) => {
+    const response = options()
+    let graph = emptyGraph()
+    for (let i = 0; i < count; i += 1) graph = addBlock(graph, response.manifest)
+    if (!count) {
+      graph = addBlock(graph, registry['constant@1.0.0'])
+      graph.blocks[0].settings = { value: 7 }
+    }
+    for (const block of count ? graph.blocks : []) block.settings = { project_id: savedProject,
+      corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+      suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size } }
+    const json = (body, code = 200) => ({ ok: code < 400, status: code, json: async () => body })
+    let releaseGraph, releaseManifest, revisionRequested = false
+    const graphReply = new Promise(resolve => { releaseGraph = resolve })
+    const manifestReply = new Promise(resolve => { releaseManifest = resolve })
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => {
+      if (url.endsWith('/head')) return json({ revision: 4 })
+      if (url.endsWith('/revisions/4')) { revisionRequested = true; return graphReply }
+      return json({})
+    }) })
+    client.setDocId('scope-hydration')
+    const discoveries = []
+    const fetchImpl = vi.fn(async url => {
+      const parsed = new URL(url, window.location.origin)
+      if (parsed.pathname.endsWith('/corpus-options')) return manifestReply
+      if (parsed.pathname.endsWith('/runs')) {
+        discoveries.push(Object.fromEntries(parsed.searchParams))
+        return json(status === 200 ? { runs: [] } : { detail: 'lab_run_project_mismatch' }, status)
+      }
+      return json({})
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const previousToken = localStorage.getItem('leaf.jwt')
+    localStorage.setItem('leaf.jwt', `e30.${btoa(JSON.stringify({ sub: 'scope-hydration-owner' }))}.test`)
+    let view
+    try {
+      view = render(<GraphView client={client} />)
+      await waitFor(() => expect(client.state.headLoaded).toBe(true))
+      expect(discoveries).toEqual([])
+      fireEvent.click(screen.getByRole('button', { name: 'Open', exact: true }))
+      await waitFor(() => expect(revisionRequested).toBe(true))
+      expect(discoveries).toEqual([])
+      await act(async () => { releaseGraph(json({ revision: 4, graph })) })
+      if (count) {
+        await waitFor(() => expect(fetchImpl.mock.calls.some(([url]) => String(url).includes('/corpus-options'))).toBe(true))
+        expect(discoveries).toEqual([])
+        await act(async () => { releaseManifest(json(response)) })
+      }
+      await waitFor(() => expect(discoveries.length).toBeGreaterThan(0))
+      expect(discoveries.every(query => query.doc_id === 'scope-hydration' && query.project_id === savedProject)).toBe(true)
+      if (status === 422) expect(await screen.findByText('Previous runs could not be checked. Recover before starting another run.')).toBeVisible()
+      else expect(await screen.findByRole('button', { name: 'Run saved revision r4' })).toBeEnabled()
+      expect(fetchImpl.mock.calls.every(([, init = {}]) => (init.method || 'GET') === 'GET')).toBe(true)
+      expect(client.state.restoredGraph).toEqual(graph)
+    } finally {
+      view?.unmount()
+      if (previousToken === null) localStorage.removeItem('leaf.jwt')
+      else localStorage.setItem('leaf.jwt', previousToken)
+    }
+  })
+
+  it.each([[1, false], [3, false], [3, true]])('L03 cold saved corpus Open waits for %i pinned blocks with a second reveal %s', async (blockCount, revealAgain) => {
+    const response = options()
+    response.manifest.settings_schema.properties.parameters = {
+      type: 'object', additionalProperties: false,
+      properties: { seed: { type: 'integer', minimum: 0, maximum: 4294967295 } },
+    }
+    response.manifest.ui_schema.labels = { parameters: 'Evaluation policy overrides' }
+    let graph = emptyGraph()
+    for (let i = 0; i < blockCount; i += 1) graph = addBlock(graph, response.manifest)
+    for (const block of graph.blocks) block.settings = { project_id: project,
+      corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+      suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size } }
+    const saved = {}
+    const client = clientFor(graph, saved)
+    const pending = []
+    const fetchImpl = vi.fn(async url => {
+      const result = { ok: true, status: 200,
+        json: async () => String(url).includes('/corpus-options') ? response : { runs: [] } }
+      return String(url).includes('/corpus-options')
+        ? new Promise(resolve => pending.push(() => resolve(result))) : result
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const view = render(<GraphView client={client} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Open', exact: true }))
+    await waitFor(() => expect(pending).toHaveLength(1))
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    const expectLoading = () => {
+      expect(readiness.getByRole('status')).toHaveTextContent('Loading saved corpus controls')
+      expect(readiness.queryByText('No valid graph')).not.toBeInTheDocument()
+      expect(readiness.queryByText(/unknown block/i)).not.toBeInTheDocument()
+      expect(readiness.getByRole('button', { name: /^Run/ })).toBeDisabled()
+    }
+    expectLoading()
+    if (revealAgain) {
+      view.rerender(<GraphView client={client} hidden />)
+      view.rerender(<GraphView client={client} />)
+      await waitFor(() => expect(pending).toHaveLength(2))
+      await act(async () => { pending[0]() })
+      expectLoading()
+    }
+    await act(async () => { pending.at(-1)() })
+    await waitFor(() => expect(readiness.getByRole('status')).toHaveTextContent('Ready'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Select corpus-evaluator-1' }))
+    const field = await screen.findByLabelText('Evaluation policy overrides (optional)')
+    expect(field).toHaveValue('')
+    expect(fetchImpl.mock.calls.some(([url]) => String(url).includes(`/corpus-options?project_id=${project}`))).toBe(true)
+    expect(fetchImpl.mock.calls.every(([, init = {}]) => (init.method || 'GET') === 'GET')).toBe(true)
+    expect(client.state.restoredGraph).toEqual(graph)
+    expect(saved).toEqual({})
+  })
+
+  it('L03 cold saved corpus Open uses the ordinary workbench and singleton client', async () => {
+    const response = options()
+    response.manifest.settings_schema.properties.parameters = {
+      type: 'object', additionalProperties: false,
+      properties: { seed: { type: 'integer', minimum: 0, maximum: 4294967295 } },
+    }
+    response.manifest.ui_schema.labels = { parameters: 'Evaluation policy overrides' }
+    const graph = addBlock(emptyGraph(), response.manifest)
+    graph.blocks[0].settings = { project_id: project,
+      corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+      suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size } }
+    const previousDoc = labArtifactsClient.currentDocId()
+    const fetchImpl = vi.fn(async url => {
+      const path = String(url).split('?')[0]
+      const body = path.endsWith('/corpus-options') ? response : path.includes('/layout/') ? { layout: null }
+        : path.endsWith('/runs') ? { runs: [] } : { revision: 2, graph, sha256: 'e'.repeat(64) }
+      return { ok: true, status: 200, json: async () => body }
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    labArtifactsClient.setDocId('l03-cold-workbench')
+    try {
+      render(<LabWorkbench status={{ state: 'on' }} route={{ view: 'graph', params: {} }} />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Open', exact: true }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Select corpus-evaluator-1' }))
+      expect(await screen.findByLabelText('Evaluation policy overrides (optional)')).toHaveValue('')
+      expect(fetchImpl.mock.calls.some(([url]) => String(url).includes(`/corpus-options?project_id=${project}`))).toBe(true)
+      expect(fetchImpl.mock.calls.every(([, init = {}]) => (init.method || 'GET') === 'GET')).toBe(true)
+    } finally {
+      cleanup()
+      labArtifactsClient.setDocId(previousDoc)
+    }
+  })
+
+  it('L03 cold saved corpus manifest projection avoids a catalog request that exhausts the fetch budget', async () => {
+    const response = options()
+    response.manifest.settings_schema.properties.parameters = { type: 'object', additionalProperties: false,
+      properties: { seed: { type: 'integer', minimum: 0, maximum: 4294967295 } } }
+    response.manifest.ui_schema.labels = { parameters: 'Evaluation policy overrides' }
+    const graph = addBlock(emptyGraph(), response.manifest)
+    graph.blocks[0].settings = { project_id: project,
+      corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+      suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size } }
+    let fullCatalogAborted = 0
+    const fetchImpl = vi.fn(async (url, init = {}) => {
+      const request = new URL(String(url), 'https://fixture.invalid')
+      if (request.pathname.endsWith('/corpus-options') && request.searchParams.get('manifest_only') !== 'true') {
+        return new Promise((resolve, reject) => init.signal.addEventListener('abort', () => {
+          fullCatalogAborted += 1
+          reject(new DOMException('Aborted', 'AbortError'))
+        }, { once: true }))
+      }
+      return { ok: true, status: 200, json: async () => request.pathname.endsWith('/corpus-options')
+        ? { manifest: response.manifest, projects: [], materials: [], limited: false } : { runs: [] } }
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const client = clientFor(graph, {})
+    render(<GraphView client={client} />)
+    await screen.findByRole('button', { name: 'Open', exact: true })
+    await screen.findByTestId('flow')
+    vi.useFakeTimers()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Open', exact: true })) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    fireEvent.click(screen.getByRole('button', { name: 'Select corpus-evaluator-1' }))
+    expect(screen.getByLabelText('Evaluation policy overrides (optional)')).toHaveValue('')
+    expect(fullCatalogAborted).toBe(0)
+    expect(fetchImpl.mock.calls.some(([url]) => String(url).includes('manifest_only=true'))).toBe(true)
+    expect(fetchImpl.mock.calls.every(([, init = {}]) => (init.method || 'GET') === 'GET')).toBe(true)
+    vi.useRealTimers()
+  })
+
+  it('L03 cold saved corpus offers an explicit read-only retry when manifest admission fails', async () => {
+    const response = options()
+    response.manifest.settings_schema.properties.parameters = { type: 'object', additionalProperties: false,
+      properties: { seed: { type: 'integer', minimum: 0, maximum: 4294967295 } } }
+    response.manifest.ui_schema.labels = { parameters: 'Evaluation policy overrides' }
+    const graph = addBlock(emptyGraph(), response.manifest)
+    graph.blocks[0].settings = { project_id: project,
+      corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+      suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size } }
+    let attempts = 0
+    const fetchImpl = vi.fn(async url => {
+      if (String(url).includes('/corpus-options')) {
+        attempts += 1
+        return { ok: attempts > 1, status: attempts > 1 ? 200 : 503,
+          json: async () => ({ manifest: response.manifest, projects: [], materials: [], limited: false }) }
+      }
+      return { ok: true, status: 200, json: async () => ({ runs: [] }) }
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const client = clientFor(graph, {})
+    render(<GraphView client={client} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Open', exact: true }))
+    const retry = await screen.findByRole('button', { name: 'Retry corpus controls' })
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    expect(screen.getAllByRole('alert').some(node => node.textContent.includes('Saved corpus controls are unavailable.'))).toBe(true)
+    expect(readiness.queryByText('No valid graph')).not.toBeInTheDocument()
+    expect(readiness.getByRole('button', { name: /^Run/ })).toBeDisabled()
+    expect(attempts).toBe(1)
+    fireEvent.click(retry)
+    fireEvent.click(await screen.findByRole('button', { name: 'Select corpus-evaluator-1' }))
+    expect(await screen.findByLabelText('Evaluation policy overrides (optional)')).toHaveValue('')
+    expect(attempts).toBe(2)
+    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes('/corpus-options'))
+      .every(([url]) => String(url).includes('manifest_only=true'))).toBe(true)
+    expect(fetchImpl.mock.calls.every(([, init = {}]) => (init.method || 'GET') === 'GET')).toBe(true)
+    expect(client.state.restoredGraph).toEqual(graph)
+  })
+
+  it.each(['accepted', 'refused', 'superseded'])('waits for the current saved corpus admission when it is %s', async outcome => {
+    const response = options()
+    const nextProject = '22222222-2222-4333-8444-555555555555'
+    const makeGraph = (projectId, count) => {
+      let graph = emptyGraph()
+      for (let i = 0; i < count; i += 1) graph = addBlock(graph, response.manifest)
+      for (const block of graph.blocks) block.settings = {
+        project_id: projectId,
+        corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+        suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size },
+      }
+      return graph
+    }
+    const first = makeGraph(project, 1)
+    // Opening a different revision needs its own response even within one project.
+    const second = makeGraph(outcome === 'accepted' ? project : nextProject, 3)
+    const client = clientFor(first, {})
+    const pending = []
+    vi.stubGlobal('fetch', vi.fn(async url => {
+      const request = new URL(String(url), 'https://fixture.invalid')
+      if (!request.pathname.endsWith('/corpus-options')) return { ok: true, json: async () => ({ runs: [] }) }
+      expect(request.searchParams.get('manifest_only')).toBe('true')
+      return new Promise(resolve => pending.push({
+        projectId: request.searchParams.get('project_id'),
+        settle: status => resolve({ status, ok: status === 200, json: async () => response }),
+      }))
+    }))
+    const open = (docId, graph) => act(() => {
+      client.setDocId(docId)
+      client.takeGraph(graph)
+    })
+    const onRun = vi.fn()
+    render(<GraphView client={client} onRun={onRun} />)
+    open('warm-first', first)
+    await waitFor(() => expect(pending).toHaveLength(1))
+    await act(async () => { pending[0].settle(200) })
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    await readiness.findByText('Ready', { exact: true })
+    const run = () => readiness.getByRole('button', { name: 'Run graph' })
+    expect(run()).toBeEnabled()
+
+    open('warm-second', second)
+    await waitFor(() => expect(pending).toHaveLength(2))
+    expect(pending[1].projectId).toBe(second.blocks[0].settings.project_id)
+    expect(readiness.getByRole('status')).toHaveTextContent('Loading saved corpus controls')
+    fireEvent.click(run())
+    expect(run()).toBeDisabled()
+    expect(onRun).not.toHaveBeenCalled()
+
+    if (outcome === 'refused') {
+      await act(async () => { pending[1].settle(403) })
+      expect(await readiness.findByRole('alert')).toHaveTextContent('Saved corpus controls are unavailable')
+      expect(run()).toBeDisabled()
+      expect(client.state.restoredGraph).toEqual(second)
+      return
+    }
+    if (outcome === 'superseded') {
+      const third = makeGraph(project, 2)
+      open('warm-third', third)
+      await waitFor(() => expect(pending).toHaveLength(3))
+      await act(async () => { pending[2].settle(200) })
+      await readiness.findByText('Ready', { exact: true })
+      await act(async () => { pending[1].settle(403) })
+      expect(readiness.queryByRole('alert')).not.toBeInTheDocument()
+      expect(client.state.restoredGraph).toEqual(third)
+    } else {
+      await act(async () => { pending[1].settle(200) })
+      await readiness.findByText('Ready', { exact: true })
+      expect(client.state.restoredGraph).toEqual(second)
+    }
+    expect(run()).toBeEnabled()
+    expect(onRun).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { change: 'a warm account switch', subject: 'second', warm: true, crossTab: false },
+    { change: 'an account switch with a pending old response', subject: 'second', warm: false, crossTab: false },
+    { change: 'a cross-tab role change for the same account', subject: 'first', warm: true, crossTab: true },
+  ])('checks the current saved catalog after $change', async ({ subject, warm, crossTab }) => {
+    const previousToken = localStorage.getItem('leaf.jwt')
+    const token = (sub, role) => `e30.${btoa(JSON.stringify({ sub, role }))}.test`
+    const firstToken = token('first', 'editor')
+    const nextToken = token(subject, 'viewer')
+    const response = options()
+    const graph = addBlock(emptyGraph(), response.manifest)
+    graph.blocks[0].settings = { project_id: project,
+      corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+      suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size } }
+    const client = clientFor(graph, {})
+    const pending = []
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      if (!String(url).includes('/corpus-options?')) return { ok: true, json: async () => ({ runs: [] }) }
+      return new Promise(resolve => pending.push({
+        auth: new Headers(init.headers).get('Authorization'),
+        settle: status => resolve({ status, ok: status === 200, json: async () => response }),
+      }))
+    }))
+    localStorage.setItem('leaf.jwt', firstToken)
+    try {
+      render(<GraphView client={client} onRun={vi.fn()} />)
+      act(() => client.takeGraph(graph))
+      await waitFor(() => expect(pending).toHaveLength(1))
+      const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+      const run = () => readiness.getByRole('button', { name: 'Run graph' })
+      if (warm) {
+        await act(async () => { pending[0].settle(200) })
+        await readiness.findByText('Ready', { exact: true })
+        expect(run()).toBeEnabled()
+      }
+
+      act(() => {
+        localStorage.setItem('leaf.jwt', nextToken)
+        if (crossTab) window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: nextToken }))
+        else authLifecycle.stored.forEach(listener => listener())
+      })
+      await waitFor(() => expect(pending).toHaveLength(2))
+      expect(pending.map(request => request.auth)).toEqual([`Bearer ${firstToken}`, `Bearer ${nextToken}`])
+      if (!warm) await act(async () => { pending[0].settle(200) })
+      expect(run()).toBeDisabled()
+      await act(async () => { pending[1].settle(403) })
+      expect(await readiness.findByRole('alert')).toHaveTextContent('Saved corpus controls are unavailable')
+      expect(run()).toBeDisabled()
+      fireEvent.click(readiness.getByRole('button', { name: 'Retry corpus controls' }))
+      await waitFor(() => expect(pending).toHaveLength(3))
+      expect(pending[2].auth).toBe(`Bearer ${nextToken}`)
+      await act(async () => { pending[2].settle(200) })
+      await readiness.findByText('Ready', { exact: true })
+      expect(run()).toBeEnabled()
+      expect(client.state.restoredGraph).toEqual(graph)
+    } finally {
+      cleanup()
+      if (previousToken === null) localStorage.removeItem('leaf.jwt')
+      else localStorage.setItem('leaf.jwt', previousToken)
+    }
+  })
+
+  it('restores ordinary readiness when the last unresolved corpus block is removed from the draft', async () => {
+    const { manifest } = options()
+    const graph = addBlock(addBlock(emptyGraph(), registry['constant@1.0.0']), manifest)
+    graph.blocks[0].settings = { value: 2 }
+    graph.blocks[1].settings = { project_id: project,
+      corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+      suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size } }
+    const client = clientFor(graph, {})
+    const fetchImpl = vi.fn(async url => String(url).includes('/corpus-options')
+      ? { ok: false, status: 403 }
+      : { ok: true, json: async () => ({ runs: [] }) })
+    vi.stubGlobal('fetch', fetchImpl)
+    const onRun = vi.fn()
+    render(<GraphView client={client} onRun={onRun} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Open', exact: true }))
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    await readiness.findByRole('button', { name: 'Retry corpus controls' })
+    expect(readiness.getByRole('button', { name: /^Run/ })).toBeDisabled()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Select corpus-evaluator-1' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove block' }))
+    await readiness.findByText('Ready', { exact: true })
+    expect(readiness.queryByRole('alert')).not.toBeInTheDocument()
+    fireEvent.click(readiness.getByRole('button', { name: /^Run/ }))
+    expect(onRun).toHaveBeenCalledOnce()
+    expect(onRun.mock.calls[0][0].blocks).toEqual([graph.blocks[0]])
+    expect(client.state.restoredGraph).toEqual(graph)
+    expect(fetchImpl.mock.calls.every(([, init = {}]) => (init.method || 'GET') === 'GET')).toBe(true)
+  })
 
   // Retry once after observed 5s parallel CI timeouts to avoid expensive whole-job reruns.
   it('selects named project originals and saves/reloads immutable descriptors with existing graph links', { retry: 1 }, async () => {

@@ -86,6 +86,55 @@ def blob_key(prepared):
     return artifacts._key(prepared.meta, prepared.meta["content_sha256"], blob=True)
 
 
+@pytest.mark.parametrize("damage", ["truncated", "replaced", "missing"])
+def test_repair_refuses_shared_blob_damage_during_publication(lane, monkeypatch, damage):
+    string_source(lane)
+
+    def export(version):
+        return reads.output(lane, "solar-string-data", {}, version=version)["artifact"]
+
+    first_version = lane.head
+    first = export(first_version)
+    _, _, lane.ctx = reads.tools_cases.commit(lane, "solar-settings", {
+        "expected_rev": lane.ctx.graph["rev"],
+        "project_changes": {"name": "Edited roof"},
+    }, lane.ctx)
+    second = export(lane.head)
+    assert first["artifact_id"] != second["artifact_id"]
+    assert first["content_sha256"] == second["content_sha256"]
+    blob = artifacts._key(first, first["content_sha256"], blob=True)
+    repaired_meta = artifacts._key(first, first["artifact_id"])
+    original = dict(lane.blobs)
+    content = original[blob]
+    del lane.blobs[repaired_meta]
+    store_write = lane.put_if_absent_or_verify
+
+    def publish_then_damage(key, data):
+        store_write(key, data)
+        if key != repaired_meta:
+            return
+        if damage == "missing":
+            del lane.blobs[blob]
+        elif damage == "truncated":
+            lane.blobs[blob] = content[:-1]
+        else:
+            lane.blobs[blob] = bytes([content[0] ^ 1]) + content[1:]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lane, "put_if_absent_or_verify", publish_then_damage)
+        reads.refused("ARTIFACT_CORRUPT", lambda: export(first_version))
+    for ref in (first, second):
+        reads.refused("ARTIFACT_CORRUPT", lambda: download(lane, ref["artifact_id"]))
+    for key in original.keys() - {blob}:
+        assert lane.blobs[key] == original[key]
+
+    lane.blobs[blob] = content
+    assert export(first_version) == first
+    assert lane.blobs == original
+    for ref in (first, second):
+        assert download(lane, ref["artifact_id"])[1] == content
+
+
 def test_sip_r6_artifact_uuid_binding(lane):
     sink, prepared = make(lane)
     assert set(sink.binding) == {"schema", "organization_id", "project_id", "drawing_id",
@@ -138,6 +187,24 @@ def test_sip_r6_artifact_producers(lane, monkeypatch):
                 rows = [len(ElementTree.fromstring(book.read(f"xl/worksheets/sheet{i}.xml")).findall(
                     ".//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row")) for i in range(1, 5)]
             assert rows == [520, 37, 179, 1]
+
+
+def test_sip_r6_solaredge_schedule_binds_saved_version(lane):
+    graph = schedules_cases.solaredge_layout(design_cases.graph.__wrapped__(), "partial")
+    lane.set_parent(reads.tools_cases.embedded(graph))
+    version = lane.parent.version_id
+    context = reads.graph_adapter.resolve_project_graph_context(lane.context(version))
+    result = reads.run(lane, "solar-electrical-schedules", {}, version=version)["result"]
+    reference = result["output"]["artifact"]
+    meta, content = download(lane, reference["artifact_id"])
+    assert meta["source_version_id"] == reference["source_version_id"] == result["input_version_id"] == str(version)
+    assert reference["graph_sha256"] == result["graph_sha256"] == context.graph_sha256
+    assert reference["content_sha256"] == sha256(content).hexdigest()
+    table, = json.loads(content)["tables"]
+    assert {row[0]: row[3] for row in table["cells"][2:]} == {
+        graph["strings"][0]["id"]: "Assigned", graph["strings"][1]["id"]: "Unassigned",
+    }
+    assert result["drawing_changed"] is False
 
 
 def test_sip_r6_artifact_immutable_storage(lane):

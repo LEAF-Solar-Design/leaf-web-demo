@@ -27,6 +27,8 @@ guards, tests/test_guest_fail_closed.py).
 from __future__ import annotations
 
 import logging
+import math
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
@@ -37,7 +39,7 @@ import dwg_convert
 import entitlements
 import guest_uploads
 import write_loop
-from envelopes import ErrorCode, error_response, with_envelope_fields
+from envelopes import ErrorCode, err_envelope, error_response, with_envelope_fields
 
 router = APIRouter()
 LOGGER = logging.getLogger(__name__)
@@ -79,7 +81,7 @@ def _resolve_upload_identity(
                 deps.resolve_active_platform_tenant_authority(subject))
             deps.require_investor_authority(subject, platform_tenant_id, platform_tier)
             deps.require_matching_platform_tenant_claim(
-                claims, platform_tenant_id)
+                claims, platform_tenant_id, subject)
             ws = tenancy.get_store().resolve_workspace(platform_tenant_id)
             tenant = deps.TenantContext(
                 platform_tenant_id, org_id=platform_tenant_id,
@@ -156,7 +158,7 @@ def _emit_upload_event(resp: Any, ident: Dict[str, Any]) -> None:
         message = str(err.get("message") or "").lower()
         if status == 413 or "byte upload cap" in message:
             reason = "size"
-        elif "quota" in message:
+        elif err.get("error_code") == ErrorCode.QUOTA_EXCEEDED or "quota" in message:
             reason = "quota"
         elif (
             # A typed fence refusal is "disabled" whatever its message says:
@@ -480,30 +482,71 @@ def _upload_drawing(
         # stay two drawings) — plus the astronomically unlikely guest case of
         # a foreign manifest squatting the derived id (quota already charged
         # above in that case).
-        for _ in range(_MINT_ATTEMPTS):
-            candidate = (
-                guest_uploads.new_account_upload_drawing_id()
-                if tenant_kind == "account"
-                else guest_uploads.new_upload_drawing_id()
-            )
-            if (not backend.exists(store.manifest_key(str(tenant), candidate))
-                    and guest_uploads.read_marker(backend, str(tenant), candidate) is None):
-                drawing_id = candidate
-                break
-        if drawing_id is None:  # pragma: no cover - 4 consecutive random collisions
-            return error_response(ErrorCode.INTERNAL, "could not mint a drawing id",
-                                  retryable=True, status_code=500)
+        charge = None
+        if tenant_kind == "account" and deps.auth_live():
+            try:
+                charge = guest_uploads.check_and_count_account_upload(str(tenant))
+            except Exception:
+                return error_response(
+                    ErrorCode.INTERNAL,
+                    "Studio could not check your daily drawing limit. "
+                    "Nothing was uploaded. Please try again.",
+                    retryable=True, status_code=503)
+            if not charge.accepted:
+                if charge.scope == "global":
+                    message = (
+                        "Leaf Automation Studio has reached its daily drawing limit. "
+                        "Please try again after the daily reset.")
+                elif charge.limit == 0:
+                    message = "Sending drawings is turned off for your workspace right now."
+                else:
+                    drawings = "drawing" if charge.limit == 1 else "drawings"
+                    message = (
+                        f"Your workspace has sent {charge.limit} {drawings} today. "
+                        "You can send more after the daily reset.")
+                body = err_envelope(ErrorCode.QUOTA_EXCEEDED, message, True)
+                body["quota"] = {
+                    "scope": charge.scope,
+                    "limit": charge.limit if charge.scope == "workspace" else None,
+                    "resets_at": charge.resets_at,
+                }
+                reset = datetime.fromisoformat(charge.resets_at.replace("Z", "+00:00"))
+                retry_after = max(1, math.ceil((reset - datetime.now(timezone.utc)).total_seconds()))
+                return JSONResponse(status_code=429, content=body,
+                                    headers={"Retry-After": str(retry_after)})
+        bytes_staged = False
+        try:
+            for _ in range(_MINT_ATTEMPTS):
+                candidate = (
+                    guest_uploads.new_account_upload_drawing_id()
+                    if tenant_kind == "account"
+                    else guest_uploads.new_upload_drawing_id()
+                )
+                if (not backend.exists(store.manifest_key(str(tenant), candidate))
+                        and guest_uploads.read_marker(backend, str(tenant), candidate) is None):
+                    drawing_id = candidate
+                    break
+            if drawing_id is None:  # pragma: no cover - 4 consecutive random collisions
+                if charge is not None:
+                    guest_uploads.refund_account_upload(charge)
+                return error_response(ErrorCode.INTERNAL, "could not mint a drawing id",
+                                      retryable=True, status_code=500)
 
-        # Same effect order and same purge-exclusion lock as the guest path.
-        marker = guest_uploads.new_marker(filename=file.filename or f"upload{ext}",
-                                          data=data, tenant_kind=tenant_kind,
-                                          source_ext=ext,
-                                          extract_engine=engine_choice)
-        staged = guest_uploads.staged_path(str(tenant), drawing_id, ext)
-        with guest_uploads.drawing_lock(str(tenant), drawing_id):
-            guest_uploads.write_marker(backend, str(tenant), drawing_id, marker)
-            staged.parent.mkdir(parents=True, exist_ok=True)
-            staged.write_bytes(data)
+            # Same effect order and same purge-exclusion lock as the guest path.
+            marker = guest_uploads.new_marker(filename=file.filename or f"upload{ext}",
+                                              data=data, tenant_kind=tenant_kind,
+                                              source_ext=ext,
+                                              extract_engine=engine_choice)
+            staged = guest_uploads.staged_path(str(tenant), drawing_id, ext)
+            with guest_uploads.drawing_lock(str(tenant), drawing_id):
+                guest_uploads.write_marker(backend, str(tenant), drawing_id, marker)
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                staged.write_bytes(data)
+                bytes_staged = True
+        except Exception:
+            if charge is not None and not bytes_staged:
+                guest_uploads.refund_account_upload(charge)
+            raise
 
         guest_uploads.start_extraction_thread(str(tenant), drawing_id, ext)
 

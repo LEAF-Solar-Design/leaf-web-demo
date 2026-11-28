@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useId, useRef, useState } from 'react'
 import { authHeaders, config, noteUnauthorized } from '../../api.js'
 import { readActiveScope, subscribeActiveScope } from '../../auth/activeScope.js'
 import { fetchWithBudget } from '../../fetchBudget.js'
@@ -6,7 +6,7 @@ import { canonicalJSON } from '../contract.js'
 import { sha256Hex } from '../runtime/sha256.js'
 import { useLabSurfaceStatus } from '../useLabSurfaceStatus.js'
 import { labValueStore, useBlockValue, useRun, useRuns } from './valueStore.js'
-import { cancelRun } from './runStream.js'
+import { cancelRun, readCorpusJobs } from './runStream.js'
 import './corpusEvidence.css'
 import { corpusReportDiagnostics } from './corpusReportDiagnostics.js'
 
@@ -35,11 +35,32 @@ const recoveryKeys = (value, keys) => value && typeof value === 'object' && !Arr
   && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 const recoveryText = (value, max = 256) => typeof value === 'string' && value.length > 0 && value.length <= max
 const recoveryHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
+function verifyCleanupEvidence(evidence, block, source, refuse) {
+  if (!recoveryKeys(evidence, ['schema', 'job_id', 'attempt', 'state', 'cancel', 'receipt'])
+    || evidence.schema !== 'leaf.lab-corpus-cleanup-evidence.v1' || evidence.job_id !== block.job_id
+    || (evidence.attempt !== null && (!Number.isSafeInteger(evidence.attempt) || evidence.attempt < 0))
+    || !['unconfirmed', 'confirmed_reaped', 'confirmed_not_started'].includes(evidence.state)) refuse()
+  const tag = evidence.cancel, receipt = evidence.receipt
+  if (block.job_id === null && (evidence.attempt !== null || tag !== null || receipt !== null)) refuse()
+  if (tag !== null && (!recoveryKeys(tag, ['run_id', 'block_id', 'attempt', 'fence', 'reason'])
+    || tag.run_id !== source.run_id || tag.block_id !== block.block_id || evidence.attempt === null
+    || tag.attempt !== evidence.attempt || !Number.isSafeInteger(tag.fence) || tag.fence <= 0
+    || !['deadline', 'cancel'].includes(tag.reason))) refuse()
+  if (evidence.state === 'unconfirmed') {
+    if (receipt !== null) refuse()
+    return
+  }
+  if (tag === null || !recoveryKeys(receipt, ['attempt', 'cancel', 'reaped', 'not_started'])
+    || receipt.attempt !== evidence.attempt || canonicalJSON(receipt.cancel) !== canonicalJSON(tag)
+    || typeof receipt.reaped !== 'boolean' || typeof receipt.not_started !== 'boolean'
+    || receipt.reaped === receipt.not_started
+    || evidence.state !== (receipt.reaped ? 'confirmed_reaped' : 'confirmed_not_started')) refuse()
+}
 function verifyRecoveryPlan(plan, run) {
   const refuse = () => { throw new Error(recoveryUnavailable) }
   if (!recoveryKeys(plan, ['schema', 'source', 'blocks', 'selected_failed_block_ids', 'retained_completed_block_ids',
     'unresolved_block_ids', 'draft_graph', 'execution_allowed', 'confirmation_required', 'digest'])
-    || plan.schema !== 'leaf.lab-corpus-recovery-plan.v1' || plan.execution_allowed !== false
+    || !['leaf.lab-corpus-recovery-plan.v1', 'leaf.lab-corpus-recovery-plan.v2'].includes(plan.schema) || plan.execution_allowed !== false
     || plan.confirmation_required !== true || !recoveryHash(plan.digest)) refuse()
   const source = plan.source
   if (!recoveryKeys(source, ['run_id', 'doc_id', 'graph_revision', 'graph_sha256', 'state'])
@@ -60,8 +81,10 @@ function verifyRecoveryPlan(plan, run) {
     }
   }
   const seen = new Set()
+  const cleanup = plan.schema === 'leaf.lab-corpus-recovery-plan.v2'
   for (const block of plan.blocks) {
-    if (!recoveryKeys(block, ['block_id', 'idempotency_key', 'job_id', 'status', 'receipt_sha256', 'disposition', 'reason_category'])
+    if (!recoveryKeys(block, ['block_id', 'idempotency_key', 'job_id', 'status', 'receipt_sha256', 'disposition', 'reason_category',
+      ...(cleanup ? ['cleanup_evidence'] : [])])
       || !recoveryText(block.block_id) || seen.has(block.block_id)
       || !membership.has(block.block_id) || membership.get(block.block_id) !== block.disposition
       || block.idempotency_key !== `lab:${run.id}:${block.block_id}:corpus:v1`
@@ -75,6 +98,7 @@ function verifyRecoveryPlan(plan, run) {
     if (block.disposition === 'retained' && (block.status !== 'complete' || block.reason_category !== 'completed')) refuse()
     if (block.status === 'complete' && block.disposition !== 'retained') refuse()
     if (block.disposition === 'unresolved' && ['timeout', 'resource_exhausted', 'lease_or_budget', 'completed'].includes(block.reason_category)) refuse()
+    if (cleanup) verifyCleanupEvidence(block.cleanup_evidence, block, source, refuse)
   }
   if (seen.size !== membership.size) refuse()
   const draft = plan.draft_graph, selected = plan.selected_failed_block_ids
@@ -136,6 +160,8 @@ function RecoveryPlan({ plan }) {
         {plan.blocks.some(block => block.disposition === disposition) ? <ul>{plan.blocks.filter(block => block.disposition === disposition).map(block =>
           <li key={block.block_id}><strong>{block.block_id}</strong>
             <p>Job: {block.job_id ?? 'Unavailable'} · status: {block.status ?? 'Unavailable'}</p>
+            <p>Cleanup: {block.cleanup_evidence?.state === 'confirmed_reaped' ? 'Confirmed reaped'
+              : block.cleanup_evidence?.state === 'confirmed_not_started' ? 'Confirmed not started' : 'Unconfirmed'} · attempt: {block.cleanup_evidence?.attempt ?? 'Unavailable'}</p>
             <p>{recoveryReasons[block.reason_category]} ({block.reason_category})</p>
           </li>)}</ul> : <p>None</p>}
       </section>)}
@@ -188,7 +214,7 @@ function RecoveryReview({ run, store, fetchImpl }) {
     }, 10000)
     const headers = { accept: 'application/json', 'X-Tenant-Id': config.tenant, ...authHeaders() }
     try {
-      const response = await fetchWithBudget(fetchImpl, `${config.apiBase}/api/lab/runs/${encodeURIComponent(run.id)}/recovery-plan`, {
+      const response = await fetchWithBudget(fetchImpl, `${config.apiBase}/api/lab/runs/${encodeURIComponent(run.id)}/recovery-plan?include_cleanup=true`, {
         method: 'GET', headers, signal: controller.signal, credentials: 'same-origin', redirect: 'error', cache: 'no-store',
       })
       if (!current()) { void response.body?.cancel?.().catch(() => {}); return }
@@ -230,6 +256,34 @@ const corpusEvidence = value => {
 function EvidenceField({ label, value }) {
   return <div><h5>{label}</h5><pre>{value == null ? 'Unavailable (not evaluated)' : JSON.stringify(value, null, 2)}</pre></div>
 }
+function ConfirmationGuidance({ confirmation }) {
+  if (confirmation?.verdict !== 'insufficient' && confirmation?.verdict !== 'inconclusive') return null
+
+  const count = value => Number.isSafeInteger(value) && value >= 0
+  const limits = [
+    ['Parent needs', confirmation.parent?.confirm?.n_tickets, confirmation.protocol?.min_confirm_tickets, 'qualifying confirmation ticket'],
+    ['Child needs', confirmation.child?.confirm?.n_tickets, confirmation.protocol?.min_confirm_tickets, 'qualifying confirmation ticket'],
+    ['Confirmation needs', confirmation.splits?.confirm?.groups, confirmation.protocol?.min_confirm_groups, 'expiry group'],
+  ]
+  const shortfalls = limits.filter(([, observed, required]) => count(observed) && count(required) && observed < required)
+  const interval = confirmation.confirm_comparison?.paired_ci95_c
+  const intervalKnown = Array.isArray(interval) && interval.length === 2 &&
+    interval.every(Number.isFinite) && interval[0] <= interval[1]
+
+  return <div>
+    <h5>What would resolve confirmation</h5>
+    {shortfalls.map(([label, observed, required, unit]) => {
+      const missing = required - observed
+      return <p key={label}>{label} {missing} more {unit}{missing === 1 ? '' : 's'} ({observed} of {required}).</p>
+    })}
+    {limits.some(([, observed, required]) => !count(observed) || !count(required)) &&
+      <p>The saved report is missing confirmation counts or thresholds.</p>}
+    {intervalKnown && interval[0] <= 0 && interval[1] >= 0 && <p>The paired 95% interval still crosses or touches zero.</p>}
+    {!intervalKnown && <p>The paired 95% interval is unavailable.</p>}
+    <p>A directional result requires the minimum sample counts and a paired 95% interval entirely above or below zero.</p>
+    <p>Replaying the pinned inputs adds no new confirmation evidence. If additional eligible observations are available, evaluate them under the same saved policy.</p>
+  </div>
+}
 function CorpusEvidence({ evidence }) {
   const report = evidence.evaluation, confirmation = report.confirm_report
   return <section className="lab-corpus-evidence" aria-label="Corpus evaluation evidence">
@@ -241,6 +295,7 @@ function CorpusEvidence({ evidence }) {
     <p>Verdict: {report.verdict}</p>
     <p>Confirmation verdict: {confirmation?.verdict ?? 'Unavailable (not evaluated)'}</p>
     {corpusReportDiagnostics(report).map(message => <p key={message} role="status">{message}</p>)}
+    <ConfirmationGuidance confirmation={confirmation} />
     <EvidenceField label="Reasons" value={report.reasons} />
     <EvidenceField label="Policy and graph lineage" value={evidence.policy} />
     <EvidenceField label="Input identities" value={{ ...evidence.context, row_count: evidence.row_count,
@@ -254,6 +309,93 @@ function CorpusEvidence({ evidence }) {
     <EvidenceField label="Confirmation reasons" value={confirmation?.reasons} />
     <details><summary>Complete evaluation evidence</summary><EvidenceField label="Evaluation report" value={report} /></details>
   </section>
+}
+function corpusReports(runs) {
+  const reports = new Map()
+  for (const run of runs) {
+    if (run.id === 'local') continue
+    for (const [blockId, block] of Object.entries(run.blocks)) {
+      for (const [port, value] of Object.entries(block.value || {})) {
+        const evidence = corpusEvidence(value)
+        if (!evidence) continue
+        const key = JSON.stringify([run.id, run.graph_revision, blockId, port, evidence.result_sha256])
+        const corpus = evidence.context?.corpus?.material_id
+        const label = [corpus, blockId, port, `revision ${run.graph_revision ?? 'unknown'}`, run.id].filter(Boolean).join(' · ')
+        reports.set(key, { evidence, run, label })
+      }
+    }
+  }
+  return reports
+}
+const comparisonValue = value => typeof value === 'string' && value.trim() || Number.isFinite(value)
+  ? value : 'Unavailable'
+function comparisonFields({ evidence, run }) {
+  const report = evidence.evaluation
+  const confirmation = report.confirm_report
+  const interval = confirmation?.confirm_comparison?.paired_ci95_c
+  return [
+    run.state, report.verdict, confirmation?.verdict,
+    confirmation?.parent?.confirm?.n_tickets, confirmation?.child?.confirm?.n_tickets,
+    confirmation?.protocol?.min_confirm_tickets, confirmation?.confirm_comparison?.child_minus_parent_mean_c,
+    Array.isArray(interval) && interval.length === 2 && interval.every(Number.isFinite) && interval[0] <= interval[1]
+      ? interval.join(' to ') : null,
+    Array.isArray(confirmation?.reasons) && confirmation.reasons.every(reason => typeof reason === 'string')
+      ? confirmation.reasons.join(' · ') : null,
+    Array.isArray(report.reasons) && report.reasons.every(reason => typeof reason === 'string')
+      ? report.reasons.join(' · ') : null,
+    report.chosen ? JSON.stringify(report.chosen.params ?? report.chosen) : null,
+    report.chosen?.child_min_k, evidence.context?.corpus?.sha256,
+    evidence.policy.parent_suite_sha256, evidence.evaluated_suite_sha256,
+  ].map(comparisonValue)
+}
+const comparisonRows = [
+  'Run state', 'Evaluation verdict', 'Confirmation verdict', 'Parent confirmation tickets',
+  'Child confirmation tickets', 'Required confirmation tickets', 'Child minus parent mean (cents)',
+  'Paired 95% interval (cents)', 'Confirmation reasons', 'Evaluation reasons', 'Selected parameters',
+  'Selected minimum k', 'Corpus digest', 'Parent suite digest', 'Evaluated suite digest',
+]
+const CorpusComparison = memo(function CorpusComparison({ runs }) {
+  const [open, setOpen] = useState(false)
+  const [keys, setKeys] = useState(['', '', ''])
+  return <details onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>Compare corpus evaluations</summary>
+    {open && <CorpusComparisonFields runs={runs} keys={keys} setKeys={setKeys} />}
+  </details>
+})
+function CorpusComparisonFields({ runs, keys, setKeys }) {
+  const comparisonId = useId()
+  const reports = corpusReports(runs)
+  const selected = keys.map(key => reports.get(key)).filter(Boolean)
+  const columns = selected.map(comparisonFields)
+  const wrap = { overflowWrap: 'anywhere' }
+  return <>
+    {reports.size < 2 ? <p>Two corpus evaluation reports are required.</p> : keys.map((key, index) =>
+      <div key={index}>
+        <label htmlFor={`${comparisonId}-${index}`}>Report {index + 1}{index === 2 ? ' (optional)' : ''} </label>
+        <select id={`${comparisonId}-${index}`} style={{ maxWidth: '100%' }}
+          value={reports.has(key) ? key : ''} onChange={event => {
+          const value = event.target.value
+          setKeys(previous => previous.map((oldKey, position) => position === index ? value : oldKey))
+        }}>
+          <option value="">Choose a corpus evaluation</option>
+          {[...reports].map(([id, { label }]) =>
+            <option key={id} value={id} disabled={id !== key && keys.includes(id)}>{label}</option>)}
+        </select>
+      </div>)}
+    {columns.length >= 2 && <>
+      <p>Compare the recorded reasons and inputs. Differences in suites or selected parameters can also affect the result.</p>
+      <div role="region" aria-label="Corpus comparison table" tabIndex={0} style={{ overflowX: 'auto' }}>
+        <table style={{ minWidth: columns.length === 3 ? '48rem' : '36rem', tableLayout: 'fixed', width: '100%' }}>
+          <caption>Corpus evaluation comparison</caption>
+          <thead><tr><th scope="col">Evidence</th>{selected.map(({ label }, index) =>
+            <th scope="col" key={index} style={wrap}>{label}</th>)}</tr></thead>
+          <tbody>{comparisonRows.map((label, row) =>
+            <tr key={label}><th scope="row">{label}</th>{columns.map((fields, index) =>
+              <td key={index} style={wrap}>{fields[row]}</td>)}</tr>)}</tbody>
+        </table>
+      </div>
+    </>}
+  </>
 }
 const BlockResult = memo(function BlockResult({ store, runId, blockId, now }) {
   const block = useBlockValue(store, runId, blockId)
@@ -273,7 +415,101 @@ const BlockResult = memo(function BlockResult({ store, runId, blockId, now }) {
     })}
   </li>
 })
-const RunResult = memo(function RunResult({ store, runId, fetchImpl, now }) {
+const corpusJobStatuses = {
+  queued: 'Queued', running: 'Running', failed: 'Failed', completed: 'Completed',
+  'not submitted': 'Not submitted', unavailable: 'Unavailable',
+}
+function validCorpusJobs(data, run) {
+  const source = data.source
+  return data.corpus === true && source?.run_id === run.id && source.graph_revision === run.graph_revision
+    && recoveryHash(source.graph_sha256) && recoveryHash(source.input_digest)
+    && (!run.graph_sha256 || run.graph_sha256 === source.graph_sha256)
+    && (!run.input_digest || run.input_digest === source.input_digest)
+    && Array.isArray(data.blocks) && data.blocks.length > 0 && data.blocks.length <= 200
+    && data.blocks.every(block => recoveryText(block?.block_id, 64) && Object.hasOwn(corpusJobStatuses, block.status)
+      && (['not submitted', 'unavailable'].includes(block.status)
+        ? block.job_id === null && block.attempt === null
+        : recoveryText(block.job_id) && Number.isSafeInteger(block.attempt) && block.attempt >= 0)
+      && recoveryHash(block.inputs?.corpus_sha256) && recoveryHash(block.inputs?.suite_sha256)
+      && recoveryHash(block.inputs?.settings_sha256))
+    && new Set(data.blocks.map(block => block.block_id)).size === data.blocks.length
+}
+function CorpusJobField({ label, value }) {
+  return <div><dt>{label}</dt><dd style={{ overflowWrap: 'anywhere' }}><code>{value}</code></dd></div>
+}
+function CorpusJobs({ run, store, fetchImpl }) {
+  const [view, setView] = useState(null)
+  const active = useRef(null)
+  useEffect(() => {
+    const reset = () => {
+      clearTimeout(active.current?.timer)
+      active.current?.controller.abort()
+      active.current = null
+      setView(null)
+    }
+    const unsubscribe = subscribeActiveScope(reset)
+    return () => {
+      unsubscribe()
+      clearTimeout(active.current?.timer)
+      active.current?.controller.abort()
+      active.current = null
+    }
+  }, [store, fetchImpl])
+  const scope = recoveryScope()
+  const currentView = view?.scope === scope && view.store === store && view.fetchImpl === fetchImpl ? view : null
+  async function refresh() {
+    if (active.current) return
+    const controller = new AbortController()
+    const unavailable = 'Corpus job status unavailable. Try refreshing.'
+    const request = { controller }
+    const publish = patch => {
+      if (active.current === request && recoveryScope() === scope
+        && store.getRun(run.id)?.graph_revision === run.graph_revision) {
+        setView({ scope, store, fetchImpl, ...patch })
+      }
+    }
+    active.current = request
+    publish({ pending: true, message: 'Reading corpus jobs...' })
+    request.timer = setTimeout(() => {
+      publish({ message: unavailable })
+      active.current = null
+      controller.abort()
+    }, 10000)
+    const data = await readCorpusJobs({ runId: run.id, fetchImpl, signal: controller.signal })
+    clearTimeout(request.timer)
+    if (controller.signal.aborted) return
+    if (data.ok && validCorpusJobs(data, run)) publish({ data })
+    else publish({ message: data.ok && data.corpus === false ? 'No corpus jobs for this run.' : unavailable })
+    if (active.current === request) active.current = null
+  }
+  const data = currentView?.data
+  return <section aria-label="Corpus jobs">
+    <button type="button" onClick={refresh} disabled={currentView?.pending}>
+      {data ? 'Refresh corpus jobs' : 'Show corpus jobs'}
+    </button>
+    {currentView?.message && <p role="status">{currentView.message}</p>}
+    {data && <>
+      <dl>
+        <CorpusJobField label="Graph revision" value={data.source.graph_revision} />
+        <CorpusJobField label="Graph SHA-256" value={data.source.graph_sha256} />
+        <CorpusJobField label="Run input digest" value={data.source.input_digest} />
+      </dl>
+      <ul>{data.blocks.map(block => <li key={block.block_id}>
+        <strong>{block.block_id}</strong> {corpusJobStatuses[block.status]}
+        <dl>
+          {block.job_id !== null && <>
+            <CorpusJobField label="Job ID" value={block.job_id} />
+            <CorpusJobField label="Attempt" value={block.attempt} />
+          </>}
+          <CorpusJobField label="Corpus SHA-256" value={block.inputs.corpus_sha256} />
+          <CorpusJobField label="Suite SHA-256" value={block.inputs.suite_sha256} />
+          <CorpusJobField label="Block settings digest" value={block.inputs.settings_sha256} />
+        </dl>
+      </li>)}</ul>
+    </>}
+  </section>
+}
+const RunResult = memo(function RunResult({ store, runId, fetchImpl, now, showCorpusJobs }) {
   const run = useRun(store, runId)
   const [cancelling, setCancelling] = useState(false)
   const [message, setMessage] = useState('')
@@ -293,6 +529,8 @@ const RunResult = memo(function RunResult({ store, runId, fetchImpl, now }) {
     {run.gaps.map((gap, index) => <p key={index}>{gap.recovered ? 'Recovered from a snapshot after a gap' : 'Gap detected; recovering snapshot'}</p>)}
     {['queued', 'running'].includes(run.state) && <button type="button" disabled={cancelling} onClick={cancel}>Cancel</button>}
     {message && <p role="status">{message}</p>}
+    {showCorpusJobs && Number.isInteger(run.graph_revision) && run.state !== 'missing' &&
+      <CorpusJobs key={run.graph_revision} run={run} store={store} fetchImpl={fetchImpl} />}
     {recoveryTerminal(run.state) && <RecoveryReview run={run} store={store} fetchImpl={fetchImpl} />}
     <ul>{Object.keys(run.blocks).map(id => <BlockResult key={id} store={store} runId={run.id} blockId={id} now={now} />)}</ul>
   </article>
@@ -329,7 +567,8 @@ function WorkerStatus({ mock, fetchImpl }) {
 }
 export default function RunsView({ hidden = false, store = labValueStore, mock = false, fetchImpl = globalThis.fetch }) {
   const [now, setNow] = useState(Date.now)
-  const runs = useRuns(store).filter(run => run.id !== 'local')
+  const allRuns = useRuns(store)
+  const runs = allRuns.filter(run => run.id !== 'local')
   useEffect(() => {
     if (hidden) return undefined
     const timer = setInterval(() => setNow(Date.now()), 1000)
@@ -339,6 +578,7 @@ export default function RunsView({ hidden = false, store = labValueStore, mock =
     <h2>Runs</h2>
     {!hidden && <WorkerStatus mock={mock} fetchImpl={fetchImpl} />}
     {!runs.length && <p>No runs yet. Run a saved revision from the graph.</p>}
-    {runs.map(run => <RunResult key={run.id} store={store} runId={run.id} fetchImpl={fetchImpl} now={now} />)}
+    {!!runs.length && <CorpusComparison runs={allRuns} />}
+    {runs.map(run => <RunResult key={run.id} store={store} runId={run.id} fetchImpl={fetchImpl} now={now} showCorpusJobs={!hidden && !mock} />)}
   </div>
 }

@@ -25,6 +25,7 @@ import json
 import re
 import sys
 import threading
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict
@@ -72,6 +73,7 @@ from routers import (
     ios_ship_provider as ios_ship_provider_router,
     ios_surface,
     lab_router,
+    estimator_surface,
     jobs as jobs_router,
     mcp_gateway,
     integration_tools,
@@ -213,7 +215,7 @@ app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
 app.add_middleware(investor_demo.RequestContextMiddleware)
 
 _customization_worker_stop: threading.Event | None = None
-_customization_worker_thread: threading.Thread | None = None
+_customization_worker_threads: list[threading.Thread] = []
 _campaign_release_worker_stop: threading.Event | None = None
 _campaign_release_worker_thread: threading.Thread | None = None
 _campaign_release_worker_lock = threading.Lock()
@@ -309,28 +311,23 @@ def initialize_customization_store() -> None:
     CustomizationService.configured()
     if os.environ.get("LEAF_CUSTOMIZATION_STAGE_WORKER_DISABLED", "0") == "1":
         return
-    global _customization_worker_stop, _customization_worker_thread
-    if _customization_worker_thread is not None and _customization_worker_thread.is_alive():
+    global _customization_worker_stop, _customization_worker_threads
+    if any(thread.is_alive() for thread in _customization_worker_threads):
         return
     _customization_worker_stop = threading.Event()
-    _customization_worker_thread = threading.Thread(
-        target=customization_stage_worker.serve,
-        kwargs={"stop_event": _customization_worker_stop},
-        name="customization-stage-worker",
-        daemon=True,
-    )
-    _customization_worker_thread.start()
+    _customization_worker_threads = customization_stage_worker.start_workers(_customization_worker_stop)
 
 
 @app.on_event("shutdown")
 def stop_customization_stage_worker() -> None:
-    global _customization_worker_stop, _customization_worker_thread
+    global _customization_worker_stop, _customization_worker_threads
     if _customization_worker_stop is not None:
         _customization_worker_stop.set()
-    if _customization_worker_thread is not None:
-        _customization_worker_thread.join(timeout=2.0)
+    deadline = time.monotonic() + 2.0
+    for thread in _customization_worker_threads:
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
     _customization_worker_stop = None
-    _customization_worker_thread = None
+    _customization_worker_threads = []
 
 
 @app.on_event("startup")
@@ -496,6 +493,7 @@ app.include_router(templates_router.router)  # Wave C solar template beta, fail-
 app.include_router(overlay.router)  # T1 runtime overlay: propose a preview, decide it, read the resolved tokens
 app.include_router(ios_ship.router)  # Wave D one-shot iOS: readiness, one reviewed idempotent launch, status, receipt
 app.include_router(lab_router.router)  # SEL-003: Lab surface behind LEAF_LAB_SURFACE_ENABLED
+app.include_router(estimator_surface.router)
 app.include_router(campaigns.router)
 app.include_router(campaign_conversation.router)
 app.include_router(campaign_mcp.router)
@@ -579,9 +577,12 @@ _mount_platform_router()
 from routers import project_repository_edit as project_repository_edit_router  # noqa: E402
 
 app.include_router(project_repository_edit_router.router)
+import browser_static_build_recheck  # noqa: E402
 from routers import browser_project  # noqa: E402
 app.middleware("http")(browser_project.no_store_responses)
 app.include_router(browser_project.router)
+if browser_static_build_recheck.enabled():
+    app.include_router(browser_static_build_recheck.router)
 from routers import native_project  # noqa: E402
 app.middleware("http")(native_project.no_store_responses)
 app.include_router(native_project.router)

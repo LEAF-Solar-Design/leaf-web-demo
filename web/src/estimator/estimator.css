@@ -1,0 +1,7 @@
+.estimator-ground { position: absolute; inset: 0; min-width: 0; overflow: hidden; pointer-events: none; }
+.estimator-ground[hidden], .estimator-ground iframe[hidden] { display: none; }
+.estimator-window { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; pointer-events: auto; background: var(--leaf-ground, #101417); color: var(--leaf-ink, #e8ecef); }
+.estimator-window[data-measured="true"] { inset: auto; }
+.estimator-window iframe { width: 100%; flex: 1; min-height: 0; border: 0; background: #fff; }
+.estimator-status { padding: 1rem; }
+.estimator-status p { margin: 0 0 .75rem; }

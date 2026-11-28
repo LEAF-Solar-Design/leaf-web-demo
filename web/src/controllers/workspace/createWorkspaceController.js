@@ -2,6 +2,31 @@ import { humanizeError } from '../../errorHumanize.js'
 import { authorityStorage, authorityKey, serviceState } from '../../lib/serviceAuthSession.js'
 
 export const WORKSPACE_ORG_KEY = 'leaf.org_id'
+// A stable default keeps POST /api/orgs idempotent: the server returns the
+// caller's existing org only when the retried name matches.
+export const DEFAULT_WORKSPACE_NAME = 'My workspace'
+
+// One first-sign-in workspace POST per authority and name, shared across
+// controller instances, so a remount or a second mount joins the request in
+// flight instead of sending another. Entries leave the map when they settle.
+const autoProvisionFlights = new Map()
+function sharedCreateOrg(services, name) {
+  const key = `${authorityKey() || 'anonymous'}
+${name}`
+  let flight = autoProvisionFlights.get(key)
+  if (!flight) {
+    flight = Promise.resolve()
+      .then(() => services.createOrg(name))
+      .finally(() => autoProvisionFlights.delete(key))
+    autoProvisionFlights.set(key, flight)
+  }
+  return flight
+}
+
+const AUTO_PROVISION_REFUSED = 'Self-serve workspaces are not available for this account. '
+  + 'Ask your workspace administrator for an invitation, then sign in again.'
+const AUTO_PROVISION_FAILED = 'We could not set up your workspace. Please retry.'
+const AUTO_PROVISION_MAX_SUPERSEDED = 2
 
 const projectStorageKey = (orgId) => `leaf.project_id:${orgId}`
 
@@ -26,6 +51,11 @@ function browserStorage() {
     setItem: (key, value) => authorityStorage()?.setItem(key, value),
     removeItem: key => authorityStorage()?.removeItem(key),
   }
+}
+
+/** Make the next /app boot resume this project for this org (M3 S4 opens a sent copy there). */
+export function rememberOpenProject(orgId, projectId, storage = browserStorage()) {
+  writeStoredProjectId(orgId, projectId, storage)
 }
 
 export function readStoredOrgId(storage = browserStorage()) {
@@ -110,7 +140,12 @@ export function createWorkspaceController({
     workspaceError: null,
     orgBusy: false,
     projectBusy: false,
+    orgErrorStatus: null,
+    autoProvision: 'idle', // idle | creating | done | failed
+    autoProvisionError: null,
   }
+  let autoProvisionPromise = null
+  let autoProvisionSuperseded = 0
 
   const getSnapshot = () => state
   const subscribe = (listener) => {
@@ -194,8 +229,9 @@ export function createWorkspaceController({
     }
   }
 
-  function openProject(projectId) {
-    if (!projectId) return Promise.resolve(null)
+  function openProject(projectId, revision = null) {
+    if (!projectId || (revision && (revision.organization_id !== state.orgId ||
+      revision.project_id !== projectId))) return Promise.resolve(null)
     resumeAttempted = true
     const request = nextGeneration('workspace')
     const orgId = state.orgId
@@ -230,9 +266,15 @@ export function createWorkspaceController({
         if (!isCurrentWorkspace(request, projectId, orgId) || !acceptWorkspaceOrg(workspace, orgId)) return null
         const settledOrgId = state.orgId
         if (!state.mock) writeStoredProjectId(settledOrgId, projectId, storage)
-        publish({ workspace, workspaceLoading: false })
+        const selected = revision && workspace?.project?.project_id === projectId &&
+          workspace.project.org_id === settledOrgId && workspace.drawing_versions?.some(row =>
+            row.org_id === settledOrgId && row.project_id === projectId &&
+            row.drawing_id === revision.drawing_id && row.version_id === revision.input_version_id)
+        const versionId = selected ? revision.input_version_id : null
+        publish({ workspace, workspaceLoading: false, ...(revision && { canonicalVersionId: versionId }) })
         invoke(callbacks.onWorkspaceOpened, { projectId, orgId: settledOrgId, workspace })
-        return workspace
+        if (versionId) invoke(callbacks.onCanonicalVersionSelected, versionId)
+        return revision && !selected ? null : workspace
       } catch {
         if (!isCurrentWorkspace(request, projectId, orgId)) return null
         publish({ workspace: null, workspaceError: humanizeError(null), workspaceLoading: false })
@@ -312,13 +354,17 @@ export function createWorkspaceController({
     return true
   }
 
-  async function createOrg(givenName) {
+  function createOrg(givenName) {
+    return runCreateOrg(givenName, (name) => services.createOrg(name))
+  }
+
+  async function runCreateOrg(givenName, send) {
     if (state.orgBusy || givenName == null) return null
-    const name = String(givenName).trim() || 'My workspace'
+    const name = String(givenName).trim() || DEFAULT_WORKSPACE_NAME
     const request = nextGeneration('org')
-    publish({ orgBusy: true, projectsError: null, orgDraftError: null, orgConflict: false })
+    publish({ orgBusy: true, projectsError: null, orgDraftError: null, orgConflict: false, orgErrorStatus: null })
     try {
-      const response = await services.createOrg(name)
+      const response = await send(name)
       const org = response?.org || response
       const orgId = orgIdOf(org)
       if (!orgId) throw new Error('The workspace service returned an org without an id.')
@@ -352,12 +398,82 @@ export function createWorkspaceController({
       const message = orgConflict
         ? error?.body?.detail || error?.body?.error?.message || explain(error)
         : explain(error)
-      publish({ orgDraftError: message, projectsError: message, orgConflict, orgBusy: false })
+      publish({ orgDraftError: message, projectsError: message, orgConflict, orgBusy: false,
+        orgErrorStatus: typeof error?.status === 'number' ? error.status : null })
       return null
     }
   }
 
-  async function createProject(givenName) {
+  // A 409 means the server already holds a workspace for this identity (or
+  // needs an administrator). Adopt the org the verified session resolves to.
+  async function adoptExistingOrg() {
+    if (typeof services.resolveOrgId !== 'function') return null
+    try {
+      const orgId = await services.resolveOrgId()
+      if (disposed || !orgId || !adoptOrgId(orgId)) return null
+      return { org_id: String(orgId).trim(), adopted: true }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * First sign-in: create the caller's workspace once, without a prompt.
+   *
+   * Runs only for a live-auth caller whose projects read proved them unbound
+   * (bootstrapState 'unbound', no org). One request per controller and one per
+   * authority across controllers; a failure stays failed until retry is asked
+   * for, so a refusal never loops. Resolves to the org, or null.
+   */
+  function autoProvisionOrg({ name = DEFAULT_WORKSPACE_NAME, retry = false } = {}) {
+    if (autoProvisionPromise) return autoProvisionPromise
+    if (disposed || !authLive || state.mock || readsPaused || state.orgId
+      || state.bootstrapState !== 'unbound' || state.orgBusy) return Promise.resolve(null)
+    if (state.autoProvision === 'done' || state.autoProvision === 'creating') return Promise.resolve(null)
+    if (state.autoProvision === 'failed' && !retry) return Promise.resolve(null)
+    if (retry) autoProvisionSuperseded = 0
+    publish({ autoProvision: 'creating', autoProvisionError: null })
+    const settle = async () => {
+      const org = await runCreateOrg(name, (orgName) => sharedCreateOrg(services, orgName))
+      if (disposed) return null
+      if (org) return org
+      if (state.orgConflict) {
+        const adopted = await adoptExistingOrg()
+        if (adopted) return adopted
+      }
+      return null
+    }
+    const promise = settle().then((org) => {
+      if (disposed) return null
+      if (org) {
+        autoProvisionSuperseded = 0
+        publish({ autoProvision: 'done', autoProvisionError: null })
+        invoke(callbacks.onAutoProvisioned, org)
+        return org
+      }
+      if (state.orgDraftError == null && ++autoProvisionSuperseded <= AUTO_PROVISION_MAX_SUPERSEDED) {
+        // Superseded by an authority or generation change: allow one more try.
+        publish({ autoProvision: 'idle' })
+        return null
+      }
+      const status = state.orgErrorStatus
+      const message = status === 403 ? AUTO_PROVISION_REFUSED
+        : status === 409 && state.orgDraftError ? state.orgDraftError
+          : AUTO_PROVISION_FAILED
+      publish({ autoProvision: 'failed', autoProvisionError: message })
+      return null
+    }).finally(() => {
+      if (autoProvisionPromise === promise) autoProvisionPromise = null
+    })
+    autoProvisionPromise = promise
+    return promise
+  }
+
+  function retryAutoProvision(options = {}) {
+    return autoProvisionOrg({ ...options, retry: true })
+  }
+
+  async function createProject(givenName, { requireCreated = false } = {}) {
     if (state.projectBusy || givenName == null || !String(givenName).trim()) return null
     const name = String(givenName).trim()
     const request = nextGeneration('project')
@@ -365,7 +481,9 @@ export function createWorkspaceController({
     const workspaceRequest = generations.workspace
     publish({ projectBusy: true, projectsError: null, projectDraftError: null })
     try {
-      const project = await services.createProject(name, orgId)
+      const project = await (requireCreated
+        ? services.createProject(name, orgId, { requireCreated: true })
+        : services.createProject(name, orgId))
       const projectId = projectIdOf(project)
       if (!projectId) throw new Error('The workspace service returned a project without an id.')
       if (!isCurrent('project', request) || state.orgId !== orgId) return null
@@ -407,7 +525,7 @@ export function createWorkspaceController({
       return project
     } catch (error) {
       if (!isCurrent('project', request)) return null
-      const message = explain(error)
+      const message = error?.code === 'project_name_collision' ? error.message : explain(error)
       publish({ projectDraftError: message, projectsError: message, projectBusy: false })
       return null
     }
@@ -440,6 +558,9 @@ export function createWorkspaceController({
       workspaceLoading: false,
       orgBusy: false,
       projectBusy: false,
+      orgErrorStatus: null,
+      autoProvision: 'idle',
+      autoProvisionError: null,
     })
   }
 
@@ -464,6 +585,8 @@ export function createWorkspaceController({
     closeProject,
     adoptOrgId,
     createOrg,
+    autoProvisionOrg,
+    retryAutoProvision,
     createProject,
     selectCanonicalVersion,
     setMock,

@@ -351,7 +351,7 @@
     {
       "name": "solar-homeruns",
       "version": "1.0.0",
-      "description": "Route terminal leads for assigned strings.",
+      "description": "Route terminal leads for assigned strings using direct paths, explicit routing constraints, or saved aisle centerlines.",
       "kind": "script",
       "family_id": "stringing",
       "engine_op": "solar_homeruns",
@@ -369,6 +369,53 @@
           },
           "cancel": {
             "type": "boolean"
+          },
+          "saved_aisle_layer": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Layer of straight, open model-space polylines in the selected saved drawing. Each lead must connect on the selected centerlines. Choose this field or routing_constraints."
+          },
+          "routing_constraints": {
+            "type": "object",
+            "description": "Closed planar keep-outs and dedicated aisle centerlines in compute meters. Capacity counts available slots for terminal leads using the centerline, shared in both directions. An aisle that touches a keep-out is unavailable. Direct leads and approach segments must avoid positive-length overlap with dedicated centerlines.",
+            "properties": {
+              "keep_outs": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "min_xy": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}},
+                    "max_xy": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}}
+                  },
+                  "required": ["name", "min_xy", "max_xy"],
+                  "additionalProperties": false
+                }
+              },
+              "aisles": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "points": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 16,
+                      "items": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number"}}
+                    },
+                    "lead_capacity": {"type": "integer", "minimum": 0, "maximum": 64}
+                  },
+                  "required": ["name", "points", "lead_capacity"],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": ["keep_outs", "aisles"],
+            "additionalProperties": false
           }
         },
         "required": [

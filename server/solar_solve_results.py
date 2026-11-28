@@ -129,28 +129,43 @@ def _upstream_basis(graph, tables):
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def _frame_panel_ids(frame):
+    if "ground_slots" in frame:
+        from solar_ground_graph_codec import decode_slots
+        return decode_slots(frame["ground_slots"]).ids
+    return frame["panel_refs"]
+
+
+def _frame_geometry(graph, frame):
+    """Selected frame's cell identities and saved (x, y, angle), without site expansion."""
+    if "ground_slots" in frame:
+        from solar_ground_graph_codec import decode_slots
+        table = decode_slots(frame["ground_slots"])
+        return [list(table.ids)], {
+            ref: (table.centres[2 * col], table.centres[2 * col + 1], table.angle)
+            for col, ref in enumerate(table.ids)}
+    return [[cell["panel_ref"] for cell in row] for row in frame["matrix"]], {
+        panel["id"]: (*panel["centre"][:2], panel["angle"]) for panel in graph["panels"]}
+
+
 def _frame_request(graph, frame_ref, request, *, request_model=StringerRequest):
     """Bind original (not truncated) cells to application-owned panel ids."""
     try:
         parsed = request_model.model_validate(request)
         frame = next(f for f in graph["frames"] if f["id"] == frame_ref)
-        panels = {p["id"]: p for p in graph["panels"]}
+        matrix, geometry = _frame_geometry(graph, frame)
         if (len(parsed.grid.Rows) != frame["module_rows"]
                 or len(parsed.grid.Rows[0].Panels) != frame["module_columns"]):
             raise ValueError()
         for r, row in enumerate(parsed.grid.Rows):
             for c, wire in enumerate(row.Panels):
-                cell = frame["matrix"][r][c]
-                ref = cell["panel_ref"]
+                ref = matrix[r][c]
                 if (wire.Code == 1) != (ref is not None):
                     raise ValueError()
                 if ref is not None:
-                    panel = panels[ref]
                     if wire.Id != ref or any(
                         not math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9)
-                        for a, b in ((wire.X, panel["centre"][0]),
-                                     (wire.Y, panel["centre"][1]),
-                                     (wire.Angle, panel["angle"]))
+                        for a, b in zip((wire.X, wire.Y, wire.Angle), geometry[ref])
                     ):
                         raise ValueError()
         return frame, parsed
@@ -213,7 +228,7 @@ def complete_search(graph, binding, proposal):
             if len({tuple(cell) for cell in path}) != len(path):
                 raise GraphValidationError("DUPLICATE_SOLVE_PANELS")
             frame, _ = _frame_request(graph, binding["frame_ref"], binding["request"])
-            if len(path) < len(frame["panel_refs"]):
+            if len(path) < len(_frame_panel_ids(frame)):
                 raise GraphValidationError("UNASSIGNED_SOLVE_PANELS")
         proof = proposal_provenance(
             proposal, {"grant_ref": "receipt-validation", "request": binding["request"]},
@@ -324,8 +339,8 @@ def accept_candidate(graph, candidate, *, expected_rev, plugin_parity=False):
     result = copy.deepcopy(before)
     binding = verified["binding"]
     frame, _ = _frame_request(result, binding["frame_ref"], binding["request"])
-    members = set(frame["panel_refs"])
-    previous = _previous_frame_strings(result, frame)
+    members = set(_frame_panel_ids(frame))
+    previous = _previous_frame_strings(result, members)
     # Keep validating the client's path in original matrix coordinates.
     # String order comes from the raw service final_grid's global Seq values.
     path = verified["proposal"]["visited_path"]
@@ -352,7 +367,7 @@ def accept_candidate(graph, candidate, *, expected_rev, plugin_parity=False):
     for length in lengths:
         ordered_lists.append(refs[offset:offset + length])
         offset += length
-    _replace_frame_strings(before, result, frame, previous, ordered_lists,
+    _replace_frame_strings(before, result, frame, members, previous, ordered_lists,
                            verified["proof"]["response_sha256"], plugin_parity=plugin_parity)
     frame["extra"]["solve"] = {
         "initial_complete": True, "background_complete": verified["background_complete"],
@@ -363,20 +378,22 @@ def accept_candidate(graph, candidate, *, expected_rev, plugin_parity=False):
     return finish_mutation(before, result, "solar-commit-solve")
 
 
-def _previous_frame_strings(result, frame):
-    members = set(frame["panel_refs"])
+def _previous_frame_strings(result, members):
     previous = [s for s in result["strings"] if members.intersection(s["ordered_panel_refs"])]
     if any(not set(s["ordered_panel_refs"]) <= members for s in previous):
         raise GraphValidationError("CROSS_FRAME_STRING_REQUIRES_CORRECTION")
     return previous
 
 
-def _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256,
+def _replace_frame_strings(before, result, frame, members, previous, ordered_lists, response_sha256,
                            *, plugin_parity=False):
     """Replace the frame's strings with ordered panel lists; shared by both commit paths."""
-    members = set(frame["panel_refs"])
     previous_ids = {s["id"] for s in previous}
-    panels = {p["id"]: p for p in result["panels"]}
+    if "ground_slots" in frame:
+        _, geometry = _frame_geometry(result, frame)
+        centres = {ref: [x, y] for ref, (x, y, _) in geometry.items()}
+    else:
+        centres = {panel["id"]: panel["centre"] for panel in result["panels"]}
     if type(plugin_parity) is not bool:
         raise GraphValidationError("INVALID_PLUGIN_PARITY_MODE")
     # Faithful Branch replay keeps the recorded order, including native gap hops.
@@ -385,7 +402,7 @@ def _replace_frame_strings(before, result, frame, previous, ordered_lists, respo
         limit = 3 * max(frame["module_width_along_row"], frame["module_height_across_row"])
         for ordered in ordered_lists:
             for left, right in zip(ordered, ordered[1:]):
-                distance = math.dist(panels[left]["centre"][:2], panels[right]["centre"][:2])
+                distance = math.dist(centres[left][:2], centres[right][:2])
                 if distance > limit and not math.isclose(distance, limit, rel_tol=1e-9, abs_tol=1e-9):
                     raise GraphValidationError("DISCONTIGUOUS_SOLVE_STRING", "solve.continuity")
     strings = []
@@ -406,7 +423,7 @@ def _replace_frame_strings(before, result, frame, previous, ordered_lists, respo
         if string["circuit_tag"] in tags:
             raise GraphValidationError("DUPLICATE_CIRCUIT_TAG")
         tags.add(string["circuit_tag"])
-        points = [copy.deepcopy(panels[ref]["centre"]) for ref in ordered]
+        points = [copy.deepcopy(centres[ref]) for ref in ordered]
         # Graph geometry is in compute metres, irrespective of drawing units.
         length_m = sum(math.dist(a + [0] * (3 - len(a)), b + [0] * (3 - len(b)))
                        for a, b in zip(points, points[1:]))
@@ -450,9 +467,9 @@ def _frame_pieces(graph, frame_ref, pieces):
     and that the pieces cover each frame panel exactly once. Fails closed."""
     try:
         frame = next(f for f in graph["frames"] if f["id"] == frame_ref)
-        panels = {p["id"]: p for p in graph["panels"]}
-        where = {cell["panel_ref"]: (r, c) for r, row in enumerate(frame["matrix"])
-                 for c, cell in enumerate(row) if cell["panel_ref"] is not None}
+        matrix, geometry = _frame_geometry(graph, frame)
+        where = {ref: (r, c) for r, row in enumerate(matrix)
+                 for c, ref in enumerate(row) if ref is not None}
         if type(pieces) is not list or not 1 <= len(pieces) <= MAX_SPLIT_PIECES:
             raise ValueError()
         seen, parsed = set(), []
@@ -480,15 +497,13 @@ def _frame_pieces(graph, frame_ref, pieces):
                         offset = frame_col - c
                     if (frame_row, frame_col) != (rows[r], c + offset):
                         raise ValueError()
-                    panel = panels[ref]
                     if any(not math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9)
-                           for a, b in ((wire.X, panel["centre"][0]),
-                                        (wire.Y, panel["centre"][1]),
-                                        (wire.Angle, panel["angle"]))):
+                           for a, b in zip((wire.X, wire.Y, wire.Angle), geometry[ref])):
                         raise ValueError()
                     seen.add(ref)
             parsed.append(request)
-        if seen != set(frame["panel_refs"]):
+        expected = set(where) if "ground_slots" in frame else set(frame["panel_refs"])
+        if seen != expected:
             raise ValueError()
         return frame, parsed
     except (ValueError, TypeError, KeyError, IndexError, StopIteration):
@@ -585,7 +600,8 @@ def accept_split_candidate(graph, candidate, *, expected_rev, plugin_parity=Fals
     result = copy.deepcopy(before)
     binding = verified["binding"]
     frame, _ = _frame_pieces(result, binding["frame_ref"], binding["pieces"])
-    previous = _previous_frame_strings(result, frame)
+    members = set(_frame_panel_ids(frame))
+    previous = _previous_frame_strings(result, members)
     responses = [proposal["proposal"] for proposal in verified["proposals"]]
     if failed_group_indices(responses, [list(range(len(responses)))]):
         raise GraphValidationError("SPLIT_PIECE_FAILED")
@@ -594,7 +610,6 @@ def accept_split_candidate(graph, candidate, *, expected_rev, plugin_parity=Fals
         cut = ordered_strings(merged)
     except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         raise GraphValidationError("INVALID_FINAL_GRID_ORDER", "split.restitch") from None
-    members = set(frame["panel_refs"])
     # StringPlacement commits upper-cased handles; map them back to panel ids.
     by_upper = {ref.upper(): ref for ref in members}
     if len(by_upper) != len(members):
@@ -620,7 +635,7 @@ def accept_split_candidate(graph, candidate, *, expected_rev, plugin_parity=Fals
         raise failure
     proofs = verified["proofs"]
     response_sha256 = digest([proof["response_sha256"] for proof in proofs])
-    _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256,
+    _replace_frame_strings(before, result, frame, members, previous, ordered_lists, response_sha256,
                            plugin_parity=plugin_parity)
     frame["extra"]["solve"] = {
         "initial_complete": True, "background_complete": verified["background_complete"],

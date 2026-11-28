@@ -640,6 +640,23 @@ class EnvironmentDesignSchemaTests(unittest.TestCase):
 
 
 class ComingSoonActionTests(unittest.TestCase):
+    def test_ordered_contact_actions_are_preserved_in_export(self):
+        email = {'label': 'General inquiries', 'href': 'mailto:hello@example.test'}
+        booking = {'label': 'Book a tasting', 'href': 'https://example.test/book'}
+        catering = {'label': 'Catering', 'href': 'mailto:catering@example.test'}
+        for actions in ([catering, email], [email, booking], [catering, booking, email], [email]):
+            with self.subTest(actions=actions):
+                with zipfile.ZipFile(io.BytesIO(template.source_archive(document(actions=actions), 1))) as archive:
+                    self.assertEqual(json.loads(archive.read('page.json'))['actions'], actions)
+                    self.assertIn('page.actions?.map', archive.read('app/page.jsx').decode('utf-8'))
+
+        with self.assertRaises(ValueError):
+            template.validate_document(document(action=email, actions=[booking]))
+        with self.assertRaises(ValueError):
+            template.validate_document(document(actions=[email, None]))
+        with self.assertRaises(ValueError):
+            template.validate_document(document(actions=[email] * 13))
+
     def test_action_validates_and_round_trips_exactly(self):
         for href in ('https://example.com/updates', 'mailto:hello@example.com',
                      'https://updates.example.com:8443/path%20name?topic=bakes&all=1#latest',

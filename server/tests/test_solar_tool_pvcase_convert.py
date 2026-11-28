@@ -87,9 +87,9 @@ def test_pvcase_constants_and_declarations():
     registry = solar_tools.load()
     assert tuple(registry.get(t) for t in TOOLS) == tuple(EXPECTED_DECLARATIONS)
     assert (len(registry.entries()), len(registry.local_graph_tools()),
-            len(registry.local_graph_read_tools()), len(registry.registry_records())) == (56, 35, 20, 47)
-    assert len(registry.manifest()) == 56
-    assert sum(d["readiness"]["kind"] == "hook" for d in registry.entries()) == 18
+            len(registry.local_graph_read_tools()), len(registry.registry_records())) == (57, 35, 21, 48)
+    assert len(registry.manifest()) == 57
+    assert sum(d["readiness"]["kind"] == "hook" for d in registry.entries()) == 19
     assert sum(d["scenario"] == "w1-rooftop" for d in registry.entries()) == 9
     assert solar_tools.TRUSTED_INPUTS == (
         "source_intake", "proposal_candidate", "solaredge_report", "physical_state", "pvcase_source")

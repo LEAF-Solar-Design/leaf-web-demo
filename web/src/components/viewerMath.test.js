@@ -5,6 +5,7 @@
 // proven here where it can run. Round-trip tolerances are 1e-6 world units.
 import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
 import {
   applyCameraCarry,
@@ -17,6 +18,7 @@ import {
   ndcFromClient,
   pickLineThreshold,
   resizeCameraAction,
+  rollDrawingCamera,
   safeFitFrustum,
   safeCenterShift,
   safeRectCameraAction,
@@ -140,6 +142,14 @@ describe('pickLineThreshold', () => {
 })
 
 describe('ndcFromClient', () => {
+  it.each([25, 40, 60])('preserves mirrored boundaries at offset %i', offset => {
+    const rect = { left: 10, top: 20, width: 200, height: 200 }
+    for (const sign of [-1, 1]) {
+      const displacement = sign * offset
+      expect(ndcFromClient(rect, 110 + displacement, 120 + displacement))
+        .toEqual({ x: displacement / 100, y: -displacement / 100 })
+    }
+  })
   it('maps the rect corners and center to NDC space', () => {
     expect(ndcFromClient(RECT, 10, 20)).toEqual({ x: -1, y: 1 })
     expect(ndcFromClient(RECT, 810, 620)).toEqual({ x: 1, y: -1 })
@@ -214,6 +224,41 @@ describe('applyViewPose', () => {
     expect(camera.zoom).toBe(4)
     expect(applyViewPose(camera, target, null)).toBe(false)
     expect(applyViewPose(camera, target, { center: { x: NaN, y: 1 } })).toBe(false)
+  })
+})
+
+describe('drawing camera roll', () => {
+  it.each([
+    ['clockwise', 0, -0.4],
+    ['counterclockwise', 0, 0.4],
+    ['reset', 0.4, 0],
+  ])('projects east correctly after %s with real OrbitControls', (direction, x, y) => {
+    const camera = new THREE.OrthographicCamera(-10, 10, 10, -10, 0.1, 100)
+    camera.position.set(0, 0, 50)
+    camera.zoom = 2
+    camera.updateProjectionMatrix()
+    const controls = new OrbitControls(camera)
+    const target = controls.target.clone()
+    if (direction === 'reset') expect(rollDrawingCamera(camera, controls.target, 'clockwise')).toBe(true)
+    expect(rollDrawingCamera(camera, controls.target, direction)).toBe(true)
+    controls.update()
+    camera.updateMatrixWorld(true)
+    const east = new THREE.Vector3(2, 0, 0).project(camera)
+    expect(east.x).toBeCloseTo(x)
+    expect(east.y).toBeCloseTo(y)
+    expect(controls.target).toEqual(target)
+    expect(camera.position.distanceTo(target)).toBeCloseTo(50)
+    expect(camera.zoom).toBe(2)
+  })
+
+  it('refuses an oblique camera without altering its orientation', () => {
+    const camera = new THREE.OrthographicCamera(-10, 10, 10, -10, 0.1, 100)
+    camera.position.set(5, 5, 50)
+    const target = new THREE.Vector3()
+    camera.lookAt(target)
+    const before = camera.quaternion.clone()
+    expect(rollDrawingCamera(camera, target, 'clockwise')).toBe(false)
+    expect(camera.quaternion.equals(before)).toBe(true)
   })
 })
 
@@ -296,6 +341,21 @@ describe('camera carry', () => {
     expect(captured.zoom).toBe(2.5)
     expect(captured.left).toBe(-40)
     expect(captured.target).toEqual([5, -3, 0])
+  })
+
+  it('camera carry: a roll survives a same-drawing rebuild and stays out of a different drawing', () => {
+    const { camera, target } = movedCamera()
+    expect(rollDrawingCamera(camera, target, 'clockwise')).toBe(true)
+    const captured = captureCameraCarry(camera, target, { key: KEY, fitted: false, ...SIZE })
+    const rebuilt = movedCamera()
+    expect(applyCameraCarry(rebuilt.camera, rebuilt.target, cameraCarry(captured, { key: KEY, ...SIZE }))).toBe(true)
+    expect(rebuilt.camera.up.toArray()).toEqual(camera.up.toArray())
+    expect(rebuilt.camera.quaternion.equals(camera.quaternion)).toBe(true)
+
+    const other = movedCamera()
+    const otherPose = cameraCarry(captured, { key: 'engine:flat:b.dxf', ...SIZE })
+    expect(applyCameraCarry(other.camera, other.target, otherPose)).toBe(false)
+    expect(other.camera.up.toArray()).toEqual([0, 1, 0])
   })
 
   it('camera carry: nothing carries across a different document, mode or empty key', () => {

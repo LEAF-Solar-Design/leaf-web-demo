@@ -27,6 +27,10 @@ def requires_snapshot(description):
                           r"(?:view|version|revision|inventory|catalog)\b", description, re.I))
 
 
+def requires_schema_revision(description):
+    return bool(re.search(r"\bschema (?:revision|version)\b", description, re.I))
+
+
 def selected_statuses(description):
     prompt = description.casefold()
     selected, excluded, additional = set(), set(), set()
@@ -57,9 +61,35 @@ def provider_status_filter(description):
     return None
 
 
+TIMESTAMPS = ("fetched_at", "source_updated_at", "synced_at")
+REPORT_COLUMNS = {"dataset_ref", "title", "status", "fields", "freshness", "needs_attention", *TIMESTAMPS}
+
+
+def report_columns(description):
+    # Treat a request for the source schema as the "fields" projection. Keep
+    # provider field IDs and labels in their original structured form.
+    schema_term = r"(?:field|column)\s+(?:definitions?|metadata)"
+    description = re.sub(schema_term, "fields", description, flags=re.I)
+    clause = re.search(r"\b(?:with|return|show|include)\s+(?:the\s+)?(?:columns|fields)\s*:?\s+([^.!?]+)",
+                       description, re.I)
+    schema_request = re.search(
+        r"\b(?:list|show|include|return|enumerate|with)\s+(?:(?:the|their|its|source|dataset)\s+)*"
+        r"fields\b(?=\s+(?:for|of|from|in)\b|\s*[.?!]|\s*$)", description, re.I)
+    if schema_request and (not clause or clause.start() == schema_request.start()):
+        return ("dataset_ref", "fields")
+    if not clause:
+        return None
+    names = re.split(r"\s*,\s*(?:and\s+)?|\s+and\s+", clause[1].strip().casefold())
+    names = [name.strip().replace(" ", "_") for name in names]
+    if any(name not in REPORT_COLUMNS for name in names):
+        return ()
+    return tuple(dict.fromkeys(["dataset_ref", *names]))
+
+
 def build_body(description):
     return _BODY.replace("__STATUSES__", repr(selected_statuses(description))).replace(
-        "__REQUIRE_SNAPSHOT__", repr(requires_snapshot(description)))
+        "__REQUIRE_SNAPSHOT__", repr(requires_snapshot(description))).replace(
+        "__COLUMNS__", repr(report_columns(description)))
 
 
 _BODY = """
@@ -70,11 +100,15 @@ def run(intake, params):
     if __REQUIRE_SNAPSHOT__ and catalog.get("snapshot_verified") is not True:
         raise ValueError("This report needs a verified catalog snapshot.")
     statuses = __STATUSES__
+    columns = __COLUMNS__
+    if columns == ():
+        raise ValueError("Unknown dataset report column.")
     rows = []
     for dataset in catalog["datasets"]:
         status = dataset["status"]
         if status in statuses:
-            rows.append({**dataset, "needs_attention": status in ("stale", "unavailable")})
+            row = {**dataset, "needs_attention": status in ("stale", "unavailable")}
+            rows.append(row if columns is None else {key: row[key] for key in columns if key in row})
     return ({"datasets": rows, "datasets_scanned": len(catalog["datasets"]),
              "pages_read": catalog["pages_read"]}, None)
 """

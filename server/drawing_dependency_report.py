@@ -10,6 +10,14 @@ import re
 
 _INLINE_FONT = re.compile(r"\\[fF]")
 _FONT_DELIMITER = re.compile(r"[|;]")
+_MATERIAL_MAPS = {
+    3: ("diffuse", 72),
+    4: ("specular", 77),
+    6: ("reflection", 171),
+    7: ("opacity", 175),
+    8: ("bump", 179),
+    9: ("refraction", 273),
+}
 
 
 def _inline_fonts(text):
@@ -26,23 +34,76 @@ def _inline_fonts(text):
         position = delimiter.end()
 
 
+def _material_texture_maps(pairs, start, end):
+    in_material = False
+    normal_map = False
+    saw_diffuse_path = False
+    previous = (None, None)
+    for index in range(start, end):
+        code, value = pairs[index]
+        if code == 100:
+            in_material = value == "AcDbMaterial"
+        elif in_material and code in (271, 465):
+            normal_map = True
+        elif in_material and code in _MATERIAL_MAPS:
+            channel, source_code = _MATERIAL_MAPS[code]
+            if code == 3:
+                # The normal map repeats the diffuse groups after its own header.
+                if normal_map or saw_diffuse_path:
+                    channel = "normal"
+                saw_diffuse_path = True
+            if value and (previous[0] != source_code or previous[1] == "1"):
+                yield channel, value
+        previous = code, value
+
+
+def _light_web_path(pairs, start, end):
+    boolean_count = None
+    for index in range(start, end):
+        code, value = pairs[index]
+        if code == 100:
+            boolean_count = 0 if value == "AcDbLight" else None
+        elif code == 290 and boolean_count is not None:
+            boolean_count += 1
+            # AcDbLight writes status first, then the photometric web flag.
+            if boolean_count == 2:
+                if value == "1" and index + 1 < end and pairs[index + 1][0] == 300:
+                    return pairs[index + 1][1]
+                return None
+    return None
+
+
 def from_pairs(pairs, *, literal_text=None):
     dependencies = {}
+    texture_maps = {}
+    web_lights = {}
+    plot_setups = {}
+    plot_resource_setups = {}
+    plot_layouts = []
     # Full drawings require owning sections. Bare decoded-record fragments keep
     # their existing API behavior, but ENDSEC/EOF still close their scope.
     section = None if any(c == 0 and v.upper() == "SECTION" for c, v in pairs) else "__FRAGMENT__"
     owners = {"BLOCK": {"BLOCKS"}, "STYLE": {"TABLES"},
-              "IMAGEDEF": {"OBJECTS"}, "PDFDEFINITION": {"OBJECTS"},
+              "IMAGEDEF": {"OBJECTS"}, "MATERIAL": {"OBJECTS"}, "PDFDEFINITION": {"OBJECTS"},
               "DWFDEFINITION": {"OBJECTS"}, "DGNDEFINITION": {"OBJECTS"},
+              "PLOTSETTINGS": {"OBJECTS"}, "LAYOUT": {"OBJECTS"},
               "ACAD_PROXY_ENTITY": {"ENTITIES", "BLOCKS"}, "PROXY_ENTITY": {"ENTITIES", "BLOCKS"},
               "ACAD_PROXY_OBJECT": {"OBJECTS"}, "PROXY_OBJECT": {"OBJECTS"}}
     inline_entities = {"MTEXT", "MULTILEADER", "TABLE", "ACAD_TABLE"}
-    owners.update({kind: {"ENTITIES", "BLOCKS"} for kind in inline_entities})
+    owners.update({kind: {"ENTITIES", "BLOCKS"} for kind in inline_entities | {"TOLERANCE", "LIGHT"}})
 
     def add(kind, name, disposition, **details):
         if name:
             dependencies.setdefault((kind, name), {
                 "kind": kind, "name": name, "disposition": disposition, **details})
+
+    def plot_resources(groups, *, layout=False):
+        device = groups.get(2) or None
+        resources = {"plot_device": None if layout and device == "None" else device,
+                     "plot_style": groups.get(7) or None}
+        for kind, name in resources.items():
+            add(kind, name, "reported")
+        return resources
 
     i = 0
     while i < len(pairs):
@@ -50,17 +111,25 @@ def from_pairs(pairs, *, literal_text=None):
         if code != 0:
             i += 1
             continue
+        kind = kind.upper()
         end = i + 1
         groups = {}
+        subclasses = {}
+        subclass = None
         text_parts = []
-        inline_record = kind.upper() in inline_entities
+        plot_record = kind in {"LAYOUT", "PLOTSETTINGS"}
+        inline_record = kind in inline_entities
         while end < len(pairs) and pairs[end][0] != 0:
-            groups.setdefault(*pairs[end])
-            if inline_record and pairs[end][0] in (1, 3, 304):
-                value = pairs[end][1] if literal_text is None else literal_text.get(end, pairs[end][1])
-                text_parts.append(value)
+            tag, value = pairs[end]
+            groups.setdefault(tag, value)
+            if plot_record:
+                if tag == 100:
+                    subclass = subclasses.setdefault(value, {})
+                elif subclass is not None:
+                    subclass.setdefault(tag, value)
+            if inline_record and tag in (1, 3, 304):
+                text_parts.append(value if literal_text is None else literal_text.get(end, value))
             end += 1
-        kind = kind.upper()
         if kind == "EOF":
             break
         if kind == "SECTION":
@@ -93,17 +162,70 @@ def from_pairs(pairs, *, literal_text=None):
                 add(font_kind, name, "font remapped", remapped_to="sans-serif")
         elif kind == "IMAGEDEF":
             add("image", groups.get(1) or groups.get(5), "image omitted")
+        elif kind == "MATERIAL":
+            handle = groups.get(5) or ""
+            for channel, path in _material_texture_maps(pairs, i + 1, end):
+                add("material_texture", path, "texture omitted")
+                texture_maps.setdefault(path, set()).add((handle, channel))
+        elif kind == "LIGHT":
+            path = _light_web_path(pairs, i + 1, end)
+            if path:
+                add("photometric_web", path, "reported")
+                handles = web_lights.setdefault(path, set())
+                if handle := groups.get(5):
+                    handles.add(handle)
+        elif kind == "PLOTSETTINGS":
+            settings = subclasses.get("AcDbPlotSettings")
+            resources = plot_resources(groups if settings is None else settings)
+            if section == "OBJECTS" and settings and settings.get(1):
+                plot_setups.setdefault(settings[1].casefold(), []).append(resources)
+                for resource_kind, name in resources.items():
+                    if name:
+                        plot_resource_setups.setdefault((resource_kind, name), set()).add(settings[1])
+        elif kind == "LAYOUT" and section == "OBJECTS":
+            layout = subclasses.get("AcDbLayout", {}).get(1)
+            settings = subclasses.get("AcDbPlotSettings")
+            if layout and layout.casefold() != "model" and settings is not None:
+                plot_layouts.append({"layout": layout, "page_setup": settings.get(1) or None,
+                                     "layout_resources": plot_resources(settings, layout=True)})
         elif kind in ("PDFDEFINITION", "DWFDEFINITION", "DGNDEFINITION"):
             add("underlay", groups.get(1) or groups.get(2) or groups.get(5), "underlay omitted")
         elif kind in ("ACAD_PROXY_ENTITY", "ACAD_PROXY_OBJECT", "PROXY_ENTITY", "PROXY_OBJECT"):
             add("proxy", groups.get(5) or groups.get(1) or kind, "proxy omitted")
-        elif kind in inline_entities:
+        elif kind in inline_entities or kind == "TOLERANCE":
             # Font controls can span repeated DXF text chunks. Read them in
             # record order; a first-value map would lose split font names.
-            for name in _inline_fonts("".join(text_parts)):
+            # A tolerance frame stores its content in group 1 and its dimension style in group 3.
+            text = groups.get(1, "") if kind == "TOLERANCE" else "".join(text_parts)
+            for name in _inline_fonts(text):
                 add("font", name, "font remapped", remapped_to="sans-serif")
         i = end
-    return {"schema": "leaf.drawing-dependencies.v1",
+    for path, references in texture_maps.items():
+        dependencies["material_texture", path]["material_maps"] = [
+            {"material_handle": handle or None, "channel": channel}
+            for handle, channel in sorted(references)
+        ]
+    for path, handles in web_lights.items():
+        dependencies["photometric_web", path]["light_handles"] = sorted(handles)
+    for key, setup_names in plot_resource_setups.items():
+        dependencies[key]["page_setups"] = sorted(setup_names)
+    report = {"schema": "leaf.drawing-dependencies.v1",
             "scope": "local_dxf_records", "external_files_opened": False,
             "dependencies": [dependencies[key] for key in sorted(dependencies)],
             "coverage_note": "Lists dependency records preserved in the local DXF conversion; raw DWG metadata coverage requires an independent inventory."}
+    # A layout stores its own plot values. The setup name links reported
+    # records and does not establish runtime inheritance or printer availability.
+    for binding in plot_layouts:
+        name = binding["page_setup"]
+        matches = plot_setups.get(name.casefold(), []) if name else []
+        if len(matches) == 1:
+            status = "matched"
+        elif matches:
+            status = "ambiguous"
+        else:
+            status = "unresolved" if name else "direct"
+        binding["setup_status"] = status
+        binding["setup_resources"] = matches[0] if status == "matched" else None
+    if plot_layouts:
+        report["plot_layout_bindings"] = plot_layouts
+    return report

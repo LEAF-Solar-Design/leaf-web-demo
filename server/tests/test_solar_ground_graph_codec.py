@@ -505,6 +505,28 @@ def test_ground_graph_codec_graph_slot_bound_is_checked_before_decoding(graph, b
     refused("GRAPH_LIMIT_EXCEEDED", codec.expand_graph, g)
 
 
+@pytest.mark.parametrize("budget_offset", [-1, 0, 1], ids=["over", "exact", "under"])
+def test_ground_graph_codec_saved_graph_node_budget(graph, b18, monkeypatch, budget_offset):
+    g = ground_graph(graph, b18, 1)
+    frame = g["frames"][0]
+    nodes, _ = codec.json_cost(g)
+    monkeypatch.setattr(sdg, "MAX_NODES", nodes - 1)
+    monkeypatch.setattr(sdg, "MAX_GRAPH_NODES", nodes + budget_offset)
+
+    refused("GRAPH_LIMIT_EXCEEDED", codec.expand_graph, g)
+    if budget_offset < 0:
+        def never(*args, **kwargs):
+            raise AssertionError("a row was decoded")
+
+        monkeypatch.setattr(codec.base64, "b64decode", never)
+        refused("GRAPH_LIMIT_EXCEEDED", codec.decode_graph_slots, g)
+        refused("GRAPH_LIMIT_EXCEEDED", validate_graph, g)
+        return
+
+    assert validate_graph(g) == g
+    assert list(codec.decode_graph_slots(g)[frame["id"]].ids) == slot_ids(g, 0, frame["module_slots"])
+
+
 def test_ground_graph_codec_template_bomb_is_refused_before_expansion(graph, b18, monkeypatch):
     def never(*args, **kwargs):
         raise AssertionError("a row was decoded")

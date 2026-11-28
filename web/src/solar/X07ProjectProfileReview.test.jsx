@@ -1,6 +1,6 @@
 import React from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import ProjectSolarWorkspace from './ProjectSolarWorkspace.jsx'
 import X07ProjectProfileReview from './X07ProjectProfileReview.jsx'
 import { createSolarProjectClient } from './solarProjectClient.js'
@@ -113,4 +113,54 @@ it('retires an old client read on same-scope authority replacement', async () =>
     project_key: ids[1], profile_id: 'retired', version: 1, roles: copy(roles) } }))
   await screen.findByRole('button', { name: 'Confirm roles' })
   expect(screen.queryByText('Saved drawing roles loaded.')).toBeNull()
+})
+
+it.each([0, 3])('opens the acknowledged editor from profile version %i without waiting for another read', async initialVersion => {
+  const h = fixture()
+  const base = h.fetchImpl.getMockImplementation()
+  const saved = { customer_key: ids[0], profile_id: 'profile-one', version: initialVersion || 1, roles }
+  let confirmed = false
+  h.fetchImpl.mockImplementation(async (url, init) => {
+    if (url.endsWith(path) && init.method === 'POST') {
+      expect(JSON.parse(init.body).expected_version).toBe(initialVersion)
+      confirmed = true
+      return response({ ...identity, ok: true, applied_profile: { ...saved, project_key: ids[1] }, profile: saved })
+    }
+    if (url.endsWith(path) && init.method === 'GET') {
+      if (confirmed) return new Promise(() => {})
+      return response({ ...identity, expected_version: initialVersion, profile: initialVersion ? saved : null, application_record: null })
+    }
+    return base(url, init)
+  })
+  render(<ProjectSolarWorkspace {...h.props} />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Confirm roles' }))
+  await screen.findByText('Roles confirmed.')
+  const layer = await screen.findByLabelText('Module layer')
+  expect(layer.value).toBe('PV')
+  fireEvent.change(layer, { target: { value: 'Edited layer' } })
+  expect(layer.value).toBe('Edited layer')
+  expect(screen.getByRole('button', { name: 'Save profile' }).disabled).toBe(false)
+  expect(h.fetchImpl.mock.calls.filter(([url, init]) => url.endsWith(path) && init.method === 'GET')).toHaveLength(1)
+})
+
+it('ignores a retired confirmation when the project changes before acknowledgment', async () => {
+  const old = fixture(), fresh = fixture()
+  const base = old.fetchImpl.getMockImplementation()
+  let finish
+  old.fetchImpl.mockImplementation((url, init) => init.method !== 'POST' ? base(url, init) : new Promise(resolve => { finish = resolve }))
+  const view = render(<X07ProjectProfileReview {...old.props} />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Confirm roles' }))
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  const other = { ...binding, project_id: ids[3] }
+  fresh.client.setScope(other, 'next')
+  const active = { customer_key: ids[0], profile_id: 'new-profile', version: 2, roles: { module: { block: 'Active', layer: 'New' } } }
+  fresh.fetchImpl.mockImplementation(async () => response({ ...identity, project_key: other.project_id,
+    expected_version: 2, profile: active, application_record: { ...active, project_key: other.project_id } }))
+  view.rerender(<X07ProjectProfileReview {...fresh.props} authorityKey="next" solarBinding={other} />)
+  await screen.findByDisplayValue('Active')
+  const retired = { ...active, profile_id: 'old-profile', roles, version: 1 }
+  await act(async () => finish(response({ ...identity, ok: true, profile: retired,
+    applied_profile: { ...retired, project_key: ids[1] } })))
+  expect(screen.getByLabelText('Module layer').value).toBe('New')
+  expect(old.fetchImpl.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1)
 })

@@ -1,3 +1,15 @@
+.drawing-incomplete-view {
+  background: var(--ck-glass-dock, var(--leaf-glass-dock));
+  color: var(--ck-ink, var(--leaf-ink));
+  border: 1px solid var(--ck-edge, var(--leaf-line));
+  border-left: 3px solid var(--ck-warn, var(--leaf-warn));
+  border-radius: var(--leaf-radius-key);
+  padding: 6px 10px;
+  margin: 0;
+  font-size: var(--leaf-size-caption);
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+}
 .drawing-objects-panel {
   background: var(--ck-glass-dock, var(--leaf-glass-dock));
   color: var(--ck-ink, var(--leaf-ink));
@@ -36,7 +48,36 @@
   top: calc(var(--ck-canvas-top, 140px) + 82px);
   width: min(360px, calc(100vw - var(--ck-pane, 0px) - 224px));
 }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-incomplete-view {
+  position: fixed;
+  z-index: calc(var(--leaf-layer-base) + 7);
+  pointer-events: auto;
+  /* GAPS 48 (film take 4): on the Objects row below Find, never on the
+     document-tab row, where it covered "Take edit lock" in a narrow window. */
+  top: calc(var(--ck-canvas-top-live, var(--ck-canvas-top, 140px)) + 82px);
+  left: calc(var(--ck-pane, 0px) + 512px);
+  right: auto;
+  width: fit-content;
+  max-width: min(420px, calc(100vw - var(--ck-pane, 0px) - 160px));
+}
+.drawing-incomplete-view > summary {
+  cursor: pointer;
+  min-height: 24px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.drawing-incomplete-view > summary:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-incomplete-view[open] {
+  max-height: 40dvh;
+  overflow: auto;
+}
 @media (max-width: 1023px) {
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-incomplete-view {
+    left: 8px;
+    right: 8px;
+    top: calc(var(--ck-canvas-top, 140px) + 120px);
+  }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-objects-panel {
     left: min(456px, calc(100vw - 104px));
     top: calc(var(--ck-canvas-top, 140px) + 26px);

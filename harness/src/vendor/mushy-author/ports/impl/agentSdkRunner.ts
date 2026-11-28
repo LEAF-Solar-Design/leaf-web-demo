@@ -94,10 +94,21 @@ function dynImport(parts: string[]): Promise<unknown> {
  *  credential variable is injected AFTER the sweep. */
 export function buildScrubbedEnv(grant: AgentGrant, base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = scrubSecrets(base);
+  // Ambient routing must never redirect an ordinary tenant's credential.
+  for (const key of Object.keys(env)) {
+    if (["ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"].includes(key.toUpperCase())) {
+      delete env[key];
+    }
+  }
   if (grant.kind === "oauth") {
     env.CLAUDE_CODE_OAUTH_TOKEN = grant.oauthToken;
   } else {
     env.ANTHROPIC_API_KEY = grant.apiKey;
+    if (grant.baseUrl !== undefined) env.ANTHROPIC_BASE_URL = grant.baseUrl;
+    if (grant.model !== undefined) {
+      env.ANTHROPIC_MODEL = grant.model;
+      env.ANTHROPIC_SMALL_FAST_MODEL = grant.model;
+    }
   }
   return env;
 }
@@ -682,7 +693,8 @@ export class AgentSdkRunner implements AgentRunner {
       prompt: authorPrompt(input.systemPrompt, input.description, registry !== null),
       options: {
         env: childEnv,
-        model: resolveAuthorModel(this.opts.model),
+        model: input.grant.kind === "api_key" && input.grant.model !== undefined
+          ? input.grant.model : resolveAuthorModel(this.opts.model),
         ...(effort ? { effort } : {}),
         maxTurns,
         settingSources: [],

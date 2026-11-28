@@ -329,6 +329,110 @@ def _author_as(client, tenant_id: str) -> dict:
     return body["tool"]
 
 
+@pytest.fixture
+def rooftop_author(monkeypatch, tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import deps
+    import tool_loader
+    from routers import author
+
+    tenant = "saved-rooftop-distance-test"
+    authored = tmp_path / "authored"
+    monkeypatch.delenv("LEAF_AUTHOR_HARNESS_URL", raising=False)
+    monkeypatch.setattr(author, "AUTHORED_DIR", authored)
+    monkeypatch.setattr(tool_loader, "AUTHORED_DIR", authored)
+    monkeypatch.setattr(tool_loader, "SERVER_DIR", tmp_path)
+    monkeypatch.setattr(deps, "AUTHORED_STORE", tmp_path / "registry.json")
+    monkeypatch.setattr(deps, "_AUTHORED", [])
+    monkeypatch.setattr(deps, "load_tenant_repo_tools", lambda *_args, **_kwargs: [])
+
+    app = FastAPI()
+    app.include_router(author.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: tenant
+    app.dependency_overrides[deps.require_active_tenant] = lambda: tenant
+    with TestClient(app) as client:
+        yield client, tenant
+
+
+@pytest.mark.parametrize(("phrase", "relation", "insunits", "margin", "count"), [
+    ("24 inches", "of a roof edge", None, 24, 23),
+    ("60 inches", "of a roof edge", None, 60, 72),
+    ("120 inches", "of a roof edge", None, 120, 146),
+    ("5 feet", "of a roof edge", 1, 60, 72),
+    ("6.096 cm", "of a roof edge", 4, 60.96, None),
+    ("60 drawing units", "of a roof edge", 4, 60, 72),
+    ("2 meters", "of the edge", 6, 2, None),
+    ("1.5 metres", "from the roof perimeter", 6, 1.5, None),
+    ("6 feet", "from edge", 1, 72, None),
+])
+def test_saved_rooftop_edge_distance_reopens(phrase, relation, insunits, margin, count, rooftop_author):
+    import json
+    import deps
+    import tool_loader
+
+    intake_path = Path(__file__).resolve().parents[2] / "data" / "rooftop_demo.intake.json"
+    intake = json.loads(intake_path.read_bytes())
+    if insunits is not None:
+        intake["insunits"] = insunits
+
+    client, tenant = rooftop_author
+    response = client.post("/api/author", json={
+        "description": f"Build a tool that highlights solar panels within {phrase} {relation}.",
+        "mode": "build",
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["source"] == "template"
+    saved = response.json()["tool"]
+
+    deps._AUTHORED[:] = deps.load_authored_tools()
+    reopened = next(tool for tool in deps.all_tools(tenant) if tool["name"] == saved["name"])
+    assert reopened["entry"] == saved["entry"]
+    assert phrase in reopened["params"]["properties"]["margin"]["description"]
+    default = tool_loader.run_tool_dynamic(reopened, intake, {}, aps_live=False)
+    equivalent = tool_loader.run_tool_dynamic(reopened, intake, {"margin": margin}, aps_live=False)
+    assert default["ok"] and equivalent["ok"], (default, equivalent)
+    assert default["result"]["margin"] == pytest.approx(margin)
+    assert default["overlay"]["highlight_handles"] == equivalent["overlay"]["highlight_handles"]
+    if count is not None:
+        assert default["result"]["matched"] == count
+
+    override = tool_loader.run_tool_dynamic(reopened, intake, {"margin": 10}, aps_live=False)
+    assert override["ok"], override
+    assert override["result"]["margin"] == 10
+
+
+@pytest.mark.parametrize("distance", ["3 yards", "1/2 inch", "six feet", "-5 feet"])
+def test_invalid_edge_distance_refuses_before_persistence(distance, rooftop_author, tmp_path):
+    client, _ = rooftop_author
+    response = client.post("/api/author", json={
+        "description": f"Build a tool that highlights solar panels within {distance} of the roof edge.",
+        "mode": "build",
+    })
+    assert response.status_code == 422, response.text
+    assert response.json()["reason_code"] == "invalid_edge_distance"
+    assert "numeric roof-edge distance" in response.json()["error"]["message"]
+    assert not (tmp_path / "registry.json").exists()
+    assert not list((tmp_path / "authored").rglob("*.py"))
+
+
+def test_relative_edge_request_can_still_be_saved(rooftop_author):
+    import json
+    import tool_loader
+
+    client, _ = rooftop_author
+    response = client.post("/api/author", json={
+        "description": "Build a tool that highlights solar panels near the roof edge.",
+        "mode": "build",
+    })
+    assert response.status_code == 200, response.text
+    saved = response.json()["tool"]
+    intake_path = Path(__file__).resolve().parents[2] / "data" / "rooftop_demo.intake.json"
+    result = tool_loader.run_tool_dynamic(saved, json.loads(intake_path.read_bytes()), {}, aps_live=False)
+    assert result["ok"], result
+    assert result["result"]["matched"] == 215
+
+
 # --------------------------------------------------------------------------- #
 # F3 (a): two tenants, one tool name -> two physically distinct bodies
 # --------------------------------------------------------------------------- #

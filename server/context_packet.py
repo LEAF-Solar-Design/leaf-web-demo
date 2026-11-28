@@ -19,8 +19,8 @@ model — never an execution surface — so every field is a projection:
     classifier_hint  §12 classifier output passthrough (or null)
 
 SIZE DISCIPLINE: the serialized packet must stay under MAX_PACKET_CHARS
-(~1.2K tokens). The catalog is truncated FIRST (it is the only unbounded
-field); the final size is asserted, so an oversized packet fails loudly at
+(~1.2K tokens). The catalog is truncated FIRST, then project context is dropped
+and layer rows trimmed; an oversized packet fails loudly at
 build time instead of silently blowing the harness prompt budget.
 
 PURE READS: this module never writes. It deliberately does NOT bootstrap the
@@ -35,9 +35,11 @@ import os
 import socket
 import threading
 import time
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 import catalog as catalog_mod
+import customization_flags
 import deps
 import entitlements
 import jobs
@@ -142,6 +144,61 @@ def _empty_drawing(drawing_id: str) -> Dict[str, Any]:
     return {"id": drawing_id, "head_version": None, "layers": [], "entity_total": 0}
 
 
+def _clean_name(value: Any, limit: int) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = "".join(c for c in value
+                   if not unicodedata.category(c).startswith("C")
+                   and unicodedata.category(c) not in ("Zl", "Zp"))
+    return " ".join(text.split())[:limit] or None
+
+
+def _drawing_source(tenant_id: str, drawing_id: str,
+                    head_version: Any) -> Optional[Dict[str, Any]]:
+    try:
+        import guest_uploads
+        import write_loop
+
+        backend = write_loop.upload_backend_for_tenant(str(tenant_id))
+        marker = guest_uploads.read_marker(backend, str(tenant_id), drawing_id)
+    except Exception:  # noqa: BLE001 - upload metadata is advisory, pure read
+        return None
+    if not isinstance(marker, dict) or marker.get("status") != "ready":
+        return None
+    filename = marker.get("filename")
+    if isinstance(filename, str):
+        filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    version = marker.get("extracted_version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        version = None
+    matches = version is not None and version == head_version
+    source = {"file_name": _clean_name(filename, 80), "version": version,
+              "head_matches": matches, "sha256": None, "model_objects": None,
+              "layer_count": None, "counts_status": "unavailable"}
+    if not matches:
+        return source
+
+    def valid_sha(value: Any) -> Optional[str]:
+        return value if (isinstance(value, str) and len(value) == 64
+                         and all(c in "0123456789abcdef" for c in value)) else None
+
+    fingerprint = marker.get("fingerprint")
+    if fingerprint is None:
+        source["sha256"] = valid_sha(marker.get("content_sha256"))
+    elif (isinstance(fingerprint, dict)
+          and fingerprint.get("schema") == "leaf.drawing-fingerprint.v1"):
+        source["sha256"] = valid_sha(fingerprint.get("sha256"))
+        for key in ("model_objects", "layer_count"):
+            value = fingerprint.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                source[key] = value
+        if (fingerprint.get("status") == "ok"
+                and source["model_objects"] is not None
+                and source["layer_count"] is not None):
+            source["counts_status"] = "ok"
+    return source
+
+
 def _drawing_sections(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
     """{drawing, versions, checkout} straight from the store manifest + head
     intake. An unknown/unreadable drawing degrades to the empty digest."""
@@ -188,8 +245,14 @@ def _drawing_sections(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
     total = 0
     try:
         _v, intake = write_loop.read_intake(backend, str(tenant_id), drawing_id, "head")
-        for key in ("polylines", "inserts", "faces3d"):
-            for ent in intake.get(key) or []:
+        for key in ("polylines", "inserts", "faces3d", "circles", "arcs", "texts",
+                    "dimensions", "splines"):
+            rows = intake.get(key)
+            if not isinstance(rows, list):
+                continue
+            for ent in rows:
+                if not isinstance(ent, dict):
+                    continue
                 layers[str(ent.get("layer", "0"))] = layers.get(str(ent.get("layer", "0")), 0) + 1
                 total += 1
     except Exception:  # noqa: BLE001 - digest is best-effort; manifest facts still ship
@@ -197,7 +260,7 @@ def _drawing_sections(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
     # layers is per-DISTINCT-layer and therefore unbounded — cap it like the
     # catalog (top-N by count, deterministic tiebreak, trailing {"more": N}).
     ranked = sorted(layers.items(), key=lambda kv: (-kv[1], kv[0]))
-    layer_rows: List[Dict[str, Any]] = [{"name": n, "count": c}
+    layer_rows: List[Dict[str, Any]] = [{"name": _clean_name(n, 64), "count": c}
                                         for n, c in ranked[:LAYERS_CAP]]
     if len(ranked) > LAYERS_CAP:
         layer_rows.append({"more": len(ranked) - LAYERS_CAP})
@@ -353,6 +416,18 @@ def build_packet(tenant_id: Any, drawing_id: str,
         "classifier_hint": classifier_hint,
     }
     packet.update(_drawing_sections(str(tenant_id), drawing_id))
+    source = _drawing_source(str(tenant_id), drawing_id, packet["drawing"].get("head_version"))
+    if source is not None:
+        packet["drawing_source"] = source
+    inline: Dict[str, Any] = {}
+    if customization_flags.plan_mode_enabled(str(tenant_id)):
+        inline["plan_mode"] = True
+    if customization_flags.inline_review_enabled(str(tenant_id)):
+        # The harness tells the user where publication review happens from these.
+        inline["inline_review"] = True
+        inline["self_approval"] = customization_flags.self_approval_allowed(str(tenant_id))
+    if inline:
+        packet["inline_authoring"] = inline
     if (project_principal is not None and str(project_principal) == str(tenant_id)
             and session_id and turn_id):
         section = _project_material_context(
@@ -369,7 +444,7 @@ def build_packet(tenant_id: Any, drawing_id: str,
                 f"of {MAX_CONTEXT_PACKET_DEPTH}."
             )
 
-    # HARD CAP: truncate the catalog FIRST (the only unbounded field), then assert.
+    # HARD CAP: catalog first, then project context, then layer rows.
     keep = min(len(entries), CATALOG_CAP)
     while len(_serialize(packet)) >= MAX_PACKET_CHARS and keep > 0:
         keep -= 1
@@ -378,6 +453,18 @@ def build_packet(tenant_id: Any, drawing_id: str,
     if len(raw) >= MAX_PACKET_CHARS and "project_material_context" in packet:
         del packet["project_material_context"]
         raw = _serialize(packet)
+    layers = packet["drawing"]["layers"]
+    omitted = 0
+    if layers and "more" in layers[-1]:
+        omitted = layers[-1]["more"]
+        layers = layers[:-1]
+    while len(raw) >= MAX_PACKET_CHARS and layers:
+        layers.pop()
+        omitted += 1
+        packet["drawing"]["layers"] = layers + [{"more": omitted}]
+        raw = _serialize(packet)
+    if omitted:
+        packet["drawing"]["layers"] = layers + [{"more": omitted}]
     if len(raw) >= MAX_PACKET_CHARS:
         # ValueError (not assert): the route maps it to BAD_PARAMS instead of a
         # 500, and `python -O` cannot strip it into silently shipping oversized.

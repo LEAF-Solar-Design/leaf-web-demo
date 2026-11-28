@@ -659,11 +659,19 @@ def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
 
     def execute_read():
         intake = context.intake
-        if tool.get("engine_op") == "revision_panel_moves":
+        if tool.get("engine_op") in {"revision_panel_moves", "viewport_panel_revision_comparison"}:
             from authored_revision_panel_moves import bind_project_parent
             intake = bind_project_parent(tenant, context)
+        # The project request also carries the drawing selector for binding and
+        # idempotency. A closed tool schema can exclude it from its own inputs.
+        schema = tool.get("params") or {}
+        tool_params = params
+        if ("drawing_id" in params and schema.get("additionalProperties") is False
+                and "drawing_id" not in schema.get("properties", {})
+                and not schema.get("patternProperties")):
+            tool_params = {key: value for key, value in params.items() if key != "drawing_id"}
         return tool_loader.run_tool_dynamic(
-            tool, intake, params, aps_live=False, da=None,
+            tool, intake, tool_params, aps_live=False, da=None,
             tenant_id=str(tenant) if is_demo_context(tenant) else str(org_id))
 
     try:
@@ -696,7 +704,7 @@ def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
         key: env[key]
         for key in (
             "ok", "tool", "version", "result", "overlay", "timing_ms",
-            "cost", "error", "degraded_mode", "execution_provenance",
+            "cost", "error", "degraded_mode", "execution_provenance", "executed_code_digest",
         )
         if key in env
     }
@@ -823,7 +831,8 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
             default=None, alias="X-Authority-Session-Id"),
         authority_turn_id: Optional[str] = Header(
             default=None, alias="X-Authority-Turn-Id"),
-        x_xbench_solver_fault: Optional[str] = Header(default=None, alias="X-XBench-Solver-Fault")):
+        x_xbench_solver_fault: Optional[str] = Header(default=None, alias="X-XBench-Solver-Fault"),
+        prefer: Optional[str] = Header(default=None)):
     """Submit a tool run as a durable background job (202), or block with ?wait=1.
 
     OPTIONAL project context: when the caller sends BOTH ``X-Org-Id`` and
@@ -1120,7 +1129,9 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
     if isinstance(x_project_id, str) and x_project_id and _is_project_read_tool(tool):
         return _run_project_read(
             tool, tenant_id, (x_org_id, x_project_id), req, params,
-            persist=persist == 1 or selected_binding is not None,
+            persist=persist == 1 or selected_binding is not None or (
+                isinstance(prefer, str) and "respond-async" in {item.strip().lower() for item in prefer.split(",")}
+            ),
             idempotency_key=idempotency_key, selected_binding=selected_binding)
 
     if isinstance(x_project_id, str) and x_project_id and _is_project_write_tool(tool):
@@ -1498,9 +1509,34 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
     return JSONResponse(status_code=202, content=body)
 
 
+def _running_split_progress(rec, tenant_id):
+    context = rec.get("execution_context")
+    adapter = capability_catalog.capability_adapter(rec.get("tool_name"))
+    if (rec.get("status") != "running" or adapter != capability_catalog.CLOUD_PROPOSAL_ADAPTER
+            or not isinstance(context, dict)
+            or context.get("schema") != "leaf.solar-project-graph-job.v1"):
+        return None
+    try:
+        db = jobs.platform_link.platform_db()
+        from leaf_platform import project_solve_store
+        scope = project_solve_store.ExchangeScope(
+            uuid.UUID(str(rec["org_id"])), uuid.UUID(str(rec["project_id"])),
+            uuid.UUID(str(context["drawing_id"])), uuid.UUID(str(rec["job_id"])))
+        binding = context["solve_binding"]
+        input_version = uuid.UUID(str(rec["input_version_id"]))
+        return db.run_transaction(lambda conn: project_solve_store.read_running_split_progress(
+            scope, tenant_id=tenant_id, input_version_id=input_version,
+            graph_revision=binding["expected_rev"], graph_sha256=binding["graph_sha256"],
+            conn=conn, source_sha=os.environ.get("LEAF_SOURCE_SHA")), read_only=True, max_attempts=1)
+    except Exception:
+        # Optional progress must not turn a readable job status into an error.
+        return None
+
+
 @router.get("/api/jobs/{job_id}")
 def get_job(job_id: str, tenant=Depends(deps.require_tenant), *,
-            assembly_input_version: Optional[uuid.UUID] = None):
+            assembly_input_version: Optional[uuid.UUID] = None,
+            include_solve_progress: bool = False):
     tenant_id = _bound_tenant_id(tenant)
     if is_demo_context(tenant):
         rec, denied = _demo_observation(job_id, tenant)
@@ -1518,7 +1554,14 @@ def get_job(job_id: str, tenant=Depends(deps.require_tenant), *,
         from solar_project_solve import readonly_assembly_attribution
         return with_envelope_fields({"ok": True, "assembly_attribution":
             readonly_assembly_attribution(tenant, rec, assembly_input_version)})
-    return denied if denied is not None else _record_body(_with_client_delivery(rec))
+    if denied is not None:
+        return denied
+    body = _record_body(_with_client_delivery(rec))
+    if include_solve_progress:
+        progress = _running_split_progress(rec, tenant_id)
+        if progress is not None:
+            body["solve_progress"] = progress
+    return body
 
 
 @router.post("/internal/jobs/{job_id}/callback")

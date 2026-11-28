@@ -1,0 +1,13 @@
+{
+  "exit_code": 0,
+  "stdout": {
+    "schema": "leaf.tool-check.v1",
+    "ok": true,
+    "decision": "accept",
+    "diagnostics": [],
+    "package_digest": "079bc8c277c9cba64b38d881a58fdaede524d19636d7400887fc99273bcd1f72",
+    "allowlist_sha256": "716d548887ce792f4f9950d0ba8b0e531b3d7f9b80b7399cf3fcd59d622a3285",
+    "framework": "<framework>"
+  },
+  "source": "Windows tools/tool-check (net8.0-windows) at Branch2025 59c81299, LeafAcadRefSource=nuget, 2026-11-20"
+}

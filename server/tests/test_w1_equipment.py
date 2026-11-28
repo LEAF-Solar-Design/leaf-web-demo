@@ -86,6 +86,35 @@ def test_assignment_placement_and_reopen(case):
     assert all(item["validity"]["state"] == "stale" for item in reopened["routes"] + reopened["schedules"])
 
 
+@pytest.mark.parametrize("collector_numbers", [(1,), (8,), (1, 8)])
+def test_l1_equipment_ready_with_central_collectors(case, collector_numbers):
+    import solar_local_graph as local
+
+    graph, params, _ = case
+    graph["settings"]["use_l2_collectors"] = True
+    equipped = equipment_candidate(graph, params)
+    l1 = equipped["inverters"][0]
+    assert l1["equipment_type"] == "string_inverter" and l1["l2_ref"] is None
+    assert equipment_ready(equipped)
+    add = local._load_builtin("solar-central-inverter-add")
+    for number in collector_numbers:
+        equipped = add.run(equipped, {
+            "expected_rev": equipped["rev"], "number": number, "point": [100, number],
+            "hardware": {"model": "Central 100", "max_dc_voltage": 1500,
+                         "max_ac_power_kw": 100, "mppt_count": 1, "total_dc_inputs": 1,
+                         "collector_capacity": 4},
+        })
+
+    reopened = deserialize_graph(serialize_graph(equipped))
+    assert all("mppt_inputs" not in item for item in reopened["inverters"] if item["is_l2"])
+    before = copy.deepcopy(reopened)
+    assert equipment_ready(reopened)
+    assert reopened == before
+
+    reopened["inverters"][0]["max_dc_power_kw"] = .5
+    assert not equipment_ready(reopened)
+
+
 @pytest.mark.parametrize("defect,reason", [
     ("unassigned", "EQUIPMENT_UNASSIGNED"), ("slot", "EQUIPMENT_INPUT_CAPACITY_EXCEEDED"),
     ("mppt", "EQUIPMENT_INPUT_CAPACITY_EXCEEDED"), ("voltage", "EQUIPMENT_VOLTAGE_EXCEEDED"),

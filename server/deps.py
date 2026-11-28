@@ -950,10 +950,13 @@ def resolve_active_platform_tenant_id(subject: Optional[str]) -> str:
 
 
 def require_matching_platform_tenant_claim(
-    claims: Dict[str, Any], platform_tenant_id: str,
+    claims: Dict[str, Any], platform_tenant_id: str, subject: Optional[str] = None,
 ) -> None:
     """Fail closed when a signed tenant hint disagrees with current authority."""
-    if claims.get("tenant_id") != str(platform_tenant_id):
+    # The binding comes from the verified subject, so its sub fallback reaches only its own binding.
+    if claims.get("tenant_id") != str(platform_tenant_id) and not (
+        isinstance(subject, str) and subject and claims.get("tenant_id") == subject
+    ):
         from fastapi import HTTPException  # noqa: PLC0415
         raise HTTPException(
             status_code=409,
@@ -1363,7 +1366,7 @@ def require_tenant(
     subject = payload.get("sub") if isinstance(payload.get("sub"), str) else None
     platform_tenant_id, platform_tier = resolve_active_platform_tenant_authority(subject)
     investor = require_investor_authority(subject, platform_tenant_id, platform_tier)
-    require_matching_platform_tenant_claim(claims, platform_tenant_id)
+    require_matching_platform_tenant_claim(claims, platform_tenant_id, subject)
     if not investor:
         platform_tier = admin_elevated_tier(claims.get("tier"), subject, platform_tier)
     ws = None if investor else tenancy.get_store().resolve_workspace(platform_tenant_id)
@@ -1506,6 +1509,29 @@ def resolve_active_tenant_context(tenant: Any) -> Any:
 def require_active_tenant(tenant: Any = Depends(require_tenant)) -> Any:
     """FastAPI dependency for resources stored under platform authority."""
     return resolve_active_tenant_context(tenant)
+
+
+def workspace_view(tenant) -> Optional[dict]:
+    """Display only, fails soft, resolved tenant only."""
+    if (not auth_live() or not isinstance(tenant, TenantContext)
+            or not tenant.authority_resolved or tenant.verified_demo):
+        return None
+    import investor_demo  # noqa: PLC0415
+
+    if investor_demo.is_investor_context(tenant):
+        return None
+    name = None
+    try:
+        import uuid  # noqa: PLC0415
+        import platform_link  # noqa: PLC0415
+
+        tenant_id = uuid.UUID(tenant.tenant_id)
+        org = platform_link.platform_store().get_org(tenant_id)
+        if org is not None and isinstance(org.name, str) and org.name.strip():
+            name = org.name.strip()[:120]
+    except Exception:  # noqa: BLE001 - display data must never fail the request
+        pass
+    return {"id": str(tenant.tenant_id), "name": name}
 
 
 def tenant_echo(body: Dict[str, Any], tenant: Any) -> Dict[str, Any]:

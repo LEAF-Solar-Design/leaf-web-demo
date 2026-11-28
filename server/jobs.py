@@ -2250,6 +2250,9 @@ def failed_envelope_from(record: Dict[str, Any]) -> Dict[str, Any]:
     envelope = err_envelope(err["error_code"], err["message"], err["retryable"],
                             tool=record.get("tool"),
                             timing_ms=record.get("elapsed_ms") or 0)
+    action = err.get("next_action")
+    if err["error_code"] == ErrorCode.BAD_PARAMS and isinstance(action, str) and action.strip():
+        envelope["error"]["next_action"] = action
     import re
     reason_code = err.get("reason_code")
     if isinstance(reason_code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", reason_code):
@@ -2257,6 +2260,16 @@ def failed_envelope_from(record: Dict[str, Any]) -> Dict[str, Any]:
         from solar_proposal_candidate import requires_candidate
         if requires_candidate({"name": record.get("tool")}):
             envelope["error"]["reason_code"] = reason_code
+        if record.get("tool") == "solar-combiners" and reason_code == "L2_CAPACITY_EXCEEDED":
+            refs = err.get("unplaced_string_refs")
+            if isinstance(refs, list) and refs and all(isinstance(ref, str) for ref in refs):
+                envelope["error"]["reason_code"] = reason_code
+                envelope["error"]["unplaced_string_refs"] = refs
+        if record.get("tool") == "solar-homeruns" and reason_code == "JOINT_ROUTING_INFEASIBLE":
+            leads = err.get("unassigned_leads")
+            if isinstance(leads, list) and leads:
+                envelope["error"]["reason_code"] = reason_code
+                envelope["error"]["unassigned_leads"] = leads
     return envelope
 
 

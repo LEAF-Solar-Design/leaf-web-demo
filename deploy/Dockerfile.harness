@@ -10,6 +10,75 @@
 # LEAF_GRANTS_DIR, or the demo LEAF_GRANT_FILE) — NEVER baked into the image.
 FROM node:22-bookworm AS trust-store
 
+FROM node:22-bookworm AS branch-compile
+ENV DOTNET_ROOT=/opt/dotnet PATH=/opt/dotnet:$PATH DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_SDK_VERSION=8.0.428 DOTNET_SDK_SHA512=33212bb99a2bf003973d41106c7e8fe94208a12958ff601d4a476be379403c85a7dc9183a6ec64dfb44ded7102965be09f35add1758e68e9251bae7891d7b7bf
+RUN set -eu; \
+    curl -fsSL --retry 3 -o /tmp/dotnet-sdk.tar.gz "https://builds.dotnet.microsoft.com/dotnet/Sdk/${DOTNET_SDK_VERSION}/dotnet-sdk-${DOTNET_SDK_VERSION}-linux-x64.tar.gz"; \
+    printf '%s  %s\n' "$DOTNET_SDK_SHA512" /tmp/dotnet-sdk.tar.gz | sha512sum -c -; \
+    mkdir -p /opt/dotnet; tar -xzf /tmp/dotnet-sdk.tar.gz -C /opt/dotnet; rm /tmp/dotnet-sdk.tar.gz; \
+    dotnet --version | grep -qx "$DOTNET_SDK_VERSION"
+WORKDIR /src
+COPY harness/branch-compile/ /src/
+# The workflow exports intermediate layers to its registry cache. Keep both
+# NuGet's package and HTTP caches on a temporary mount during restore/publish.
+RUN --mount=type=tmpfs,target=/root set -eu; \
+    dotnet restore /src/ToolCheckPortable.csproj --locked-mode; \
+    dotnet publish /src/ToolCheckPortable.csproj -c Release --no-restore -o /out/bin; \
+    dotnet restore /src/net48/globals/Net48Globals.csproj --locked-mode; \
+    dotnet restore /src/net48/check/ToolCheckNet48.csproj --locked-mode; \
+    dotnet build /src/net48/globals/Net48Globals.csproj -c Release --no-restore; \
+    dotnet publish /src/net48/check/ToolCheckNet48.csproj -c Release --no-restore -o /out/net48/bin; \
+    install -D -m 0444 /src/net48/globals/bin/Release/net48/LeafSolarDesign.ScriptHost.dll /out/net48/bin/net48-globals/LeafSolarDesign.ScriptHost.dll; \
+    cd /root/.nuget/packages; \
+    for ref in autocad.net.core/25.0.0/lib/net8.0/AcCoreMgd.dll \
+               autocad.net.model/25.0.0/lib/net8.0/AcDbMgd.dll \
+               autocad.net/25.0.1/lib/net8.0/AcMgd.dll \
+               microsoft.netframework.referenceassemblies.net48/1.0.3/build/.NETFramework/v4.8/mscorlib.dll \
+               microsoft.netframework.referenceassemblies.net48/1.0.3/build/.NETFramework/v4.8/System.dll \
+               microsoft.netframework.referenceassemblies.net48/1.0.3/build/.NETFramework/v4.8/System.Core.dll \
+               newtonsoft.json/13.0.3/lib/net45/Newtonsoft.Json.dll \
+               autocad.net.core/24.2.0/lib/net47/AcCoreMgd.dll \
+               autocad.net.model/24.2.0/lib/net47/AcDbMgd.dll \
+               autocad.net/24.2.0/lib/net47/AcMgd.dll; do \
+      install -D -m 0444 "$ref" "/out/refs/$ref"; \
+    done; \
+    cd /out/refs; printf '%s\n' \
+      '9bcc52bf57b12728f2c6601d50cc3234a62f3068f7a304b5aa43c2b6c82b414f  autocad.net.core/25.0.0/lib/net8.0/AcCoreMgd.dll' \
+      'd81824ecf10aaea953bdb87823f546a7b773871e36376d0a61d4a36731741300  autocad.net.model/25.0.0/lib/net8.0/AcDbMgd.dll' \
+      'b85b1f0d01ec1f085a2ff8261bcebdfcaab4a4347c9ae95d935f2dff3e93846e  autocad.net/25.0.1/lib/net8.0/AcMgd.dll' \
+      '6b35530467b914b0b195146ca1d1485ddd219afaad6461103f16f54e952f75a9  microsoft.netframework.referenceassemblies.net48/1.0.3/build/.NETFramework/v4.8/mscorlib.dll' \
+      '2fe343569f794f2ca92ee14a41875571a9f21bf92637b8f8ee86306534209cca  microsoft.netframework.referenceassemblies.net48/1.0.3/build/.NETFramework/v4.8/System.dll' \
+      '94a1fc97eb0d36f13acd209bb7207da504c8be10caf7e5096b2c46e671dc6fe2  microsoft.netframework.referenceassemblies.net48/1.0.3/build/.NETFramework/v4.8/System.Core.dll' \
+      'e1e27af7b07eeedf5ce71a9255f0422816a6fc5849a483c6714e1b472044fa9d  newtonsoft.json/13.0.3/lib/net45/Newtonsoft.Json.dll' \
+      'd3faf7ce1bca36976410fafbbfcd743f3fd4ee7e778d58ba1d752d5c444a4bb2  autocad.net.core/24.2.0/lib/net47/AcCoreMgd.dll' \
+      '8646a67989c76b6f98e3525632ea2288fcbcc3af6a4cb66c99a3f9771faffaa4  autocad.net.model/24.2.0/lib/net47/AcDbMgd.dll' \
+      'ad7f44eccf672180bfe998df4df2e6e67a9f6269e7f1dee7e74ad51d59ae6094  autocad.net/24.2.0/lib/net47/AcMgd.dll' | sha256sum -c -
+
+# The Windows fixtures are indented JSON. Remove structural whitespace from
+# their stdout object while preserving spaces inside diagnostic strings.
+RUN set -eu; for name in good typo-bycli html-escaped-ops allowlist-violation; do \
+      expected="/src/parity/expected/$name.json"; rc=0; \
+      NUGET_PACKAGES=/out/refs /out/bin/tool-check-portable --package "/src/parity/$name.zip" > /tmp/result || rc=$?; \
+      test "$rc" = "$(sed -nE 's/^  "exit_code": ([0-9]+),.*/\1/p' "$expected")"; \
+      sed -E 's/,"framework":"[^"]*"}$/,"framework":"<framework>"}/' /tmp/result > /tmp/actual; \
+      sed -n '/^  "stdout": {/,/^  },/p' "$expected" | tr -d '\r' | \
+        sed -E '1s/.*/{/; $s/.*/}/; s/^ +//; s/^("[a-z0-9_]+":) /\1/' | tr -d '\n' > /tmp/expected; \
+      printf '\n' >> /tmp/expected; cmp /tmp/expected /tmp/actual; \
+    done
+
+RUN set -eu; for name in good typo-bycli html-escaped-ops allowlist-violation; do \
+      rc=0; NUGET_PACKAGES=/out/refs /out/net48/bin/tool-check-net48 --package "/src/parity/$name.zip" > /tmp/result || rc=$?; \
+      if [ "$name" = good ]; then \
+        test "$rc" = 0; grep -q '"decision":"accept"' /tmp/result; \
+      else \
+        test "$rc" = 1; grep -q '"decision":"compile_failed"' /tmp/result; \
+      fi; \
+    done; \
+    rc=0; NUGET_PACKAGES=/out/refs /out/net48/bin/tool-check-net48 --package /src/parity-net48/net8-only.zip > /tmp/result || rc=$?; \
+    test "$rc" = 1; grep -q '"decision":"compile_failed"' /tmp/result; grep -q 'CS1061' /tmp/result; \
+    rc=0; NUGET_PACKAGES=/out/refs /out/bin/tool-check-portable --package /src/parity-net48/net8-only.zip > /tmp/result || rc=$?; \
+    test "$rc" = 0; grep -q '"decision":"accept"' /tmp/result
+
 FROM node:22-slim AS harness
 
 # The self-hosted build runner cannot reach Debian mirrors over port 80. Seed
@@ -67,6 +136,9 @@ COPY harness/src/     /app/src/
 COPY harness/scripts/ /app/scripts/
 COPY harness/test/    /app/test/
 COPY server/glug_adoption_manifest.json /app/glug/glug_adoption_manifest.json
+COPY --from=branch-compile /out/bin /opt/branch-compile/bin
+COPY --from=branch-compile /out/refs /opt/branch-compile/refs
+COPY --from=branch-compile /out/net48 /opt/branch-compile/net48
 
 # Compile TS -> /app/dist (dist/scripts/serve.js + dist/src/**), then drop the
 # dev toolchain (typescript/vitest/@types) — the runtime keeps only the SDK dep.
@@ -76,6 +148,8 @@ COPY server/glug_adoption_manifest.json /app/glug/glug_adoption_manifest.json
 RUN npx tsc -p tsconfig.build.json \
   && npm prune --omit=dev \
   && chmod 0555 /app/scripts/start-harness.sh \
+  && chmod 0555 /opt/branch-compile/bin/tool-check-portable \
+  && chmod 0555 /opt/branch-compile/net48/bin/tool-check-net48 \
   && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
   && test ! -e /usr/local/lib/node_modules/npm && test ! -e /usr/local/bin/npm && test ! -e /usr/local/bin/npx
 
@@ -127,6 +201,8 @@ RUN useradd --system --uid 10002 --user-group --home /home/leaf --create-home le
 # read by node or tsc, so readable is the right bar for them.
 USER 10002:10002
 
+RUN ["/bin/sh", "-c", "test -x /opt/branch-compile/bin/tool-check-portable && test -r /opt/branch-compile/refs/autocad.net.core/25.0.0/lib/net8.0/AcCoreMgd.dll && test -r /opt/branch-compile/refs/autocad.net.model/25.0.0/lib/net8.0/AcDbMgd.dll && test -r /opt/branch-compile/refs/autocad.net/25.0.1/lib/net8.0/AcMgd.dll && test -x /opt/branch-compile/net48/bin/tool-check-net48 && test -r /opt/branch-compile/net48/bin/net48-globals/LeafSolarDesign.ScriptHost.dll && test -r /opt/branch-compile/refs/microsoft.netframework.referenceassemblies.net48/1.0.3/build/.NETFramework/v4.8/mscorlib.dll && test -r /opt/branch-compile/refs/microsoft.netframework.referenceassemblies.net48/1.0.3/build/.NETFramework/v4.8/System.dll && test -r /opt/branch-compile/refs/microsoft.netframework.referenceassemblies.net48/1.0.3/build/.NETFramework/v4.8/System.Core.dll && test -r /opt/branch-compile/refs/newtonsoft.json/13.0.3/lib/net45/Newtonsoft.Json.dll && test -r /opt/branch-compile/refs/autocad.net.core/24.2.0/lib/net47/AcCoreMgd.dll && test -r /opt/branch-compile/refs/autocad.net.model/24.2.0/lib/net47/AcDbMgd.dll && test -r /opt/branch-compile/refs/autocad.net/24.2.0/lib/net47/AcMgd.dll"]
+
 RUN ["/bin/sh", "-c", "test -f /app/dist/scripts/forgeMaterialize.js && test -s /app/dist/scripts/forgeMaterialize.js && test -r /app/dist/scripts/forgeMaterialize.js && test -d /app/run/forge && test -w /app/run/forge && test -x /app/run/forge"]
 
 RUN ["/bin/sh", "-c", "test -f /app/scripts/drive.ts && test -s /app/scripts/drive.ts && test -r /app/scripts/drive.ts && test -f /app/scripts/e2b-tool-exec.mjs && test -s /app/scripts/e2b-tool-exec.mjs && test -r /app/scripts/e2b-tool-exec.mjs && test -f /app/scripts/e2b-vendor-eval.mjs && test -s /app/scripts/e2b-vendor-eval.mjs && test -r /app/scripts/e2b-vendor-eval.mjs && test -f /app/scripts/forgeMaterialize.ts && test -s /app/scripts/forgeMaterialize.ts && test -r /app/scripts/forgeMaterialize.ts && test -f /app/scripts/git-worker.cjs && test -s /app/scripts/git-worker.cjs && test -r /app/scripts/git-worker.cjs && test -f /app/scripts/sealLegacyGrants.ts && test -s /app/scripts/sealLegacyGrants.ts && test -r /app/scripts/sealLegacyGrants.ts && test -f /app/scripts/serve.ts && test -s /app/scripts/serve.ts && test -r /app/scripts/serve.ts && test -f /app/scripts/start-harness.sh && test -s /app/scripts/start-harness.sh && test -r /app/scripts/start-harness.sh && test -x /app/scripts/start-harness.sh"]
@@ -139,6 +215,9 @@ RUN ["/bin/sh", "-c", "test -f /app/scripts/drive.ts && test -s /app/scripts/dri
 ARG LEAF_SOURCE_SHA=unknown
 
 ENV HARNESS_PORT=8150 \
+    LEAF_BRANCH_COMPILE_BIN=/opt/branch-compile/bin/tool-check-portable \
+    LEAF_BRANCH_COMPILE_NET48_BIN=/opt/branch-compile/net48/bin/tool-check-net48 \
+    LEAF_BRANCH_COMPILE_REFS=/opt/branch-compile/refs \
     LEAF_RUNTIME_ENV=production \
     LEAF_AUTHORED_EXECUTION=0 \
     LEAF_INSTANT_EXECUTION_ENABLED=0 \

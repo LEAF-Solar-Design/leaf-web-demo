@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import struct
 import unicodedata
 import zlib
@@ -15,6 +16,7 @@ from uuid import UUID
 
 VIDEO_MAX_BYTES = 64 * 1024 * 1024
 TEXT_MAX_BYTES = 8 * 1024 * 1024
+MATERIAL_JSON_MAX_DEPTH = 128
 CORPUS_MAX_BYTES = 64 * 1024 * 1024
 CORPUS_EXPANDED_MAX_BYTES = 2 * 1024 ** 3
 CORPUS_LINE_MAX_BYTES = 1024 * 1024
@@ -35,6 +37,29 @@ def unique_json_object(pairs):
     if len(result) != len(pairs):
         raise InvalidReference('Duplicate JSON key makes the original material ambiguous.')
     return result
+
+
+_SURROGATE = re.compile(r'[\ud800-\udfff]')
+
+
+def check_json_unicode(value):
+    """The JSON decoder combines valid escaped pairs. A remaining half is invalid."""
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str) and _SURROGATE.search(item):
+            raise InvalidReference('Material JSON contains an unpaired surrogate.')
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+
+
+def check_json_depth(raw):
+    from json_resource_limits import within_depth_budget
+    if not within_depth_budget(raw, MATERIAL_JSON_MAX_DEPTH):
+        raise InvalidReference('Material JSON exceeds its nesting depth limit.')
 
 
 def upload_policy(name, content_type):
@@ -242,6 +267,8 @@ def validate(name, content_type, raw, *, allow_corpus_members=False):
     elif media_type == 'video/quicktime':
         validate_mov(raw)
     else:
+        if media_type == 'application/json':
+            check_json_depth(raw)
         try:
             text = raw.decode('utf-8-sig')
             if any(unicodedata.category(c) == 'Cc' and c not in '\t\r\n' for c in text):
@@ -249,7 +276,9 @@ def validate(name, content_type, raw, *, allow_corpus_members=False):
             if media_type == 'application/json':
                 def invalid_constant(value):
                     raise ValueError('non-finite JSON')
-                json.loads(text, parse_constant=invalid_constant, object_pairs_hook=unique_json_object)
+                document = json.loads(text, parse_constant=invalid_constant, object_pairs_hook=unique_json_object)
+                if r'\u' in text:
+                    check_json_unicode(document)
         except InvalidReference:
             raise
         except (UnicodeError, ValueError, RecursionError):

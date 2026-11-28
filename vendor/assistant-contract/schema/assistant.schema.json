@@ -4103,6 +4103,59 @@
                           "maxLength": 120
                         }
                       ]
+                    },
+                    "member_filter": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "field": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128,
+                              "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                            },
+                            "op": {
+                              "type": "string",
+                              "const": "is_null"
+                            }
+                          },
+                          "required": [
+                            "field",
+                            "op"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "field": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128,
+                              "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                            },
+                            "op": {
+                              "type": "string",
+                              "enum": [
+                                "lt",
+                                "lte",
+                                "gt",
+                                "gte"
+                              ]
+                            },
+                            "value": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "field",
+                            "op",
+                            "value"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
                     }
                   },
                   "required": [

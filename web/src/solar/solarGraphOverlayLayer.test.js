@@ -73,7 +73,7 @@ const roofPolylines = [
   { color: '#22c55e', pts: [[0, 0], [1, 0], [2, 0]] },
   { color: '#22c55e', pts: [[2, 1], [1, 1], [0, 1]] },
   { color: '#f59e0b', pts: [[2.75, 1.75], [3.25, 1.75], [3.25, 2.25], [2.75, 2.25], [2.75, 1.75]] },
-  { color: '#38bdf8', pts: [[2, 0], [3, 0], [3, 2]] },
+  { color: '#38bdf8', pts: [[2, 0], [3, 0], [3, 2]], route: { id: U('route'), kind: 'start homerun' } },
 ]
 const groundPolylines = [{ color: '#22c55e', pts: [[1, -1], [.5, -.5]] }]
 const freeze = value => {
@@ -124,7 +124,7 @@ const common = (layer, colors, counts) => {
     expect(mesh.geometry).toBeInstanceOf(THREE.BufferGeometry)
     expect(mesh.geometry.index).toBe(null)
     const position = mesh.geometry.getAttribute('position')
-    expect(position).toBeInstanceOf(THREE.Float32BufferAttribute)
+    expect(position).toBeInstanceOf(THREE.BufferAttribute)
     expect(position.array).toBeInstanceOf(Float32Array)
     expect(position.itemSize).toBe(3)
     expect(position.count).toBe(counts[index])
@@ -201,6 +201,39 @@ describe('unmounted Solar graph overlay layer', () => {
     layer.dispose()
   })
 
+  it.each([[0, 0], [19, -32], [1e9, -1e9]])('rebases origin (%s, %s) before Float32 conversion', (x, y) => {
+    const route = { id: U('route'), kind: 'feeder' }
+    const polylines = freeze([
+      { color: green, pts: [[x + 2, y + 2], [x + 3, y + 2]] },
+      { color: green, route, pts: [[x + 0.25, y + 0.5], [x - 0.5, y + 0.75], [x - 0.5, y + 1.25]] },
+    ])
+    const layer = buildSolarGraphOverlayLayer(polylines, { x, y })
+    const [mesh] = layer.pickObjects
+    expect(vertices(mesh)).toEqual([[2, 2], [3, 2], [0.25, 0.5], [-0.5, 0.75], [-0.5, 0.75], [-0.5, 1.25]])
+    const raycaster = new THREE.Raycaster(new THREE.Vector3(-0.5, 1, 10), new THREE.Vector3(0, 0, -1))
+    raycaster.params.Line.threshold = 0.01
+    expect(layer.routesFromHits(raycaster.intersectObjects(layer.pickObjects))).toEqual([route.id])
+    raycaster.ray.origin.set(2.5, 2, 10)
+    expect(layer.routesFromHits(raycaster.intersectObjects(layer.pickObjects))).toEqual([])
+    layer.selectRoute(route.id)
+    expect(vertices(layer.group.children[1])).toEqual([[0.25, 0.5], [-0.5, 0.75], [-0.5, 0.75], [-0.5, 1.25]])
+    layer.dispose()
+  })
+
+  it('writes interleaved colour batches to exact size without connecting separate strings', () => {
+    const layer = buildSolarGraphOverlayLayer([
+      { color: green, pts: [[0, 0], [1, 0]] },
+      { color: amber, pts: [[8, 9]] },
+      { color: blue, pts: [[2, 3], [4, 5], [6, 7]] },
+      { color: green, pts: [] },
+      { color: green, pts: [[10, 11], [12, 13]] },
+    ])
+    common(layer, [green, amber, blue], [4, 0, 4])
+    expect(vertices(layer.group.children[0])).toEqual([[0, 0], [1, 0], [10, 11], [12, 13]])
+    expect(vertices(layer.group.children[2])).toEqual([[2, 3], [4, 5], [4, 5], [6, 7]])
+    layer.dispose()
+  })
+
   it('A1B1-L04 compact Ground creates one segment', () => {
     const projection = project(ground())
     expect(projection).toEqual({ polylines: groundPolylines, refusal: null })
@@ -218,7 +251,7 @@ describe('unmounted Solar graph overlay layer', () => {
     expect(projection).toEqual({ polylines: [
       ...roofPolylines.slice(0, 3),
       { color: purple, pts: [[-.25, -.25], [.25, -.25], [.25, .25], [-.25, .25], [-.25, -.25]] },
-      roofPolylines[3], { color: pink, pts: [[1, 0], [1, 2]] },
+      roofPolylines[3], { color: pink, pts: [[1, 0], [1, 2]], route: { id: U('route', 2), kind: 'feeder' } },
     ], refusal: null })
     expect(projection.polylines).toHaveLength(6)
     expect(projection.polylines.reduce((n, line) => n + line.pts.length, 0)).toBe(21)

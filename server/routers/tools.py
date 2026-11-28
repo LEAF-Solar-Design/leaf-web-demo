@@ -8,17 +8,24 @@ section 7) — it now returns 202 {job_id}; `?wait=1` keeps the old sync shape.
 from __future__ import annotations
 
 from typing import Any, Dict
+import os
+import json
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import customization_service
+import customization_flags
 import deps
 import entitlements
 import investor_demo
 import tool_envelopes
 from customization_flags import enabled as customization_enabled
 from envelopes import ErrorCode, error_obj, with_envelope_fields
+from branch_tools import dev_catalog, run_receipts, sync_receipts, tenant_catalog, tenant_publish, online_signer
 
 router = APIRouter()
 
@@ -52,6 +59,183 @@ def published_revocations(tenant=Depends(deps.require_active_tenant)) -> Respons
     if raw is None:
         return JSONResponse({"detail": "no_revocation_list"}, status_code=404, headers=_PUBLISHED_CACHE)
     return Response(raw, media_type="application/json", headers=_PUBLISHED_CACHE)
+
+
+_DEV_CACHE = {"Cache-Control": "no-store"}
+
+
+def _dev_visible(tenant) -> bool:
+    return (os.environ.get("LEAF_BRANCH_DEV_TOOLS") == "1"
+            and str(tenant) in customization_flags.internal_tenants())
+
+
+def _dev_missing() -> Response:
+    return JSONResponse({"detail": "tool_not_published"}, status_code=404, headers=_DEV_CACHE)
+
+
+@router.get("/api/tool-envelopes/dev")
+def dev_tools(tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _dev_visible(tenant):
+        return _dev_missing()
+    entries = dev_catalog.read_catalog()
+    if entries is None:
+        return _dev_missing()
+    return JSONResponse({"tools": [entry.metadata for entry in entries]}, headers=_DEV_CACHE)
+
+
+@router.get("/api/tool-envelopes/dev/{name}/{version}/package")
+def dev_package(name: str, version: str, tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _dev_visible(tenant) or not tool_envelopes.valid_identity(name, version):
+        return _dev_missing()
+    for entry in dev_catalog.read_catalog() or []:
+        if entry.metadata["name"] == name and entry.metadata["version"] == version:
+            return FileResponse(entry.package, media_type="application/zip", headers=_DEV_CACHE)
+    return _dev_missing()
+
+
+def _dev_receipt_tenant(name: str, version: str, tenant=Depends(deps.require_active_tenant)):
+    if not _dev_visible(tenant) or not tool_envelopes.valid_identity(name, version):
+        # Match the dev transport's plain 404 before validating receipt fields.
+        raise StarletteHTTPException(404, detail="tool_not_published", headers=_DEV_CACHE)
+    return tenant
+
+
+@router.post("/api/tool-envelopes/dev/{name}/{version}/receipts", status_code=204)
+def dev_receipt(name: str, version: str, receipt: sync_receipts.Receipt = Body(...),
+                tenant=Depends(_dev_receipt_tenant)) -> Response:
+    digest = receipt["package_digest"].lower()
+    entries = (entry.metadata for entry in dev_catalog.read_catalog() or [])
+    if not any(entry["name"] == name and entry["version"] == version and entry["package_digest"] == digest
+               for entry in entries):
+        return _dev_missing()
+    subject = getattr(tenant, "subject", None) or f"tenant:{tenant}"
+    if not sync_receipts.limiter.admit(subject):
+        return JSONResponse({"detail": "rate_limited"}, status_code=429, headers=_DEV_CACHE)
+    store = customization_service.CustomizationService.configured().store
+    sync_receipts.append(store, str(tenant), subject, name, version, receipt)
+    return Response(status_code=204, headers=_DEV_CACHE)
+
+
+_TENANT_CACHE = {"Cache-Control": "no-store"}
+
+
+def _plugin_builder_visible(tenant) -> bool:
+    return customization_flags.plugin_builder_enabled(str(tenant))
+
+
+def _tenant_missing(detail: str = "tool_not_published") -> Response:
+    return JSONResponse({"detail": detail}, status_code=404, headers=_TENANT_CACHE)
+
+
+@router.get("/api/tool-envelopes/tenant")
+def tenant_tools(tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _plugin_builder_visible(tenant):
+        return _tenant_missing()
+    entries = tenant_catalog.list_latest_versions(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant))
+    try:
+        tenant_catalog.record_plugin_check(
+            os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant), datetime.now(timezone.utc))
+    except Exception:
+        pass
+    return JSONResponse({"tools": entries, "workspace_id": str(tenant)}, headers=_TENANT_CACHE)
+
+
+@router.get("/api/tool-envelopes/tenant/revocations")
+def tenant_revocations(tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _plugin_builder_visible(tenant):
+        return _tenant_missing()
+    raw = tenant_catalog.revocations_bytes(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant))
+    if raw is None:
+        return _tenant_missing("no_revocation_list")
+    now = datetime.now(timezone.utc)
+    try:
+        issued_at = datetime.fromisoformat(json.loads(raw)["issued_at"].replace("Z", "+00:00"))
+        if now - issued_at > timedelta(days=3):
+            raw = tenant_publish.refresh_revocations(
+                os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant), online_signer.configured_signer(), now)
+    except (online_signer.SignerUnavailable, tenant_publish.TenantPublishError,
+            tenant_catalog.TenantCatalogError, OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass  # Serve the last signed list if refresh is unavailable.
+    return Response(raw, media_type="application/json", headers=_TENANT_CACHE)
+
+
+@router.get("/api/tool-envelopes/tenant/status")
+def tenant_status(tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _plugin_builder_visible(tenant):
+        return _tenant_missing()
+    workspace = deps.workspace_view(tenant)
+    return JSONResponse({
+        "workspace_id": str(tenant),
+        "workspace_name": workspace.get("name") if isinstance(workspace, dict) else None,
+        "last_plugin_check_at": tenant_catalog.plugin_check_at(
+            os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant)),
+    }, headers=_TENANT_CACHE)
+
+
+@router.post("/api/tool-envelopes/tenant/{name}/{version}/receipts", status_code=204)
+async def tenant_receipt(name: str, version: str, request: Request,
+                         tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _plugin_builder_visible(tenant) or not tool_envelopes.valid_identity(name, version):
+        return _tenant_missing()
+
+    def refused(status, detail):
+        return JSONResponse({"detail": detail}, status_code=status, headers=_TENANT_CACHE)
+
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        return refused(415, "unsupported_media_type")
+    length = request.headers.get("content-length")
+    if length is not None:
+        try:
+            if int(length) > run_receipts.MAX_BODY_BYTES:
+                return refused(413, "receipt_too_large")
+            if int(length) < 0:
+                return refused(422, "invalid_receipt")
+        except ValueError:
+            return refused(422, "invalid_receipt")
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > run_receipts.MAX_BODY_BYTES:
+            return refused(413, "receipt_too_large")
+        raw.extend(chunk)
+    try:
+        receipt = run_receipts.parse(bytes(raw))
+    except run_receipts.RunReceiptError as exc:
+        return refused(exc.status, exc.code)
+    digest = await run_in_threadpool(tenant_catalog.published_digest,
+        os.environ.get("LEAF_TENANT_TOOLS_DIR", ""), str(tenant), name, version)
+    if digest is None or digest != receipt["package_digest"]:
+        return _tenant_missing()
+    subject = getattr(tenant, "subject", None) or f"tenant:{tenant}"
+    if not run_receipts.subject_limiter.admit(subject) or not run_receipts.tenant_limiter.admit(str(tenant)):
+        return refused(429, "rate_limited")
+    try:
+        store = customization_service.CustomizationService.configured().store
+        await run_in_threadpool(run_receipts.append, store, str(tenant), subject, name, version, receipt)
+    except run_receipts.RunReceiptError as exc:
+        return refused(exc.status, exc.code)
+    except Exception:
+        return refused(503, "receipt_store_unavailable")
+    return Response(status_code=204, headers=_TENANT_CACHE)
+
+
+@router.get("/api/tool-envelopes/tenant/{name:path}/{version}/envelope")
+def tenant_envelope(name: str, version: str, tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _plugin_builder_visible(tenant) or not tool_envelopes.valid_identity(name, version):
+        return _tenant_missing()
+    raw = tenant_catalog.envelope_bytes(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant), name, version)
+    if raw is None:
+        return _tenant_missing()
+    return Response(raw, media_type="application/json", headers=_TENANT_CACHE)
+
+
+@router.get("/api/tool-envelopes/tenant/{name:path}/{version}/package")
+def tenant_package(name: str, version: str, tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _plugin_builder_visible(tenant) or not tool_envelopes.valid_identity(name, version):
+        return _tenant_missing()
+    path = tenant_catalog.package_path(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant), name, version)
+    if path is None:
+        return _tenant_missing()
+    return FileResponse(path, media_type="application/zip", headers=_TENANT_CACHE)
 
 
 @router.get("/api/tool-envelopes/{name:path}/{version}/envelope")

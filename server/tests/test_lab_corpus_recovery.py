@@ -73,6 +73,16 @@ def rig(monkeypatch):
             pass
 
         def execute(self, sql, params):
+            if sql.startswith('SELECT job_id, tenant_id, org_id, project_id, tool, idempotency_key, status, attempt '):
+                assert 'FROM async_jobs WHERE tenant_id=%s AND org_id=%s AND project_id=%s ' in sql
+                assert sql.endswith('AND idempotency_key = ANY(%s)')
+                assert params[:3] == (TENANT, TENANT, PROJECT)
+                state.sql_calls.append((sql, params))
+                self.rows = [copy.deepcopy(state.jobs[match['job_id']])
+                             for intent in params[3] for match in state.matches.get(intent, [])]
+                self.batched = True
+                return
+            self.batched = False
             assert sql.startswith('SELECT job_id,status,attempt,corpus_cancel_json,corpus_cleanup_json ')
             assert 'FROM async_jobs WHERE tenant_id=%s AND org_id=%s AND project_id=%s ' in sql
             assert 'AND idempotency_key=%s' in sql and sql.endswith('LIMIT 2')
@@ -81,7 +91,7 @@ def rig(monkeypatch):
             self.rows = copy.deepcopy(state.matches.get(params[3], []))
 
         def fetchall(self):
-            assert len(self.rows) <= 2
+            assert self.batched or len(self.rows) <= 2
             return self.rows
 
     monkeypatch.setattr(recovery.platform_link, 'platform_db', lambda: SimpleNamespace(cursor=Cursor))
@@ -417,3 +427,260 @@ def test_invalid_binding_and_job_store_outage_are_sanitized(rig, monkeypatch):
     assert response.status_code == 503
     assert response.json() == {'detail': 'lab_store_unavailable'}
     assert PRIVATE not in response.text
+
+
+def cleanup_plan(rig):
+    response = rig.http.get(URL + '?include_cleanup=true')
+    assert response.status_code == 200, response.text
+    assert response.headers['cache-control'] == 'no-store'
+    result = response.json()
+    assert result['schema'] == recovery.SCHEMA_V2
+    assert result['execution_allowed'] is False and result['confirmation_required'] is True
+    assert result['digest'] == graph_digest({k: v for k, v in result.items() if k != 'digest'})
+    assert PRIVATE not in response.text
+    for block in result['blocks']:
+        evidence = block['cleanup_evidence']
+        assert set(evidence) == {'schema', 'job_id', 'attempt', 'state', 'cancel', 'receipt'}
+        assert evidence['schema'] == recovery.CLEANUP_SCHEMA
+        assert evidence['job_id'] == block['job_id']
+    return result
+
+
+def set_cleanup(rig, marker='reaped', attempt=1):
+    job = rig.jobs['original-producer-0']
+    job.update(attempt=attempt, progress='closed')
+    tag = {'run_id': 'source-run', 'block_id': 'oak-volatility',
+           'attempt': attempt, 'fence': 7, 'reason': 'deadline'}
+    receipt = {'attempt': attempt, 'cancel': copy.deepcopy(tag), marker: True}
+    row = rig.matches[job['idempotency_key']][0]
+    row.update(attempt=attempt, corpus_cancel_json=tag, corpus_cleanup_json=receipt)
+    return row
+
+
+@pytest.mark.parametrize('marker,attempt', [('reaped', 1), ('not_started', 0)])
+def test_opt_in_projects_exact_native_cleanup_without_writes(rig, marker, attempt):
+    row = set_cleanup(rig, marker, attempt)
+    if marker == 'reaped':
+        row['corpus_cleanup_json']['worker_id'] = PRIVATE
+    before = copy.deepcopy((rig.source, rig.artifact, rig.jobs, rig.matches))
+    result = cleanup_plan(rig)
+    evidence = result['blocks'][0]['cleanup_evidence']
+    assert evidence == {'schema': recovery.CLEANUP_SCHEMA, 'job_id': 'original-producer-0',
+        'attempt': attempt, 'state': 'confirmed_' + marker,
+        'cancel': row['corpus_cancel_json'], 'receipt': {'attempt': attempt,
+            'cancel': row['corpus_cancel_json'], 'reaped': marker == 'reaped',
+            'not_started': marker == 'not_started'}}
+    assert result['blocks'][0]['reason_category'] == 'cancelled'
+    assert result['retained_completed_block_ids'] == ['birch-trend', 'maple-holdout']
+    assert result['draft_graph'] is None
+    assert (rig.source, rig.artifact, rig.jobs, rig.matches) == before
+    assert len(rig.sql_calls) == len(rig.job_calls) == 6
+
+
+@pytest.mark.parametrize('mode', [
+    'missing', 'wrong-attempt', 'bool-attempt', 'wrong-tag', 'wrong-fence', 'foreign-run',
+    'foreign-block', 'bad-reason', 'bool-fence', 'extra-tag', 'extra-receipt',
+    'both-true', 'neither-true', 'nonbool', 'nested-bool-attempt', 'malformed',
+    'zero-fence', 'negative-fence', 'wrong-tag-attempt',
+])
+def test_opt_in_invalid_cleanup_never_confirms_or_echoes_untrusted_fields(rig, mode):
+    row = set_cleanup(rig)
+    tag, receipt = row['corpus_cancel_json'], row['corpus_cleanup_json']
+    if mode == 'missing': row['corpus_cleanup_json'] = None
+    elif mode == 'wrong-attempt': receipt['attempt'] = 2
+    elif mode == 'bool-attempt': receipt['attempt'] = True
+    elif mode == 'wrong-tag': receipt['cancel']['reason'] = 'cancel'
+    elif mode == 'wrong-fence': receipt['cancel']['fence'] = 8
+    elif mode == 'foreign-run': tag['run_id'] = PRIVATE
+    elif mode == 'foreign-block': tag['block_id'] = PRIVATE
+    elif mode == 'bad-reason': tag['reason'] = PRIVATE
+    elif mode == 'bool-fence': tag['fence'] = True
+    elif mode == 'zero-fence': tag['fence'] = 0
+    elif mode == 'negative-fence': tag['fence'] = -1
+    elif mode == 'wrong-tag-attempt': tag['attempt'] = 2
+    elif mode == 'extra-tag': tag['private'] = PRIVATE
+    elif mode == 'extra-receipt': receipt['private'] = PRIVATE
+    elif mode == 'both-true': receipt['not_started'] = True
+    elif mode == 'neither-true': receipt['reaped'] = False
+    elif mode == 'nonbool': receipt['reaped'] = 1
+    elif mode == 'nested-bool-attempt': receipt['cancel']['attempt'] = True
+    else: row['corpus_cancel_json'] = PRIVATE
+    result = cleanup_plan(rig)
+    evidence = result['blocks'][0]['cleanup_evidence']
+    assert evidence['state'] == 'unconfirmed' and evidence['receipt'] is None
+    assert result['blocks'][0]['reason_category'] == plan(rig)['blocks'][0]['reason_category']
+
+
+@pytest.mark.parametrize('status', ['failed', 'cancelled', 'running'])
+def test_opt_in_status_and_closed_progress_are_not_cleanup_proof(rig, status):
+    job = rig.jobs['original-producer-0']
+    job.update(status=status, progress='closed')
+    rig.matches[job['idempotency_key']][0]['status'] = status
+    assert cleanup_plan(rig)['blocks'][0]['cleanup_evidence']['state'] == 'unconfirmed'
+
+
+@pytest.mark.parametrize('mode', ['attempt', 'status', 'binding', 'receipt', 'cancel'])
+def test_opt_in_changed_bounded_read_refuses_combined_proof(rig, monkeypatch, mode):
+    set_cleanup(rig)
+    original = recovery.lookup_job
+    calls = 0
+
+    def changed(*args):
+        nonlocal calls
+        calls += 1
+        receipt = original(*args)
+        if calls == 2:
+            if mode == 'attempt': receipt['job']['attempt'] = 2
+            elif mode == 'status': receipt['job']['status'] = 'running'
+            elif mode == 'binding': receipt['job'].update(project_id=PRIVATE, job_id=PRIVATE)
+            elif mode == 'receipt': receipt['cleanup']['reaped'] = False
+            else: receipt['cancel']['fence'] = 8
+        return receipt
+
+    monkeypatch.setattr(recovery, 'lookup_job', changed)
+    result = cleanup_plan(rig)
+    evidence = result['blocks'][0]['cleanup_evidence']
+    assert evidence['state'] == 'unconfirmed'
+    assert evidence['attempt'] is None and evidence['cancel'] is None and evidence['receipt'] is None
+    assert result['blocks'][0]['reason_category'] == 'cancelled'
+
+
+@pytest.mark.parametrize('field', ['tenant_id', 'org_id', 'project_id', 'idempotency_key', 'tool'])
+def test_opt_in_foreign_binding_never_projects_job_or_cleanup(rig, field):
+    set_cleanup(rig)
+    rig.jobs['original-producer-0'][field] = PRIVATE
+    evidence = cleanup_plan(rig)['blocks'][0]['cleanup_evidence']
+    assert evidence == {'schema': recovery.CLEANUP_SCHEMA, 'job_id': None,
+                        'attempt': None, 'state': 'unconfirmed', 'cancel': None, 'receipt': None}
+
+
+@pytest.mark.parametrize('attempt', [None, -1, True, '1'])
+def test_opt_in_malformed_native_attempt_never_confirms(rig, attempt):
+    row = set_cleanup(rig)
+    row['attempt'] = rig.jobs['original-producer-0']['attempt'] = attempt
+    evidence = cleanup_plan(rig)['blocks'][0]['cleanup_evidence']
+    assert evidence['attempt'] is None and evidence['state'] == 'unconfirmed'
+    assert evidence['cancel'] is None and evidence['receipt'] is None
+
+
+def test_opt_in_missing_and_foreign_jobs_keep_identifiers_private(rig):
+    rig.configure([None, 'failed'], ['oak-volatility', 'birch-trend'])
+    job = rig.jobs.pop('original-producer-1')
+    job.update(job_id=PRIVATE, project_id=ACTOR)
+    rig.jobs[PRIVATE] = job
+    rig.matches[job['idempotency_key']][0]['job_id'] = PRIVATE
+    result = cleanup_plan(rig)
+    assert [block['reason_category'] for block in result['blocks']] == ['missing_job', 'job_binding_mismatch']
+    assert all(block['cleanup_evidence']['job_id'] is None for block in result['blocks'])
+
+
+@pytest.mark.parametrize('revoke_at', [1, 2])
+def test_opt_in_revocation_refuses_before_private_read_or_response(rig, revoke_at):
+    rig.revoke_at = revoke_at
+    response = rig.http.get(URL + '?include_cleanup=true')
+    assert response.status_code == 422
+    assert response.json() == {'detail': 'lab_corpus_project_refused'}
+    assert 'original-producer' not in response.text and PRIVATE not in response.text
+    assert len(rig.sql_calls) == (0 if revoke_at == 1 else 6)
+
+
+def test_opt_in_foreign_tenant_is_refused_before_private_access(rig):
+    rig.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        ACTOR, org_id=ACTOR, tier='hosted_pro', subject='auth0|foreign', authority_resolved=True)
+    response = rig.http.get(URL + '?include_cleanup=true')
+    assert response.status_code == 404
+    assert not rig.sql_calls and not rig.ledger_calls
+
+
+def test_v1_default_and_false_remain_identical_and_v2_digest_covers_cleanup(rig):
+    row = set_cleanup(rig)
+    default = rig.http.get(URL)
+    explicit = rig.http.get(URL + '?include_cleanup=false')
+    assert default.content == explicit.content
+    v1, v2 = default.json(), cleanup_plan(rig)
+    assert all('cleanup_evidence' not in block for block in v1['blocks'])
+    unsigned = copy.deepcopy(v2)
+    unsigned.pop('digest')
+    unsigned['schema'] = recovery.SCHEMA
+    for block in unsigned['blocks']:
+        block.pop('cleanup_evidence')
+    assert graph_digest(unsigned) == v1['digest']
+    row['corpus_cancel_json']['fence'] = 9
+    row['corpus_cleanup_json']['cancel']['fence'] = 9
+    changed = cleanup_plan(rig)
+    assert changed['digest'] != v2['digest']
+    assert changed['blocks'][0]['cleanup_evidence']['state'] == 'confirmed_reaped'
+
+
+JOBS_URL = '/api/lab/runs/source-run/corpus-jobs'
+
+
+@pytest.mark.parametrize('run_state,job_states,expected', [
+    ('queued', ['submitted', None], ['queued', 'not submitted']),
+    ('running', ['submitted', 'running', 'failed'], ['queued', 'running', 'failed']),
+    ('finished', ['complete', 'failed', None], ['completed', 'failed', 'unavailable']),
+])
+def test_corpus_jobs_projects_status_and_pinned_inputs(rig, run_state, job_states, expected):
+    rig.configure(job_states)
+    rig.source['state'] = run_state
+    response = rig.http.get(JOBS_URL)
+    assert response.status_code == 200, response.text
+    assert response.headers['Cache-Control'] == 'no-store'
+    result = response.json()
+    assert result['corpus'] is True
+    assert result['source'] == {key: rig.source[key] for key in
+                                ('run_id', 'graph_revision', 'graph_sha256', 'input_digest')}
+    assert [block['status'] for block in result['blocks']] == expected
+    for i, item in enumerate(result['blocks']):
+        block = rig.graph['blocks'][i]
+        assert item['block_id'] == block['id']
+        assert item['job_id'] == (None if job_states[i] is None else f'original-producer-{i}')
+        assert item['inputs'] == {
+            'corpus_sha256': block['settings']['corpus']['sha256'],
+            'suite_sha256': block['settings']['suite']['sha256'],
+            'settings_sha256': graph_digest(block['settings']),
+        }
+    assert str(ACTOR) not in response.text and PRIVATE not in response.text
+    assert len(rig.sql_calls) == 1 and not rig.job_calls
+    assert rig.authorizations == 2
+
+
+def test_corpus_jobs_withholds_mismatched_and_ambiguous_jobs(rig):
+    rig.configure(['failed', 'complete', 'running'])
+    rig.jobs['original-producer-0']['project_id'] = 'other-project'
+    rig.jobs['original-producer-1']['tool'] = 'other-operation'
+    intent = 'lab:source-run:corpus-2:corpus:v1'
+    rig.matches[intent].append(rig.matches[intent][0])
+    response = rig.http.get(JOBS_URL)
+    assert response.status_code == 200, response.text
+    assert all(item['status'] == 'unavailable' and item['job_id'] is None and item['attempt'] is None
+               for item in response.json()['blocks'])
+    assert 'original-producer' not in response.text
+
+
+@pytest.mark.parametrize('revoke_at', [1, 2])
+def test_corpus_jobs_enforces_live_access_before_read_and_return(rig, revoke_at):
+    rig.revoke_at = revoke_at
+    response = rig.http.get(JOBS_URL)
+    assert response.status_code == 422
+    assert response.json() == {'detail': 'lab_corpus_project_refused'}
+    assert len(rig.sql_calls) == revoke_at - 1
+
+
+def test_corpus_jobs_ignores_non_corpus_runs_without_reading_private_inputs(rig):
+    rig.source['corpus_authority_json'] = None
+    response = rig.http.get(JOBS_URL)
+    assert response.status_code == 200
+    assert response.json() == {'corpus': False}
+    assert not rig.ledger_calls and not rig.sql_calls
+
+
+def test_corpus_jobs_include_piped_corpus_blocks_in_mixed_graphs(rig):
+    rig.configure(['failed', 'complete'], ['oak-volatility', 'birch-trend'])
+    rig.graph['blocks'][1]['registry']['id'] = 'other-operation'
+    rig.graph['pipes'] = [{'from': {'node': 'oak-volatility', 'port': 'result'},
+                           'to': {'node': 'birch-trend', 'port': 'result'}}]
+    rig.pin()
+    reply = rig.http.get(JOBS_URL)
+    assert reply.status_code == 200, reply.text
+    assert [item['block_id'] for item in reply.json()['blocks']] == ['oak-volatility']

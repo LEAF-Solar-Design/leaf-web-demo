@@ -502,20 +502,38 @@ class TestProjectBoundary:
         with pytest.raises(p.ProofRefused):
             p.prepare_runtime(admitted(c), effects=c.effects, scope=c.scope)
 
-    def test_build_provenance(self):
-        c = case()
-        plan = admitted(c)
-        result = p.prepare_runtime(plan, effects=c.effects, scope=c.scope)
-        assert result.requirements == tuple(map(file, ("server/requirements.txt", "platform/requirements.txt", "server/requirements-auth.txt")))
-        assert result.python == "3.fake" and dict(result.toolchain)["wasm-pack"] == "1.fake"
-        assert result.vendor_source == (file("vendor/engine/Cargo.toml"), file("vendor/engine/worker-browser.mjs"))
-        assert result.engine_outputs == (file("engine.js"), file("engine_bg.wasm"))
-        build = c.launches[-1]
-        assert build.argv == ("wasm-pack", "build", "--release", "--target", "web", ".", "--out-dir", str(ROOT / "cad-engine"), "--out-name", "engine")
-        assert build.environment["CARGO_TARGET_DIR"] == str(ROOT / "cargo-target")
-        assert build.cwd == ROOT / "vendor-source"
-        assert result.engine_root == ROOT / "cad-engine" and result.cargo_target_root == ROOT / "cargo-target"
-        assert build.output_path is None and build.deadline > 0 and len(c.scope.cleanups) == 5
+    def test_build_provenance(self, monkeypatch):
+        sdk_paths = r"C:\SDK\um\x64;C:\SDK\ucrt\x64"
+        for windows, library_paths, expected in (
+            (True, sdk_paths, sdk_paths),
+            (True, None, None),
+            (True, " ", None),
+            (False, "/sdk/lib", None),
+        ):
+            monkeypatch.setattr(p, "_WINDOWS_RUNTIME_HOST", windows)
+            c = case()
+            environ = {"PATH": "toolchain", "LIBPATH": "unrelated"}
+            if library_paths is not None:
+                environ["LIB"] = library_paths
+            captured = p._host_environment(environ)
+            c.host.facts = replace(c.host.facts, environment=captured,
+                windows_library_paths=p._windows_library_paths(environ))
+            plan = admitted(c)
+            result = p.prepare_runtime(plan, effects=c.effects, scope=c.scope)
+            assert result.requirements == tuple(map(file, ("server/requirements.txt", "platform/requirements.txt", "server/requirements-auth.txt")))
+            assert result.python == "3.fake" and dict(result.toolchain)["wasm-pack"] == "1.fake"
+            assert result.vendor_source == (file("vendor/engine/Cargo.toml"), file("vendor/engine/worker-browser.mjs"))
+            assert result.engine_outputs == (file("engine.js"), file("engine_bg.wasm"))
+            build = c.launches[-1]
+            assert build.argv == ("wasm-pack", "build", "--release", "--target", "web", ".", "--out-dir", str(ROOT / "cad-engine"), "--out-name", "engine")
+            assert build.environment["CARGO_TARGET_DIR"] == str(ROOT / "cargo-target")
+            assert build.cwd == ROOT / "vendor-source"
+            assert result.engine_root == ROOT / "cad-engine" and result.cargo_target_root == ROOT / "cargo-target"
+            assert build.output_path is None and build.deadline > 0 and len(c.scope.cleanups) == 5
+            assert "LIB" not in captured
+            assert all("LIB" not in probe.environment for probe in c.launches[:-1])
+            assert all("LIBPATH" not in process.environment for process in c.launches)
+            assert build.environment.get("LIB") == expected
         for corruption in ({"engine_outputs": (file("engine.js", ""), file("engine_bg.wasm"))},
                            {"requirements": ()}, {"toolchain": ()}):
             c = case()
@@ -2250,6 +2268,25 @@ def g_arm(monkeypatch, platform):
     return SimpleNamespace(lease=lease, calls=calls, sent=sent, child=child, plan=c.plan)
 
 
+@pytest.mark.parametrize(("platform", "venv", "direct"), [
+    ("win32", True, True),
+    ("win32", False, False),
+    ("darwin", True, False),
+])
+def test_guardian_launch_retains_python_process(monkeypatch, platform, venv, direct):
+    python = "venv/python" if venv else "base/python"
+    monkeypatch.setattr(p, "sys", SimpleNamespace(
+        executable=python, _base_executable="base/python",
+        prefix="venv" if venv else "base", base_prefix="base",
+        modules=p.sys.modules,
+    ))
+    case = g_arm(monkeypatch, platform)
+    argv, kwargs = case.calls[0]
+    assert argv[0] == ("base/python" if direct else python)
+    assert argv[1:3] == ("-B", "-c")
+    assert kwargs["env"].get("__PYVENV_LAUNCHER__") == (python if direct else None)
+
+
 def test_teardown_guardian_process_exits_hard(monkeypatch):
     c = g_arm(monkeypatch, "darwin")
     code = c.calls[0][0][3]
@@ -2261,16 +2298,26 @@ def test_teardown_guardian_process_exits_hard(monkeypatch):
     def exit_hard(code):
         raise HardExit(code)
     flushed = []
+    wire = io.BytesIO()
+    stdout = io.TextIOWrapper(wire, encoding="ascii", newline="\r\n")
+    flush_stdout = stdout.flush
+    def flush():
+        flushed.append("stdout")
+        flush_stdout()
+    stdout.flush = flush
     monkeypatch.setattr(p.os, "_exit", exit_hard)
     monkeypatch.setattr(p, "sys", SimpleNamespace(
-        stdout=SimpleNamespace(flush=lambda: flushed.append("stdout")),
-        stderr=SimpleNamespace(flush=lambda: flushed.append("stderr"))))
+        stdout=stdout, stderr=SimpleNamespace(flush=lambda: flushed.append("stderr"))))
     for result, expected in ((0, 0), (3, 3), (None, 1), (True, 1), (256, 1), (-1, 1)):
-        monkeypatch.setattr(p, "_guardian_entry", lambda: result)
+        def entry():
+            stdout.write("OK\n")
+            return result
+        monkeypatch.setattr(p, "_guardian_entry", entry)
         with pytest.raises(HardExit) as error:
             p._guardian_process_main()
         assert error.value.code == expected
         assert flushed[-2:] == ["stdout", "stderr"]
+    assert wire.getvalue() == b"OK\n" * 6
     def crash():
         raise RuntimeError("entry failed")
     monkeypatch.setattr(p, "_guardian_entry", crash)
@@ -5808,16 +5855,20 @@ def test_r14f1_canonical_replay_independent(monkeypatch):
 def test_r14f1_canonical_child_bootstrap(monkeypatch, capsys):
     from contextlib import contextmanager
     sizing, called = p._sizing_module(), []
-    replay = object()
+    replay = SimpleNamespace(public=lambda: {}, token="test", fixture_map={})
     monkeypatch.setattr(sizing, "read_private_plan", lambda env: called.append("pins") or replay)
+    real_bootstrap = sizing.bootstrap_child
     def bootstrap(plan, role, environment):
-        assert plan is replay and role == "canonical"
-        called.append("bootstrap")
-        return environment
+        assert plan is replay and role == "canonical-heartbeat"
+        return real_bootstrap(plan, role, environment, modules=object())
+    def validate(plan, environment, **options):
+        assert plan is replay
+        called.append("validate")
     monkeypatch.setattr(sizing, "bootstrap_child", bootstrap)
+    monkeypatch.setattr(sizing, "_validate_plan", validate)
     @contextmanager
     def connection(environment, deadline):
-        assert called == ["pins", "bootstrap"] and environment["DATABASE_URL"] == "fakedb"
+        assert called == ["pins", "pins", "validate"] and environment["DATABASE_URL"] == "fakedb"
         yield SimpleNamespace(execute=lambda sql, args: SimpleNamespace(fetchone=lambda: None))
     monkeypatch.setattr(p, "_project_connection", connection)
     request = dict(purpose="heartbeat", tool_name="solar-size-strings", evidence=None,

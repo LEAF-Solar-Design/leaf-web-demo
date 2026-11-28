@@ -225,7 +225,19 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
             elif ok is not False:
                 raise BrokerReceiptRejected()
             return body
-        return resp.json()
+        body = resp.json()
+        if (tool.get("name") == "count-modules"
+                and any(params.get(key) is not None for key in ("compare_selections", "rank_windows"))
+                and isinstance(body, dict) and body.get("ok") is True):
+            from envelopes import ErrorCode, err_envelope
+
+            result = body.get("result")
+            # Older comparison results predate the version field and use the v1 layout.
+            version = result.get("schema_version", 1) if isinstance(result, dict) else None
+            if type(version) is not int or version != 1:
+                return err_envelope(ErrorCode.INTERNAL, "Unsupported module comparison schema_version; expected integer 1.",
+                                    retryable=False, tool=tool["name"], version=body.get("version"))
+        return body
     except (requests.ConnectionError, requests.Timeout) as exc:
         if file_only:
             reason = "timeout" if isinstance(exc, requests.Timeout) else "connect"

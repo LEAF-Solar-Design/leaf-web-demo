@@ -37,6 +37,7 @@ LAB_PATHS = [
     "/api/lab/runs",
     "/api/lab/runs",
     "/api/lab/runs/{run_id}",
+    "/api/lab/runs/{run_id}/corpus-jobs",
     "/api/lab/runs/{run_id}/recovery-plan",
     "/api/lab/runs/{run_id}/events",
     "/api/lab/runs/{run_id}/cancel",
@@ -632,6 +633,17 @@ def test_b03_private_build_status_inventory_requires_active_studio_tenant():
     assert all(deps.require_active_tenant in [d.call for d in route.dependant.dependencies] for route in routes)
 
 
+def test_b03_candidate_readback_inventory_requires_active_studio_tenant():
+    from routers import browser_project
+    app = FastAPI()
+    app.include_router(browser_project.router)
+    routes = [route for path, route in iter_leaf_routes(app.routes)
+              if path == B03_PRIVATE_BUILD_PATH + '/candidate']
+    assert len(routes) == 1
+    assert routes[0].methods == {'GET'}
+    assert deps.require_active_tenant in [d.call for d in routes[0].dependant.dependencies]
+
+
 B03_PRIVATE_CHART_STATE_PATH = B03_PRIVATE_BUILD_PATH + '/chart-state'
 
 
@@ -642,3 +654,15 @@ def test_b03_chart_state_inventory_requires_active_studio_tenant():
     assert len(routes)==2
     assert {method for route in routes for method in route.methods}=={'GET','PUT'}
     assert all(deps.require_active_tenant in [d.call for d in route.dependant.dependencies] for route in routes)
+
+
+def test_retained_arlo_activation_route_inventory():
+    from test_arlo_lab_inputs import api
+
+    app = FastAPI()
+    app.include_router(api.router)
+    path = "/api/projects/{project_id}/arlo-inputs/{original_id}/activate"
+    routes = [route for actual, route in iter_leaf_routes(app.routes) if actual == path]
+    assert len(routes) == 1
+    assert routes[0].methods == {"POST"}
+    assert api._get_lifecycle_actor in [dep.call for dep in routes[0].dependant.dependencies]

@@ -13,6 +13,23 @@ def insert(name, layer, x=0, y=0):
 
 
 class RoleDiscoveryTests(unittest.TestCase):
+    def test_mixed_evidence_groups_receive_one_role(self):
+        for block, layer, copies in [
+            ('Chimney', 'PV MODULES', 1),
+            ('Panel Type B', 'Roof Keepout', 2),
+            ('Skylight Panel', 'PV Roof', 5),
+        ]:
+            with self.subTest(block=block, layer=layer):
+                inserts = [insert(block, layer, x, 0) for x in range(copies)]
+                inserts.extend([insert('Panel 405', 'Roof Array'), insert('Outline', 'Roof')])
+                roles = discover_roles({'inserts': inserts})
+                candidates = roles['module']['candidates']
+                self.assertEqual([(r['block'], r['layer']) for r in candidates],
+                                 [('Panel 405', 'Roof Array')])
+                self.assertEqual([(r['block'], r['count']) for r in roles['obstruction']],
+                                 [(block, copies)])
+                self.assertEqual([r['block'] for r in roles['roof']], ['Outline'])
+
     def test_named_module_set_outranks_larger_geometric_competitor(self):
         intake = {'inserts': [insert('Panel type A', 'PV MODULES', i, i * 2) for i in range(7)]
                   + [insert('Anonymous', '0', i + 30, i) for i in range(12)],

@@ -25,7 +25,9 @@ describe('command transcript host styles', () => {
   })
   it('lets the log scroll within the host and hides only the reply composer', () => {
     const log = rule('.command-transcript-host .converse-log')
-    expect(log).toMatch(/max-height:\s*min\(40vh,\s*420px\)\s*;/)
+    // P1: grows to 680 px at desktop heights, never below the old 420 px cap,
+    // and reserves the chrome so the assistant head stays on screen.
+    expect(log).toMatch(/max-height:\s*max\(min\(40vh,\s*420px\),\s*min\(64dvh,\s*680px,\s*calc\(100dvh - 320px\)\)\)\s*;/)
     expect(log).toMatch(/overflow-y:\s*auto\s*;/)
     expect(rule('.command-transcript-host .converse-input')).toMatch(/display:\s*none\s*;/)
     const hidden = css.split('}').filter(block => block.includes('.command-transcript-host') && /display:\s*none/.test(block))

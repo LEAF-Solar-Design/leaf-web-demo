@@ -386,7 +386,7 @@ describe('engine-truth readouts only for engine-parsed documents', () => {
     const session = mountSession()
     await openDocument(session)
     session.workers[0].emit(loadedMessage([LINE], 'one.dxf', [{ type: 'CIRCLE' }]))
-    expect(session.current.status).toBe('Drawing opened. Some objects can only be viewed.')
+    expect(session.current.status).toBe('Drawing opened.')
   })
 
   it('an engine refusal clears the list AND the engine-parsed claim, rather than showing an empty document', async () => {

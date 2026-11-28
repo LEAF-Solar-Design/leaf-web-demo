@@ -8,6 +8,12 @@ import './photoMaterialIntake.css'
 const message = error => humanizeError(error?.message || 'Photos could not be loaded. Try again.')
 const mergeRows = (rows, added) => [...new Map([...rows, ...added].map(row => [row.material_id, row])).values()]
 
+function previewProblem(status) {
+  if (status === 404 || status === 410) return 'This saved preview could not be found.'
+  if (status === 401 || status === 403) return 'Your account could not open this preview. Check your project access.'
+  return 'The preview could not be loaded. Retry to check again.'
+}
+
 // Remount every local byte, request and object URL when authority changes.
 export default function PhotoMaterialIntake({ projectId, onUploaded }) {
   const scope = useSyncExternalStore(subscribeActiveScope, readActiveScope, () => null)
@@ -27,37 +33,57 @@ function PhotoSession({ projectId, scope, onUploaded }) {
   const live = useRef(false)
   const running = useRef(false)
   const abort = useRef(null)
+  const listRequest = useRef(null)
   const urls = useRef(new Map())
+  const previewRequests = useRef(new Map())
   const current = () => live.current && readActiveScope() === scope
   const options = () => ({ signal: abort.current.signal, expectedScope: scope })
   const preview = async photo => {
-    if (!current() || urls.current.has(photo.material_id)) return
+    const id = photo.material_id
+    if (!current() || urls.current.has(id) || previewRequests.current.has(id)) return
+    const requestOptions = options()
+    const { signal } = requestOptions
+    previewRequests.current.set(id, signal)
+    const showPreview = value => setPreviews(previous => ({ ...previous, [id]: value }))
+    showPreview(undefined)
     try {
-      const blob = await readProjectPhotoPreview(projectId, photo.material_id, options())
-      if (!current() || urls.current.has(photo.material_id)) return
+      const blob = await readProjectPhotoPreview(projectId, id, requestOptions)
+      if (!current() || signal.aborted) return
       const url = URL.createObjectURL(blob)
-      urls.current.set(photo.material_id, url)
-      setPreviews(previous => ({ ...previous, [photo.material_id]: url }))
+      urls.current.set(id, url)
+      showPreview({ url })
     } catch (cause) {
-      if (current() && cause?.name !== 'AbortError') setError(message(cause))
+      if (current() && !signal.aborted && cause?.name !== 'AbortError') {
+        showPreview({ problem: previewProblem(cause?.status) })
+      }
+    } finally {
+      if (previewRequests.current.get(id) === signal) previewRequests.current.delete(id)
     }
   }
   const load = async (next = null) => {
+    if (!current() || listRequest.current) return
+    const requestOptions = options()
+    const { signal } = requestOptions
+    const active = () => current() && !signal.aborted
+    listRequest.current = signal
     setLoading(true)
     setError('')
     try {
-      const result = await listProjectPhotos(projectId, { ...options(), cursor: next })
-      if (!current()) return
+      const result = await listProjectPhotos(projectId, { ...requestOptions, cursor: next })
+      if (!active()) return
       const rows = result.materials || []
       setPhotos(previous => mergeRows(previous, rows))
       setCursor(result.next_cursor || null)
       for (const photo of rows) {
-        if (!current()) break
+        if (!active()) break
         await preview(photo)
       }
     } catch (cause) {
-      if (current() && cause?.name !== 'AbortError') setError(message(cause))
-    } finally { if (current()) setLoading(false) }
+      if (active() && cause?.name !== 'AbortError') setError(message(cause))
+    } finally {
+      if (listRequest.current === signal) listRequest.current = null
+      if (active()) setLoading(false)
+    }
   }
   useEffect(() => {
     live.current = true
@@ -66,6 +92,8 @@ function PhotoSession({ projectId, scope, onUploaded }) {
     const clear = () => {
       live.current = false
       abort.current.abort()
+      listRequest.current = null
+      previewRequests.current.clear()
       for (const url of urls.current.values()) URL.revokeObjectURL(url)
       urls.current.clear()
       setPhotos([]); setPreviews({}); setQueue([]); setBusy(false); setLoading(false)
@@ -124,10 +152,15 @@ function PhotoSession({ projectId, scope, onUploaded }) {
     {queue.some(item => item.state !== 'ready') && <ul aria-label="Photo upload progress">{queue.map((item, index) => item.state === 'ready' ? null : <li key={index}>
       <span>{item.file.name}</span> <span>{item.state === 'failed' ? item.detail : item.state === 'uploading' ? 'Uploading…' : 'Waiting'}</span>
     </li>)}</ul>}
-    <ul className="project-photo-grid" aria-label="Saved photos">{photos.map(photo => <li key={photo.material_id}>
-      {previews[photo.material_id] && <img src={previews[photo.material_id]} alt={photo.name} width="128" height="104" />}
-      <span>{photo.name}</span><small>Ready</small>
-    </li>)}</ul>
+    <ul className="project-photo-grid" aria-label="Saved photos">{photos.map(photo => {
+      const { url, problem } = previews[photo.material_id] ?? {}
+      return <li key={photo.material_id}>
+        {url && <img src={url} alt={photo.name} width="128" height="104" />}
+        <span>{photo.name}</span>
+        <small>{url ? 'Ready' : problem || 'Loading preview…'}</small>
+        {problem && <button type="button" aria-label={`Retry preview for ${photo.name}`} onClick={() => void preview(photo)}>Retry preview</button>}
+      </li>
+    })}</ul>
     {cursor && <button type="button" disabled={loading || busy} onClick={() => void load(cursor)}>Load more photos</button>}
   </section>
 }

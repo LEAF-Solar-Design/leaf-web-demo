@@ -361,8 +361,9 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   // Ops adds ready/desktop and signed-out/desktop triples.
   // WL32 adds one ready/desktop chooser-open triple.
   // WL39b adds invalid-vertex on desktop and phone.
-  assert.equal(previousTriples.length, 867)
-  assert.equal(triples(map).length, 833)
+  // Estimator (estimator-studio-tab-20261119) adds surface:estimator ready/desktop to both inventories.
+  assert.equal(previousTriples.length, 868)
+  assert.equal(triples(map).length, 834)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
     !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
       && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))
@@ -1024,6 +1025,7 @@ const KNOWN_SNAPSHOT_GAP = {
   'tool:solar-add-all-inverters': 'absent from the catalog snapshot; validateOverrides rejects it',
   'tool:solar-assignment-report': 'absent from the catalog snapshot; validateOverrides rejects it',
   'tool:solar-central-inverter-add': 'absent from the catalog snapshot; validateOverrides rejects it',
+  'tool:solar-combiner-comparison': 'absent from the catalog snapshot; validateOverrides rejects it',
   'tool:solar-feeders': 'absent from the catalog snapshot; validateOverrides rejects it',
   'tool:solar-physical-export': 'absent from the catalog snapshot; validateOverrides rejects it',
   'tool:solar-physical-shade': 'absent from the catalog snapshot; validateOverrides rejects it',
@@ -1034,11 +1036,11 @@ const KNOWN_SNAPSHOT_GAP = {
   'tool:solar-terrain-read': 'absent from the catalog snapshot; validateOverrides rejects it',
 }
 
-test('Solar descriptor census pins 56 tools, each mapped, exempted or a known snapshot gap', () => {
+test('Solar descriptor census pins 57 tools, each mapped, exempted or a known snapshot gap', () => {
   const directory = new URL('../../server/solar_tools/', import.meta.url)
   const descriptors = readdirSync(directory).filter((name) => name.endsWith('.json')).sort()
   // Move this pin only in a PR that adds or removes a descriptor file.
-  assert.equal(descriptors.length, 56, 'Solar descriptor count changed; review the census pin')
+  assert.equal(descriptors.length, 57, 'Solar descriptor count changed; review the census pin')
   const covered = new Set(map.entries.map((entry) => entry.id))
   const exempted = new Set(map.exemptions.filter((entry) =>
     typeof entry.reason === 'string' && entry.reason.trim().length > 0).map((entry) => entry.id))

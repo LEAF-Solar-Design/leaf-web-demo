@@ -2,20 +2,23 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ProjectSolarPreparedSolveForm } from './ProjectSolarPreparedSolveForm.jsx'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
+import { readProjectSolarCompletion } from './solarProjectCompletion.js'
 
 afterEach(cleanup)
 const B = { kind: 'project', organization_id: '11111111-1111-4111-8111-111111111111',
   project_id: '22222222-2222-4222-8222-222222222222', drawing_id: '33333333-3333-4333-8333-333333333333',
   input_version_id: '44444444-4444-4444-8444-444444444444' }
+const JOB = '55555555-5555-4555-8555-555555555555'
 const FRAME = 'leaf:frame:00000000-0000-4000-8000-000000000001'
 const REQUEST = { grid: { Dwgname: 'Saved roof', Sequences: [2, 1, 1, 0], Rows: [], Modify: [] } }
 function fixture() {
-  const h = { current: true, revision: 6, digest: 'b'.repeat(64) }
+  const h = { current: true, revision: 6, digest: 'b'.repeat(64),
+    frames: [{ id: FRAME, name: 'West roof', panel_count: 3 }] }
   const data = (options) => ({ context: { ...B, head_version_id: B.input_version_id, is_head: true, intake_sha256: 'a'.repeat(64) },
     intake: { solar_design_graph_sha256: 'b'.repeat(64), solar_design_graph: {
       rev: 6, settings: { ...SEED_SETTINGS }, project: { name: 'Saved roof', zip_code: '', latitude: null, longitude: null } } },
     solve_preparation: { available: true, graph_revision: h.revision, graph_sha256: h.digest,
-      frames: [{ id: FRAME, name: 'West roof', panel_count: 3 }],
+      frames: h.frames, solve_history_available: h.historyAvailable,
       ...(options.solveFrame ? { frame_ref: FRAME, request: REQUEST } : {}) } })
   h.client = { getSnapshot: () => ({ binding: B, authorityKey: 'epoch' }),
     captureCatalogScope: () => () => h.current,
@@ -23,7 +26,7 @@ function fixture() {
     prepareRun: vi.fn((intent) => intent) }
   h.props = { projectClient: h.client, solarBinding: B, authorityKey: 'epoch', isCurrent: () => h.current,
     catalogDigest: 'sha256:' + 'c'.repeat(64), newProjectIntentKey: vi.fn(() => 'intent-1'),
-    onProjectSubmit: vi.fn(async () => ({ ok: true, status: 202, data: { job_id: '55555555-5555-4555-8555-555555555555' } })),
+    onProjectSubmit: vi.fn(async () => ({ ok: true, status: 202, data: { job_id: JOB } })),
     onClose: vi.fn(), onDraftChange: vi.fn() }
   h.mount = () => render(<ProjectSolarPreparedSolveForm {...h.props} />)
   h.choose = async () => {
@@ -33,6 +36,26 @@ function fixture() {
   }
   return h
 }
+
+it('shows saved group coverage for complete, partial and untouched groups', async () => {
+  const h = fixture()
+  h.frames = [
+    { ...h.frames[0], committed_panel_count: 3, remaining_panel_count: 0 },
+    { id: 'east', name: 'East roof', panel_count: 6, committed_panel_count: 4, remaining_panel_count: 2 },
+    { id: 'south', name: 'South roof', panel_count: 9, committed_panel_count: 0, remaining_panel_count: 9 },
+    { id: 'north', name: 'North roof', panel_count: 6, committed_panel_count: 4, remaining_panel_count: 4 },
+  ]
+  const view = h.mount()
+  await screen.findByRole('table', { name: 'Saved panel group progress' })
+  expect(screen.getByRole('row', { name: 'West roof 3 0' })).toBeInTheDocument()
+  expect(screen.getByRole('row', { name: 'East roof 4 2' })).toBeInTheDocument()
+  expect(screen.getByRole('row', { name: 'South roof 0 9' })).toBeInTheDocument()
+  expect(screen.getByRole('row', { name: 'North roof Unavailable Unavailable' })).toBeInTheDocument()
+  expect(screen.getByRole('option', { name: 'South roof (9 panels)' })).toBeInTheDocument()
+  h.client.readContext.mockImplementationOnce(() => new Promise(() => {}))
+  view.rerender(<ProjectSolarPreparedSolveForm {...h.props} authorityKey="next-epoch" />)
+  expect(screen.queryByRole('table', { name: 'Saved panel group progress' })).toBeNull()
+})
 
 it('submits only a fresh server-derived frame request without raw request/frame inputs', async () => {
   const h = fixture(); h.mount(); await h.choose()
@@ -46,6 +69,78 @@ it('submits only a fresh server-derived frame request without raw request/frame 
     catalogDigest: h.props.catalogDigest, idempotencyKey: 'intent-1',
     solveContext: { frame_ref: FRAME, phase: 'initial', expected_rev: 6 } })
   expect(screen.getByRole('button', { name: 'Run solve' })).toBeDisabled()
+})
+
+it.each([true, false])('shows the latest version-bound solve independently of saved counts (%s)', async (available) => {
+  const h = fixture()
+  h.historyAvailable = available
+  h.frames = [
+    { ...h.frames[0], committed_panel_count: 1, remaining_panel_count: 2,
+      latest_solve: { status: 'failed', reason_code: 'CLOUD_REQUEST_REJECTED', message: 'Upstream details' } },
+    { id: 'east', name: 'East roof', panel_count: 6, committed_panel_count: 0, remaining_panel_count: 6,
+      latest_solve: { status: 'succeeded' } },
+    { id: 'south', name: 'South roof', panel_count: 9, committed_panel_count: 0, remaining_panel_count: 9 },
+  ]
+  h.mount()
+  await screen.findByRole('columnheader', { name: 'Latest solve' })
+  expect(screen.getByRole('row', { name: `West roof 1 2 ${available ? 'Failed (CLOUD_REQUEST_REJECTED)' : 'Unavailable'}` }))
+    .toBeInTheDocument()
+  expect(screen.getByRole('row', { name: `East roof 0 6 ${available ? 'Proposal finished' : 'Unavailable'}` }))
+    .toBeInTheDocument()
+  expect(screen.getByRole('row', { name: `South roof 0 9 ${available ? 'No matching solve' : 'Unavailable'}` }))
+    .toBeInTheDocument()
+  expect(screen.queryByText('Upstream details')).toBeNull()
+})
+
+it.each([
+  [{ status: 'incomplete', completed_pieces: 0, total_pieces: 3, failed_piece_index: 0 },
+    'Solve stopped before any pieces finished.'],
+  [{ status: 'partial', completed_pieces: 1, total_pieces: 3, failed_piece_index: 1 },
+    'Solve stopped after 1 of 3 pieces.'],
+  [{ status: 'partial', completed_pieces: 3, total_pieces: 3, phase: 'assembly' },
+    'Solve could not assemble a proposal from the 3 completed pieces.'],
+  [{ status: 'partial', completed_pieces: 2, total_pieces: 3, failed_piece_index: 0 }, null],
+])('renders validated split failure feedback (%j)', async (progress, detail) => {
+  const h = fixture()
+  const view = h.mount()
+  await h.choose()
+  const button = screen.getByRole('button', { name: 'Run solve' })
+  fireEvent.click(button)
+  await waitFor(() => expect(button).toBeDisabled())
+  const tool = 'solar-solve-proposal'
+  const job = { job_id: JOB, org_id: B.organization_id, project_id: B.project_id,
+    input_version_id: B.input_version_id, tool_name: tool, status: 'failed',
+    execution_context: { schema: 'leaf.solar-project-graph-job.v1', drawing_id: B.drawing_id },
+    error: { error_code: 'GRAPH_JOB_FAILED', reason_code: 'CLOUD_UPSTREAM_FAILURE', retryable: false,
+      solve_progress: progress, message: 'Raw upstream details' } }
+  const outcome = readProjectSolarCompletion({ job, binding: B, jobId: JOB, tool })
+  const meta = { tool, authorityKey: 'epoch', binding: B, isCurrent: () => true }
+  view.rerender(<ProjectSolarPreparedSolveForm {...h.props} projectOutcome={{ outcome, meta }} />)
+  const status = await screen.findByRole('status')
+  if (detail) {
+    expect(status).toHaveTextContent(detail + ' The drawing keeps the last saved strings.')
+  } else {
+    expect(status).toHaveTextContent('cloud_upstream_failure')
+    expect(status).not.toHaveTextContent('completed pieces')
+  }
+  expect(status).not.toHaveTextContent('Raw upstream details')
+  await waitFor(() => expect(button).toBeEnabled())
+  expect(h.props.onProjectSubmit).toHaveBeenCalledOnce()
+})
+
+it('shows bound running progress while retaining the solve lock', async () => {
+  const h = fixture()
+  const view = h.mount()
+  await h.choose()
+  const button = screen.getByRole('button', { name: 'Run solve' })
+  fireEvent.click(button)
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/submitted/i))
+  const outcome = { state: 'pending', jobId: JOB, message: 'Solved 2 of 3 pieces.' }
+  const meta = { tool: 'solar-solve-proposal', authorityKey: 'epoch', binding: B, isCurrent: () => true }
+  view.rerender(<ProjectSolarPreparedSolveForm {...h.props} projectOutcome={{ outcome, meta }} />)
+  expect(screen.getByRole('status')).toHaveTextContent('Solved 2 of 3 pieces.')
+  expect(button).toBeDisabled()
+  expect(h.props.onProjectSubmit).toHaveBeenCalledOnce()
 })
 
 it('refuses a mismatched fresh preparation revision without any submission', async () => {

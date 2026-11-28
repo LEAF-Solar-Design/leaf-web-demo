@@ -1,0 +1,728 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { getAuthorStage, getAuthorStageSource, postReview, reviewContext, withdrawAuthorStage } from '../../api.js'
+import { postMessage } from '../../converse.js'
+import { track } from '../../telemetry.js'
+import AuthoringCard from './AuthoringCard.jsx'
+
+vi.mock('../../api.js', () => ({
+  getAuthorStage: vi.fn(), getAuthorStageSource: vi.fn(), postReview: vi.fn(), reviewContext: vi.fn(),
+  withdrawAuthorStage: vi.fn(),
+  getTenantToolStatus: vi.fn(async () => null),
+}))
+vi.mock('../../converse.js', () => ({ postMessage: vi.fn(), resolveApproval: vi.fn() }))
+vi.mock('../../telemetry.js', () => ({ track: vi.fn() }))
+const receipt = { change_set_id: 'change', staged_commit: 'a'.repeat(40), catalog_digest: 'b'.repeat(64),
+  package_files: ['branch-tools/roof/main.csx', 'branch-tools/roof/tool.json'] }
+const staged = { change_set_id: 'change', status: 'staged', receipt, compile_attempts: [{ attempt: 2, status: 'passed' }] }
+const proposal = { confirmation_id: 'plan', plan: { title: 'Roof labels', summary: 'Label every roof',
+  behavior: ['Group by roof layer'], capabilities: ['drawing.write', 'network.read'], change_kind: 'revise', target_tool_name: 'roof' } }
+const mount = async (props = {}) => {
+  let view
+  await act(async () => { view = render(<AuthoringCard sessionId="session" changeSetId="change" proposal={proposal} {...props} />) })
+  return view
+}
+const button = name => screen.getByRole('button', { name })
+const retryMessage = 'Try the same build again. Re-propose the same build plan unchanged for approval, then retry author_tool with the new plan_confirmation_id and {"retry_of_change_set_id":"change"}.'
+const advance = async ms => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
+beforeEach(() => {
+  getAuthorStage.mockResolvedValue(staged)
+  getAuthorStageSource.mockResolvedValue({ path: 'branch-tools/roof/main.csx', text: '<img src=x>\nreturn;\n' })
+  reviewContext.mockResolvedValue({ viewer_may_approve: true, approval_kind_if_approved: 'self', review: null })
+})
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.resetAllMocks(); vi.unstubAllGlobals() })
+
+const openDeployDetails = () => fireEvent.click(screen.getByText('What will be deployed'))
+
+it('explains a running build and marks the remaining steps as not yet', async () => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'running' })
+  await mount()
+  const build = screen.getByText('Build').nextElementSibling
+  expect(build).toHaveTextContent('Building')
+  expect(build.querySelector('.dot.live.pulse')).toHaveAttribute('aria-hidden', 'true')
+  expect(screen.getByText('Claude is writing the C# and Studio is compiling it.')).toBeVisible()
+  for (const row of ['Compile', 'Review', 'Publish']) {
+    expect(screen.getByText(row).nextElementSibling).toHaveTextContent(/^Not yet$/)
+  }
+})
+
+it.each([
+  [240000, 'Building, 4 min so far (usually 6 to 10)'],
+  [30000, 'Building, under 1 min so far (usually 6 to 10)'],
+  [-60000, 'Building (usually 6 to 10 min)'],
+  [null, 'Building (usually 6 to 10 min)'],
+  ['invalid', 'Building (usually 6 to 10 min)'],
+])('shows honest elapsed build time for %s', async (age, label) => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-11-27T12:00:00Z'))
+  const started = typeof age === 'number' ? new Date(Date.now() - age).toISOString() : age
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'running', stage_started_at: started })
+  await mount()
+  expect(screen.getByText(label)).toBeVisible()
+})
+
+it.each([true, false])('offers a retry for non-compile failure only when retryable is %s', async retryable => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'failed',
+    error: { reason_code: 'stage_grant_expired', retryable, ...(retryable ? { message: 'M' } : {}) } })
+  await mount()
+  expect(screen.getByText(retryable ? 'M' : 'This build did not finish (stage_grant_expired).')).toBeVisible()
+  expect(!!screen.queryByRole('button', { name: 'Try the build again' })).toBe(retryable)
+})
+
+it('describes a failure without a reason code', async () => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'failed' })
+  await mount()
+  expect(screen.getByText('This build did not finish.')).toBeVisible()
+})
+
+it.each(['branch', 'studio'])('explains the deploy gate for a %s build', async target => {
+  getAuthorStageSource.mockReturnValue(new Promise(() => {}))
+  getAuthorStage.mockResolvedValue({ ...staged, target })
+  await mount()
+  expect(screen.getByText(target === 'branch'
+    ? 'Deploy is available once it compiles. It has not run on a drawing yet.'
+    : 'Deploy is available once the checks pass.')).toBeVisible()
+})
+
+it.each(['staged', 'published'])('lists checks for a built Branch tool with status %s', async status => {
+  getAuthorStage.mockResolvedValue({ ...staged, status })
+  await mount({ proposal: { ...proposal, plan: { ...proposal.plan, target: 'branch',
+    acceptance: ['Count the labels', '<img src=x>'] } } })
+  const summary = screen.getByText('What to check after you run it')
+  fireEvent.click(summary)
+  expect(screen.getByText('Count the labels')).toBeVisible()
+  expect(summary.closest('details').querySelectorAll('li')).toHaveLength(2)
+  expect(document.querySelector('img')).toBeNull()
+  if (status === 'staged') {
+    expect(screen.getByText('It compiled. It has not run on a drawing yet. Its first run is in AutoCAD.')).toBeVisible()
+  }
+})
+
+it.each(['running', 'failed'])('withholds after-run checks for a %s Branch build', async status => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status, target: 'branch' })
+  await mount({ proposal: { ...proposal, plan: { ...proposal.plan, acceptance: ['Count the labels'] } } })
+  expect(screen.queryByText('What to check after you run it')).toBeNull()
+})
+
+it('shows a queued build in plain words while retaining its queue and withdrawal', async () => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued',
+    queue: { ahead: 3, estimated_wait_s: 444 }, withdrawable: true })
+  await mount()
+  expect(screen.getByText('Waiting to start')).toBeVisible()
+  expect(screen.getByText('Waiting, 3 ahead · about 8 min')).toBeVisible()
+  expect(button('Withdraw')).toBeEnabled()
+})
+
+it.each(['staged', 'published'])('calls a %s build Built', async status => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status })
+  await mount()
+  expect(screen.getByText('Build').nextElementSibling).toHaveTextContent(/^Built$/)
+  expect(screen.queryByText(/\bstaged\b/)).toBeNull()
+  if (status === 'staged') expect(screen.getByText('Publish').nextElementSibling).toHaveTextContent(/^Not yet$/)
+})
+
+it.each(['compile_failed', 'failed'])('shortens %s diagnostics in the list and keeps the full title', async status => {
+  const diagnostics = Array.from({ length: 5 }, (_, i) => ({ code: 'CS1026', file: 'main.csx', line: i + 1 }))
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'failed',
+    compile_attempts: [{ attempt: 1, decision: status, diagnostics }] })
+  await mount()
+  const full = 'Attempt 1: did not compile, ' + diagnostics.map(d => `CS1026 main.csx:${d.line}`).join(', ')
+  const item = screen.getByRole('listitem')
+  expect(item).toHaveTextContent(/^Attempt 1: did not compile, CS1026 main.csx:1, CS1026 main.csx:2, CS1026 main.csx:3, and 2 more$/)
+  expect(item).toHaveAttribute('title', full)
+  await act(async () => fireEvent.click(button('Try the build again')))
+  expect(postMessage.mock.calls[0][1].text).toBe(retryMessage)
+  expect(postMessage.mock.calls[0][1].text).not.toContain('Compiler report')
+})
+
+it('shows the staged files, source, compile and plan risks behind a self deploy', async () => {
+  postReview.mockResolvedValue({ change_set_id: 'change', decision: 'approve', approval_kind: 'self',
+    approver_role: 'owner', decided_at: '2026-11-21T03:14:00Z', status: 'published' })
+  await mount()
+  openDeployDetails()
+  for (const text of ['Label every roof', 'Group by roof layer',
+    'Changes your drawing · network.read · Revises the existing tool roof', 'Not deployed yet']) {
+    expect(screen.getByText(text)).toBeVisible()
+  }
+  expect(screen.getByText(receipt.package_files.join(', '))).toBeVisible()
+  const source = screen.getByText(/main\.csx · 2 lines/)
+  fireEvent.click(source)
+  expect(source.closest('details')).toHaveAttribute('open')
+  expect(screen.getByText(/<img src=x>/)).toBeVisible()
+  expect(document.querySelector('img')).toBeNull()
+  const approve = button('Deploy to AutoCAD')
+  approve.focus()
+  expect(approve).toHaveFocus()
+  await act(async () => approve.click())
+  expect(postReview).toHaveBeenCalledWith({ change_set_id: 'change', staged_commit: receipt.staged_commit,
+    catalog_digest: receipt.catalog_digest, decision: 'approve' })
+  expect(screen.getByText(/Deployed to AutoCAD/)).toHaveTextContent(/\d+:\d{2}/)
+  expect(screen.getByText(/Published to your plugin catalog/)).toBeVisible()
+  expect(track).toHaveBeenCalledWith('review.decided', { decision: 'approve', approval_kind: 'self' })
+  expect(track).toHaveBeenCalledWith('deploy.clicked')
+  expect(screen.queryByRole('button')).toBeNull()
+})
+
+it('deploys a self-built tool that passed its checks with one inline button', async () => {
+  let finishDeploy
+  postReview.mockReturnValue(new Promise(resolve => { finishDeploy = resolve }))
+  await mount()
+  expect(screen.getAllByRole('button', { name: 'Deploy to AutoCAD' })).toHaveLength(1)
+  expect(screen.getByText('Deploy')).toBeVisible()
+  expect(screen.queryByText('Review')).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Request changes' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
+  expect(screen.queryByRole('textbox')).toBeNull()
+  expect(screen.queryByText(/self-approval/)).toBeNull()
+  expect(screen.getByText('What will be deployed').closest('details')).not.toHaveAttribute('open')
+  expect(screen.getByText('Label every roof')).not.toBeVisible()
+  await act(async () => fireEvent.click(button('Deploy to AutoCAD')))
+  expect(track).toHaveBeenCalledWith('deploy.clicked')
+  expect(button('Deploying...')).toBeDisabled()
+  expect(postReview).toHaveBeenCalledTimes(1)
+  expect(postReview).toHaveBeenCalledWith({ change_set_id: 'change', staged_commit: receipt.staged_commit,
+    catalog_digest: receipt.catalog_digest, decision: 'approve' })
+  let finishStage
+  getAuthorStage.mockReturnValue(new Promise(resolve => { finishStage = resolve }))
+  await act(async () => finishDeploy({ change_set_id: 'change', decision: 'approve', approval_kind: 'self',
+    approver_role: 'owner', decided_at: '2026-11-21T03:14:00Z', status: 'approved' }))
+  expect(screen.getByText('Deploying to AutoCAD...')).toBeVisible()
+  expect(screen.queryByText(/Published to your plugin catalog/)).toBeNull()
+  await act(async () => finishStage({ ...staged,
+    publication: { state: 'published', published_at: '2026-11-21T03:15:00Z' } }))
+  expect(screen.getByText(/Deployed to AutoCAD/)).toHaveTextContent(/\d+:\d{2}/)
+  expect(screen.getByText(/Published to your plugin catalog/)).toBeVisible()
+  expect(screen.queryByText('Deploying to AutoCAD...')).toBeNull()
+})
+
+const selfReview = { decision: 'approve', approval_kind: 'self', approver_role: 'owner',
+  decided_at: '2026-11-21T03:14:00Z' }
+
+it('shows the deployed publication and its time after a fresh reload of the server stage shape', async () => {
+  const publishedAt = '2026-11-21T03:15:00Z'
+  getAuthorStage.mockResolvedValue({ ...staged, status: 'staged', review: selfReview,
+    publication: { state: 'published', published_at: publishedAt } })
+  await mount()
+  for (const label of [/Deployed to AutoCAD/, /Published to your plugin catalog/]) {
+    const row = screen.getByText(label)
+    expect(row).toHaveTextContent(/\d+:\d{2}/)
+    expect(row.querySelector('time')).toHaveAttribute('datetime', new Date(publishedAt).toISOString())
+  }
+  expect(screen.queryByText('Deploying to AutoCAD...')).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+  expect(getAuthorStageSource).not.toHaveBeenCalled()
+})
+
+it.each([
+  ['rolled_back', 'Rolled back', 'Rolled back from your plugin catalog'],
+  ['superseded', 'Not deployed', 'Not published: another change was published first'],
+  ['denied', 'Not deployed', 'Not published: changes were requested'],
+  ['publishing', 'Deploying to AutoCAD...', 'Publishing...'],
+  ['awaiting_approval', 'Deploying to AutoCAD...', 'Waiting for approval'],
+])('shows the reported %s publication after a reload', async (state, deploy, publish) => {
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: { state } })
+  await mount()
+  expect(screen.getByText(deploy)).toBeVisible()
+  expect(screen.getByText(publish)).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+  expect(getAuthorStageSource).not.toHaveBeenCalled()
+})
+
+it.each(['published', 'denied', 'superseded', 'rolled_back', 'publishing'])(
+  'keeps source and approval closed for publication %s even without a reported review', async state => {
+    getAuthorStage.mockResolvedValue({ ...staged, publication: { state } })
+    await mount()
+    expect(getAuthorStageSource).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
+  })
+
+it.each([
+  ['rolled_back', 'Rolled back from your plugin catalog'],
+  ['superseded', 'Not published: another change was published first'],
+  ['denied', 'Not published: changes were requested'],
+  ['awaiting_approval', 'Published to your plugin catalog'],
+  ['publishing', 'Published to your plugin catalog'],
+  [undefined, 'Published to your plugin catalog'],
+])('reconciles a published decision with stage publication %s', async (state, label) => {
+  postReview.mockResolvedValue({ change_set_id: 'change', ...selfReview, status: 'published' })
+  await mount()
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview,
+    ...(state ? { publication: { state } } : {}) })
+  await act(async () => fireEvent.click(button('Deploy to AutoCAD')))
+  expect(screen.getByText(new RegExp(label))).toBeVisible()
+  if (['rolled_back', 'superseded', 'denied'].includes(state)) {
+    expect(screen.queryByText(/Deployed to AutoCAD/)).toBeNull()
+    expect(screen.queryByText(/Published to your plugin catalog/)).toBeNull()
+  } else expect(screen.getByText(/Deployed to AutoCAD/)).toBeVisible()
+})
+
+it.each(['rolled_back', 'superseded', 'denied'])('stops polling for a %s publication without Branch evidence', async state => {
+  vi.useFakeTimers()
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: { state } })
+  await mount()
+  await advance(10000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(1)
+})
+
+it('stops polling once published', async () => {
+  vi.useFakeTimers()
+  const published = { ...staged, review: selfReview, publication: { state: 'published' } }
+  getAuthorStage.mockResolvedValueOnce(published)
+    .mockResolvedValue({ ...published, branch: { last_event: 'synced' } })
+  await mount()
+  await advance(2000)
+  expect(screen.getByText('Deployed. AutoCAD picks it up within a minute.')).toBeVisible()
+  await advance(10000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(1)
+})
+
+it.each(['rolled_back', 'superseded', 'denied', 'publishing'])(
+  'keeps the independent Review row unchanged for %s', async state => {
+    getAuthorStage.mockResolvedValue({ ...staged, publication: { state },
+      review: { ...selfReview, approval_kind: 'independent', approver_role: 'reviewer' } })
+    await mount()
+    expect(screen.getByText('Review')).toBeVisible()
+    expect(screen.getByText(/Approved by reviewer/)).toBeVisible()
+    expect(screen.queryByText('Deploy')).toBeNull()
+  })
+
+it('offers no deploy for a self-built tool whose compile failed, only the retry', async () => {
+  getAuthorStage.mockResolvedValue({ ...staged, status: 'failed',
+    error: { reason_code: 'compile_failed', message: 'Unexpected delimiter' },
+    compile_attempts: [{ attempt: 1, status: 'refused', diagnostics: [{ code: 'CS1026', file: 'main.csx', line: 50 }] }] })
+  await mount()
+  expect(screen.getByText('Deploy is available once the checks pass.')).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+  expect(button('Try the build again')).toBeEnabled()
+  expect(postReview).not.toHaveBeenCalled()
+})
+
+it('keeps the independent review buttons for a reviewer who is not the author', async () => {
+  reviewContext.mockResolvedValue({ viewer_may_approve: true, approval_kind_if_approved: 'independent', review: null })
+  await mount()
+  expect(button('Approve')).toBeEnabled()
+  expect(button('Request changes')).toBeEnabled()
+  expect(screen.getByText('Review')).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+  expect(screen.queryByText('What will be deployed')).toBeNull()
+})
+
+it('sends a bound change request and shows an unavailable export honestly', async () => {
+  reviewContext.mockResolvedValue({ viewer_may_approve: true, approval_kind_if_approved: 'independent' })
+  getAuthorStageSource.mockResolvedValue(null)
+  postReview.mockResolvedValue({ change_set_id: 'change', decision: 'request_changes',
+    approval_kind: 'independent', approver_role: 'reviewer', status: 'denied' })
+  await mount()
+  expect(screen.getByText('source not available')).toBeVisible()
+  expect(button('Approve')).toBeEnabled()
+  fireEvent.click(button('Request changes'))
+  expect(postReview).not.toHaveBeenCalled()
+  expect(button('Send change request')).toBeDisabled()
+  const box = screen.getByRole('textbox', { name: /Review comment/ })
+  expect(box.maxLength).toBe(500)
+  fireEvent.change(box, { target: { value: 'Handle an empty drawing' } })
+  await act(async () => fireEvent.click(button('Send change request')))
+  expect(postReview).toHaveBeenCalledWith({ change_set_id: 'change', staged_commit: receipt.staged_commit,
+    catalog_digest: receipt.catalog_digest, decision: 'request_changes', comment: 'Handle an empty drawing' })
+  expect(screen.getByText('Changes requested by you (reviewer)')).toBeVisible()
+  expect(screen.queryByText(/Published to the/)).toBeNull()
+  expect(track).toHaveBeenCalledWith('review.decided', { decision: 'request_changes', approval_kind: 'independent' })
+})
+
+it('uses the stage-bound plan and waits for its staged source before offering deploy', async () => {
+  let finishSource
+  getAuthorStageSource.mockReturnValue(new Promise(resolve => { finishSource = resolve }))
+  getAuthorStage.mockResolvedValue({ ...staged, plan: { ...proposal.plan, summary: 'Place labels on ridgelines' } })
+  await mount({ proposal: undefined })
+  openDeployDetails()
+  expect(screen.getByText('Place labels on ridgelines')).toBeVisible()
+  expect(screen.getByText('Group by roof layer')).toBeVisible()
+  expect(screen.getByText('Reading source…')).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+  expect(screen.getByText('Deploy is available once the checks pass.')).toBeVisible()
+  expect(postReview).not.toHaveBeenCalled()
+  await act(async () => finishSource(null))
+  expect(screen.getByText('source not available')).toBeVisible()
+  expect(button('Deploy to AutoCAD')).toBeEnabled()
+})
+
+it.each(['branch_package', 'tool'])('uses the staged %s manifest in the absence of a plan', async field => {
+  const tool = { name: 'roof-label', version: '1.2.0', description: 'Labels <roof> faces', capabilities: ['drawing.write'] }
+  getAuthorStage.mockResolvedValue({ ...staged, change_kind: 'revise', result: { [field]: tool } })
+  await mount({ proposal: undefined })
+  openDeployDetails()
+  expect(screen.getByRole('heading', { name: 'roof-label · 1.2.0' })).toBeVisible()
+  expect(screen.getByText('Labels <roof> faces')).toBeVisible()
+  expect(document.querySelector('roof')).toBeNull()
+  expect(screen.getByText('Changes your drawing · Revises the existing tool roof-label')).toBeVisible()
+  expect(button('Deploy to AutoCAD')).toBeEnabled()
+})
+
+it('withholds deploy without a bound plan or staged manifest, even after reading source', async () => {
+  await mount({ proposal: undefined })
+  openDeployDetails()
+  expect(screen.getByText(/main\.csx · 2 lines/)).toBeVisible()
+  expect(screen.getByText('Build context not reported')).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+})
+
+it('keeps the staged polling deadline across a hidden interval', async () => {
+  vi.useFakeTimers()
+  getAuthorStage.mockResolvedValue({ ...staged, retry_after_ms: 10000, updated_at: Date.now() - 29 * 60000 })
+  const view = await mount()
+  await advance(10000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(2)
+  const card = active => <AuthoringCard sessionId="session" changeSetId="change" proposal={proposal} active={active} />
+  view.rerender(card(false))
+  await advance(60000)
+  view.rerender(card(true))
+  await advance(10000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(2)
+})
+
+it('renders a historical review and Branch evidence without a Studio test run', async () => {
+  getAuthorStage.mockResolvedValue({ ...staged, compile_attempts: [], result: { test_run: { status: 'failed', summary: 'No result' } },
+    branch: { synced: true, compile: { status: 'passed' }, ran: true, summary: 'Drew 3 labels' } })
+  reviewContext.mockResolvedValue({ viewer_may_approve: false,
+    review: { decision: 'approve', approver_role: 'owner', decided_at: '2026-11-21T03:14:00Z' } })
+  await mount()
+  expect(screen.getByText(/Approved by owner/)).toBeVisible()
+  expect(screen.queryByText(/Test run/)).toBeNull()
+  expect(screen.getByText('Compile').nextElementSibling).toHaveTextContent(/^Not reported$/)
+  expect(screen.getByText('Synced · Compile · passed · Ran · Drew 3 labels')).toBeVisible()
+  expect(screen.queryByRole('button')).toBeNull()
+  expect(getAuthorStageSource).not.toHaveBeenCalled()
+})
+
+it('pauses while offscreen, respects retry_after_ms, and stops after a compile failure', async () => {
+  vi.useFakeTimers()
+  let visibility
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(callback) { visibility = callback }
+    observe() {}
+    disconnect() {}
+  })
+  getAuthorStage.mockResolvedValueOnce({ change_set_id: 'change', status: 'queued', retry_after_ms: 3500 })
+    .mockResolvedValueOnce({ change_set_id: 'change', status: 'running', retry_after_ms: 3500 })
+    .mockResolvedValueOnce({ change_set_id: 'change', status: 'failed', error: { message: 'Unexpected delimiter' },
+      compile_attempts: [{ attempt: 1, status: 'refused', diagnostics: [{ code: 'CS1026', file: 'main.csx', line: 50 }] }] })
+  await mount()
+  expect(getAuthorStage).not.toHaveBeenCalled()
+  await act(async () => visibility([{ isIntersecting: true }]))
+  expect(screen.getByText('Waiting to start')).toBeVisible()
+  act(() => visibility([{ isIntersecting: false }]))
+  await advance(7000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(1)
+  await act(async () => visibility([{ isIntersecting: true }]))
+  await advance(3499)
+  expect(getAuthorStage).toHaveBeenCalledTimes(2)
+  await advance(1)
+  expect(screen.getByText('Unexpected delimiter')).toBeVisible()
+  expect(screen.getByText('Attempt 1: refused, CS1026 main.csx:50')).toBeVisible()
+  expect(screen.getByText('Trying again uses one of your daily builds. Claude starts again from the same plan.')).toBeVisible()
+  await act(async () => fireEvent.click(button('Try the build again')))
+  expect(postMessage).toHaveBeenCalledWith('session', { text: expect.stringContaining('"retry_of_change_set_id":"change"') })
+  expect(postMessage.mock.calls[0][1].text).toBe(retryMessage)
+  expect(postMessage.mock.calls[0][1].text).not.toContain('Compiler report')
+  expect(button('Retry requested')).toBeDisabled()
+  await advance(10000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(3)
+  expect(reviewContext).not.toHaveBeenCalled()
+})
+
+it('withholds review for a mismatched receipt and can re-read the stage', async () => {
+  getAuthorStage.mockResolvedValueOnce({ ...staged, receipt: { ...receipt, change_set_id: 'another' } })
+  await mount()
+  expect(screen.getByRole('alert')).toHaveTextContent('did not match')
+  expect(reviewContext).not.toHaveBeenCalled()
+  await act(async () => fireEvent.click(button('Check again')))
+  expect(button('Deploy to AutoCAD')).toBeEnabled()
+})
+
+it('reads the stage contract: compile attempts by n and the Branch receipt by last_event', async () => {
+  getAuthorStage.mockResolvedValue({ ...staged, compile_attempts: undefined,
+    compile: { attempts: [
+      { n: 1, decision: 'compile_failed', errors: 1, diagnostics: [{ code: 'CS1026', file: 'main.csx', line: 50 }] },
+      { n: 2, decision: 'accept', errors: 0, diagnostics: [] },
+    ] },
+    status: 'published', publication: { state: 'published' },
+    branch: { last_event: 'synced', at: '2026-11-21T14:46:00Z', plugin_version: '1.4.52.0' } })
+  reviewContext.mockResolvedValue({ viewer_may_approve: false, review: { decision: 'approve' } })
+  await mount()
+  expect(screen.getByText('Attempt 1: did not compile, CS1026 main.csx:50')).toBeVisible()
+  expect(screen.getByText('Attempt 2: passed')).toBeVisible()
+  expect(screen.getByText('Synced')).toBeVisible()
+  expect(screen.queryByText('Not deployed yet')).toBeNull()
+  expect(screen.queryByText('Deployed. AutoCAD picks it up within a minute.')).toBeNull()
+})
+
+it.each([
+  [{ ahead: 0 }, 'Waiting, next in line'],
+  [{ ahead: 1 }, 'Waiting, 1 ahead'],
+  [{ ahead: 3, estimated_wait_s: 444 }, 'Waiting, 3 ahead · about 8 min'],
+  [{ ahead: 0, estimated_wait_s: 1 }, 'Waiting, next in line · about 1 min'],
+])('shows the reported queued build position %j', async (queue, text) => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued', queue })
+  await mount()
+  expect(screen.getByText(text)).toBeVisible()
+  expect(screen.getByText(text).closest('dd').previousElementSibling).toHaveTextContent('Build')
+})
+
+it.each([
+  { ahead: -1 }, { ahead: 1.5 }, { ahead: '2' }, { ahead: null }, null, {}, '2', [],
+])('ignores malformed queue data %j', async queue => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued', queue })
+  await mount()
+  expect(screen.queryByText(/Waiting,/)).toBeNull()
+})
+
+it.each([-1, 0, 1.5, '60', null])('ignores malformed estimated wait %j', async estimated_wait_s => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued',
+    queue: { ahead: 1, estimated_wait_s } })
+  await mount()
+  expect(screen.getByText('Waiting, 1 ahead')).toBeVisible()
+  expect(screen.queryByText(/about/)).toBeNull()
+})
+
+it.each(['running', 'staged'])('withholds queue details and withdrawal for a %s build', async status => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status, queue: { ahead: 1 }, withdrawable: true })
+  await mount()
+  expect(screen.queryByText(/Waiting/)).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Withdraw' })).toBeNull()
+})
+
+it.each([undefined, false, 'true', 1])('withholds withdrawal without an explicit server flag %j', async withdrawable => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued', withdrawable })
+  await mount()
+  expect(screen.queryByRole('button', { name: 'Withdraw' })).toBeNull()
+})
+
+it('refreshes the stage after a successful withdrawal', async () => {
+  getAuthorStage.mockResolvedValueOnce({ change_set_id: 'change', status: 'queued', withdrawable: true })
+    .mockResolvedValue({ change_set_id: 'change', status: 'failed', error: { message: 'Build withdrawn' } })
+  withdrawAuthorStage.mockResolvedValue({ withdrawn: true, revoked: true })
+  await mount()
+  expect(button('Withdraw')).toHaveAttribute('type', 'button')
+  await act(async () => fireEvent.click(button('Withdraw')))
+  expect(withdrawAuthorStage).toHaveBeenCalledExactlyOnceWith('change')
+  expect(getAuthorStage).toHaveBeenCalledTimes(2)
+  expect(screen.getByText('Build withdrawn')).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Withdraw' })).toBeNull()
+  expect(track).toHaveBeenCalledExactlyOnceWith('build.withdraw_clicked')
+})
+
+it.each([
+  [true, 'Stopped. It will not start again.'],
+  [false, 'This build can no longer be withdrawn.'],
+])('closes withdrawal after withdrawn false and revoked %s', async (revoked, text) => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued', withdrawable: true })
+  withdrawAuthorStage.mockResolvedValue({ withdrawn: false, revoked })
+  await mount()
+  await act(async () => fireEvent.click(button('Withdraw')))
+  expect(screen.getByText(text)).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Withdraw' })).toBeNull()
+  expect(getAuthorStage).toHaveBeenCalledTimes(1)
+  expect(track).toHaveBeenCalledExactlyOnceWith('build.withdraw_clicked')
+})
+
+it('keeps withdrawal available after a rejection and tracks each retry click', async () => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued', withdrawable: true })
+  withdrawAuthorStage.mockRejectedValue(new Error('unavailable'))
+  await mount()
+  await act(async () => fireEvent.click(button('Withdraw')))
+  expect(screen.getByText('Could not withdraw. Try again.')).toBeVisible()
+  expect(button('Withdraw')).toBeEnabled()
+  await act(async () => fireEvent.click(button('Withdraw')))
+  expect(withdrawAuthorStage).toHaveBeenCalledTimes(2)
+  expect(track.mock.calls).toEqual([['build.withdraw_clicked'], ['build.withdraw_clicked']])
+})
+
+it('disables withdrawal while the request is pending', async () => {
+  let finishWithdraw
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued', withdrawable: true })
+  withdrawAuthorStage.mockReturnValue(new Promise(resolve => { finishWithdraw = resolve }))
+  await mount()
+  await act(async () => fireEvent.click(button('Withdraw')))
+  expect(button('Withdraw')).toBeDisabled()
+  fireEvent.click(button('Withdraw'))
+  expect(withdrawAuthorStage).toHaveBeenCalledTimes(1)
+  expect(track).toHaveBeenCalledExactlyOnceWith('build.withdraw_clicked')
+  await act(async () => finishWithdraw({ withdrawn: false, revoked: false }))
+  expect(screen.getByText('This build can no longer be withdrawn.')).toBeVisible()
+})
+
+it('discloses the number of HTML escapes Studio decoded in an accepted source', async () => {
+  getAuthorStage.mockResolvedValue({ ...staged, compile_attempts: undefined,
+    compile: { attempts: [{ n: 1, decision: 'accept', errors: 0, diagnostics: [],
+      source_decoded: { entities: 2, original_sha256: 'a'.repeat(64), compiled_sha256: 'b'.repeat(64) } }] } })
+  await mount()
+  openDeployDetails()
+  // The attempt list and the deploy details both disclose it.
+  const labels = screen.getAllByText('Attempt 1: passed, Studio decoded HTML escapes in the source (2)')
+  expect(labels.map(label => label.tagName)).toEqual(['LI', 'DD'])
+  for (const label of labels) expect(label).toBeVisible()
+})
+
+const packageDigest = '0123456789abcdef'.repeat(4)
+const publishedPackage = { state: 'published', published_at: '2026-11-21T03:15:47Z',
+  name: 'roof', version: '1.2.0', package_digest: packageDigest }
+
+it('shows the Target row after the AutoCAD row for a published card', async () => {
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: publishedPackage })
+  await mount()
+  const row = screen.getByText('Target')
+  expect(row.tagName).toBe('DT')
+  expect(row.previousElementSibling.previousElementSibling).toHaveTextContent('AutoCAD')
+  expect(row.nextElementSibling).toHaveTextContent('Deployed to your workspace.')
+  expect(row.nextElementSibling.nextElementSibling).toBeNull()
+})
+
+it('shows the waiting message and final row labels for a published card without a branch report', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-11-21T03:16:00Z'))
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: publishedPackage })
+  const { container } = await mount()
+  expect(screen.getByText('AutoCAD').nextElementSibling).toHaveTextContent(/^Deployed. AutoCAD picks it up within a minute.$/)
+  expect(Array.from(container.querySelectorAll('dt'), row => row.textContent).slice(-2)).toEqual(['AutoCAD', 'Target'])
+})
+
+const receiptAt = '2026-11-27T15:28:00Z'
+const runAt = '2026-11-27T15:31:00Z'
+const localTime = at => new Date(at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+const fingerprint = 'roof.dwg | sent copy abcdef12 | 2 layers | 4 objects in model space'
+const receiptError = { code: 'denied', message: 'The tool was refused.' }
+
+it.each([
+  ['waiting', undefined, 60000, 'Deployed. AutoCAD picks it up within a minute.'],
+  ['not seen', undefined, 11 * 60000, 'Not seen in AutoCAD yet. Check that the plugin is signed in to this workspace.'],
+  ['arrived', { last_event: 'synced', arrived_at: receiptAt }, 0,
+    `Arrived in AutoCAD ${localTime(receiptAt)}. Not run yet.`],
+  ['verify failed', { last_event: 'verify_failed', verify_failed: { at: receiptAt, error: receiptError } }, 0,
+    `AutoCAD could not load it (${localTime(receiptAt)}): denied, The tool was refused.`],
+  ['ran ok', { last_event: 'ran', arrived_at: receiptAt,
+    last_run: { at: runAt, outcome: 'ok', duration_ms: 1234, drawing: fingerprint } }, 0,
+    `Arrived in AutoCAD ${localTime(receiptAt)}. Ran on roof.dwg: ok in 1.2 s (${localTime(runAt)})`],
+  ['ran failed', { last_event: 'run_failed', last_run: { at: runAt, outcome: 'failed', drawing: fingerprint, error: receiptError } }, 0,
+    `Ran on roof.dwg: failed (${localTime(runAt)}): denied, The tool was refused.`],
+  ['ran cancelled', { last_event: 'run_failed', last_run: { at: runAt, outcome: 'cancelled', drawing: fingerprint } }, 0,
+    `Ran on roof.dwg: cancelled (${localTime(runAt)})`],
+])('shows the AutoCAD %s display row', async (_state, branch, age, expected) => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date(runAt))
+  getAuthorStage.mockResolvedValue({ ...staged, target: 'branch', status: 'published', branch,
+    publication: { ...publishedPackage, published_at: new Date(Date.now() - age).toISOString() } })
+  await mount()
+  const row = screen.getByText('AutoCAD').nextElementSibling
+  expect(row).toHaveTextContent(expected)
+  if (branch?.last_run?.drawing) expect(row.querySelector('[title]')).toHaveAttribute('title', fingerprint)
+  for (const time of row.querySelectorAll('time')) {
+    expect(time).toHaveTextContent(localTime(time.getAttribute('datetime')))
+  }
+  if (branch?.verify_failed || branch?.last_run?.error) expect(row.querySelector('code')).toHaveTextContent('denied')
+})
+
+it.each([[0, '0 ms'], [999, '999 ms'], [1000, '1.0 s']])('formats a run duration of %s', async (duration_ms, label) => {
+  getAuthorStage.mockResolvedValue({ ...staged, status: 'published', branch: {
+    last_event: 'ran', last_run: { at: runAt, outcome: 'ok', duration_ms },
+  } })
+  await mount()
+  expect(screen.getByText('AutoCAD').nextElementSibling).toHaveTextContent(`Ran: ok in ${label}`)
+})
+
+it('uses updated_at for an old publication with no published_at', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date(runAt))
+  getAuthorStage.mockResolvedValue({ ...staged, status: 'published', updated_at: '2026-11-27T15:00:00Z' })
+  await mount()
+  expect(screen.getByText('AutoCAD').nextElementSibling).toHaveTextContent(
+    'Not seen in AutoCAD yet. Check that the plugin is signed in to this workspace.')
+})
+
+it('keeps polling a published Branch build every 15 seconds until a run arrives', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date(runAt))
+  const published = { ...staged, target: 'branch', status: 'published',
+    publication: { ...publishedPackage, published_at: runAt } }
+  getAuthorStage.mockResolvedValueOnce(published)
+    .mockResolvedValueOnce({ ...published, branch: { last_event: 'synced', arrived_at: receiptAt } })
+    .mockResolvedValue({ ...published, branch: { last_event: 'ran', last_run: { at: runAt, outcome: 'ok' } } })
+  await mount()
+  await advance(14999)
+  expect(getAuthorStage).toHaveBeenCalledTimes(1)
+  await advance(1)
+  expect(getAuthorStage).toHaveBeenCalledTimes(2)
+  await advance(15000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(3)
+  await advance(60000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(3)
+})
+
+it('bounds published Branch polling by 30 minutes from publication', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date(runAt))
+  getAuthorStage.mockResolvedValue({ ...staged, target: 'branch', status: 'published',
+    staged_at: '2026-11-27T14:00:00Z', publication: { ...publishedPackage,
+      published_at: new Date(Date.now() - 29 * 60000).toISOString() } })
+  await mount()
+  await advance(30000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(3)
+  await advance(60000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(4)
+})
+
+it('withholds the Target row for an unpublished card', async () => {
+  await mount()
+  expect(screen.queryByText('Target')).toBeNull()
+})
+
+it('shows the signed package version and digest from the server publication and copies the full digest', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  vi.stubGlobal('navigator', { clipboard: { writeText } })
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: publishedPackage })
+  await mount()
+  const row = screen.getByText(/Published to your plugin catalog/)
+  expect(row).toHaveTextContent(' · v1.2.0 · 0123456789ab')
+  expect(button('Copy package digest')).toHaveAttribute('title', packageDigest)
+  await act(async () => fireEvent.click(button('Copy package digest')))
+  expect(writeText).toHaveBeenCalledWith(packageDigest)
+  for (const label of [/Deployed to AutoCAD/, /Published to your plugin catalog/]) {
+    expect(screen.getByText(label).querySelector('time')).toHaveTextContent(/\d+:\d{2}:47/)
+  }
+})
+
+it('can show a package digest supplied with a published review POST result', async () => {
+  postReview.mockResolvedValue({ change_set_id: 'change', ...selfReview, status: 'published',
+    version: '1.2.0', package_digest: packageDigest })
+  await mount()
+  await act(async () => fireEvent.click(button('Deploy to AutoCAD')))
+  expect(screen.getByText(/Published to your plugin catalog/)).toHaveTextContent(' · v1.2.0 · 0123456789ab')
+  expect(button('Copy package digest')).toBeVisible()
+})
+
+it.each([undefined, '', 'a'.repeat(63), 'a'.repeat(65), 'G'.repeat(64), 'A'.repeat(64), `${'a'.repeat(64)}\n`, 42])(
+  'omits package details for an absent or malformed digest %s', async digest => {
+    getAuthorStage.mockResolvedValue({ ...staged, review: selfReview,
+      publication: { ...publishedPackage, package_digest: digest } })
+    await mount()
+    expect(screen.getByText(/Published to your plugin catalog/)).not.toHaveTextContent(' · v')
+    expect(screen.queryByRole('button', { name: 'Copy package digest' })).toBeNull()
+  })
+
+it.each([undefined, '', '1.2', 'v1.2.0', '1.2.0-beta', '01.2.0', '1.2.0\n', 123])(
+  'omits package details for an absent or malformed version %s', async version => {
+    getAuthorStage.mockResolvedValue({ ...staged, review: selfReview,
+      publication: { ...publishedPackage, version } })
+    await mount()
+    expect(screen.getByText(/Published to your plugin catalog/)).not.toHaveTextContent(packageDigest.slice(0, 12))
+    expect(screen.queryByRole('button', { name: 'Copy package digest' })).toBeNull()
+  })
+
+it.each(['awaiting_approval', 'publishing', 'denied', 'superseded', 'rolled_back'])(
+  'withholds package details for publication state %s', async state => {
+    getAuthorStage.mockResolvedValue({ ...staged, review: selfReview,
+      publication: { ...publishedPackage, state } })
+    await mount()
+    expect(screen.queryByText(/0123456789ab/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Copy package digest' })).toBeNull()
+  })

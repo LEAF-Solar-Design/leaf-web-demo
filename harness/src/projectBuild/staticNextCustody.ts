@@ -163,26 +163,44 @@ export async function publishStaticNextCustody(options: {
     artifactBindingId: artifacts.bindingId, artifactId: "00000000-0000-0000-0000-000000000000",
     manifestSha256: staticManifestDigest(manifest), manifest,
     createdAt: created.toISOString(), cleanupAt: cleanup.toISOString() });
-  const key = `${location(draft.bundleSha256, a.executionId)}/receipt.json`;
-  const prior = await store.get(key);
-  if (prior !== null) {
-    if (prior.length > MAX_RECORD) fail("job_conflict");
+  const base = location(draft.bundleSha256, a.executionId);
+  const key = `${base}/receipt.json`;
+  const assertActive = async (receipt: StaticNextCustodyReceipt) => {
+    if (await store.get(`${base}/cleaned.json`) !== null ||
+        !(options.now().getTime() < Date.parse(receipt.cleanupAt))) fail("job_conflict");
+  };
+  const recover = (raw: Buffer, artifactId?: string): StaticNextCustodyReceipt => {
+    if (raw.length > MAX_RECORD) return fail("job_conflict");
     let existing: StaticNextCustodyReceipt;
-    try { existing = receiptCopy(JSON.parse(prior.toString("utf8"))); }
+    try { existing = receiptCopy(JSON.parse(raw.toString("utf8"))); }
     catch { return fail("job_conflict"); }
-    // The existing artifact ID is only used to compare immutable receipt bytes;
-    // publication still requires the real store acknowledgement below.
-    if (!prior.equals(bytes({ ...draft, artifactId: existing.artifactId }))) fail("job_conflict");
-  }
+    // The first publication owns the retention window, including after an
+    // acknowledgement is lost or another publisher wins the conditional write.
+    if (!raw.equals(bytes({ ...draft, artifactId: artifactId ?? existing.artifactId,
+      createdAt: existing.createdAt, cleanupAt: existing.cleanupAt }))) return fail("job_conflict");
+    return existing;
+  };
+  const prior = await store.get(key);
+  const existing = prior === null ? undefined : recover(prior);
+  await assertActive(existing ?? draft);
   const stored = await artifacts.put(a.scope, manifest, files);
   if (!stored || !uuid(stored.artifactId) || stored.manifestSha256 !== draft.manifestSha256) fail();
+  if (existing) {
+    if (stored.artifactId !== existing.artifactId) fail("job_conflict");
+    await assertActive(existing);
+    return existing;
+  }
   const receipt = receiptCopy({ ...draft, artifactId: stored.artifactId });
-  const body = bytes(receipt);
-  const status = await store.putIfAbsent(key, body);
+  await assertActive(receipt);
+  const status = await store.putIfAbsent(key, bytes(receipt));
   if (status === "exists") {
-    const existing = await store.get(key);
-    if (!existing || !existing.equals(body)) fail("job_conflict");
+    const winner = await store.get(key);
+    if (!winner) return fail("job_conflict");
+    const settled = recover(winner, stored.artifactId);
+    await assertActive(settled);
+    return settled;
   } else if (status !== "created") fail("job_conflict");
+  await assertActive(receipt);
   return receipt;
 }
 

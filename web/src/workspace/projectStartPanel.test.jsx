@@ -1,8 +1,35 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import ProjectStartPanel from './ProjectStartPanel.jsx'
+import { createWorkspaceController } from '../controllers/workspace/createWorkspaceController.js'
+import { createProject } from '../api.js'
 
 afterEach(cleanup)
+
+it.each(['Create project', 'Create project from this drawing'])('keeps the draft without attaching on a collision from %s', async (action) => {
+  const openProject = vi.fn()
+  const attach = vi.fn()
+  const controller = createWorkspaceController({ storage: { getItem: () => 'o1' },
+    services: { createProject, openProject },
+  })
+  const props = () => ({ ...controller.getSnapshot(), bootstrapState: 'bound', drawingMounted: true,
+    onCreateProject: (name) => controller.createProject(name, { requireCreated: true }),
+    onAttachDrawing: attach,
+  })
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+    project: { project_id: 'existing', name: 'Maple' }, created: false,
+  }), { status: 200 })))
+  try {
+    const view = render(<ProjectStartPanel {...props()} />)
+    fireEvent.change(screen.getByLabelText('Project name'), { target: { value: 'Maple' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: action })) })
+    view.rerender(<ProjectStartPanel {...props()} />)
+    expect(screen.getByLabelText('Project name').value).toBe('Maple')
+    expect(screen.getByRole('alert').textContent).toMatch(/Choose a different name.*open the existing project/)
+    expect(openProject).not.toHaveBeenCalled()
+    expect(attach).not.toHaveBeenCalled()
+  } finally { controller.dispose(); vi.unstubAllGlobals() }
+})
 
 it('shows a quiet loading state before workspace bootstrap resolves', () => {
   render(<ProjectStartPanel bootstrapState="unknown" />)

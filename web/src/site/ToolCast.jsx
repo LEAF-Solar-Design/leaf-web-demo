@@ -1205,29 +1205,38 @@ export default function ToolCast({
     requestCatalogRun(last.tool, { ...last.params }, { complete: true })
   }, [busy, jobRunning, requestCatalogRun])
 
-  const openWorkspaceProject = useCallback(async (projectId) => {
-    if (!sessionReady) return
-    const opened = await workspace.openProject(projectId)
-    const canonical = opened?.drawing_versions?.[0]?.version_id || null
-    workspace.selectCanonicalVersion(canonical)
+  const openWorkspaceProject = useCallback(async (projectId, revision = null) => {
+    if (!sessionReady) return null
+    const opened = await workspace.openProject(projectId, revision)
+    if (!opened) return null
+    if (!revision) workspace.selectCanonicalVersion(opened.drawing_versions?.[0]?.version_id || null)
     setLeftView('workspace')
+    return opened
   }, [sessionReady, workspace])
 
   const createWorkspaceOrg = useCallback(async (name) => {
     if ((!sessionReady && !workspaceBootstrapRequired) || name == null) return
     const org = await workspace.createOrg(name)
+    if (org) {
+      // The unbound reads before this org existed left a 403 grant state
+      // ("access restricted") and a network banner behind; clear and re-read.
+      setSessionError(null)
+      setError(null)
+      platform.actions.refreshAll()
+    }
     if (org && workspaceBootstrapRequired) {
       setWorkspaceBootstrapRequired(false)
       setSessionRetry((current) => current + 1)
     }
     return org
-  }, [sessionReady, workspace, workspaceBootstrapRequired])
+  }, [sessionReady, workspace, workspaceBootstrapRequired, platform.actions])
 
   const createWorkspaceProject = useCallback(async (name) => {
     if (!sessionReady) return
     if (name == null || !name.trim()) return
-    const project = await workspace.createProject(name)
+    const project = await workspace.createProject(name, { requireCreated: true })
     if (project) setLeftView('workspace')
+    return project
   }, [sessionReady, workspace])
 
   // A deleted project cannot be rehydrated: drop the open workspace and leave
@@ -1680,6 +1689,7 @@ export default function ToolCast({
       loading={workspace.projectsLoading}
       orgBusy={workspace.orgBusy}
       projectBusy={workspace.projectBusy}
+      projectDraftError={workspace.projectDraftError}
       onCreateOrg={createWorkspaceOrg}
       onCreateProject={createWorkspaceProject}
       onOpenProject={openWorkspaceProject}
@@ -1816,7 +1826,7 @@ export default function ToolCast({
             <div className="strip-decision enter" role="status">
               <span className="dot square" aria-hidden="true" />
               <span className="strip-sentence">{agentBanner.message}</span>
-              {agentBanner.kind === 'grant' && <button type="button" className="chip-act" onClick={() => { setRightView('trust'); setClaudeOpen(true) }}>Link account</button>}
+              {agentBanner.kind === 'grant' && <button type="button" className="chip-act" onClick={() => { setRightView('trust'); setClaudeOpen(true); platform.actions.loadGrant() }}>Link account</button>}
               <button type="button" className="chip-neutral" onClick={catalog.actions.clearAgentBanner}>Dismiss</button>
             </div>
           )}
@@ -2146,7 +2156,7 @@ export default function ToolCast({
               onCatalogChanged={catalog.actions.refreshCatalog}
               consumeCatalogPublication={catalog.controller.consumeCatalogPublication}
               onDismiss={() => {}}
-              onLinkClaude={() => { setRightView('trust'); setClaudeOpen(true) }}
+              onLinkClaude={() => { setRightView('trust'); setClaudeOpen(true); platform.actions.loadGrant() }}
               onAttachJob={attachJob}
               onJobLinked={attachJob}
               writeLocked={writeLocked}
@@ -2543,6 +2553,7 @@ export default function ToolCast({
               open={claudeOpen}
               onToggle={setClaudeOpen}
               onLink={platform.actions.linkClaude}
+              onRefresh={platform.actions.loadGrant}
               onUnlink={platform.actions.unlinkClaude}
             />
             {/* Standardization slice 8c: the Link-a-service drawer sits in

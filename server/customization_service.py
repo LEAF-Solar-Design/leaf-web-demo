@@ -28,6 +28,7 @@ try:
 except ImportError:  # pragma: no cover - POSIX
     msvcrt = None
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -37,11 +38,19 @@ from uuid import uuid4
 from psycopg import Error as PostgresError
 
 import author_quota
+import agent_gate
 import agent_policy
+import build_plan
 import change_classifier
+import customization_flags
 import deps
 import entitlements
 import platform_link
+from branch_tools.package_check import check_branch_package
+from branch_tools import online_signer, tenant_catalog, tenant_publish
+from branch_tools.dev_publish import (
+    DevPublishError, DevPublishResult, publish_branch_package, read_branch_publication,
+)
 from customization_authority import (
     AuthorityError, BuilderEntitlement, CustomizationAuthority,
     HmacConfirmationSigner, PublishRequest, StaffAuthority, StagedChange,
@@ -50,7 +59,7 @@ from customization_authority import (
 from customization_flags import RolloutMode, enabled, mode
 from customization_models import (
     ChangeSet, ChangeSetNotFoundError, ChangeState, ChangeSetConflictError,
-    IdempotencyReplayError, InvalidTransitionError,
+    IdempotencyReplayError, InvalidTransitionError, RetryTargetInvalidError, require_uuid,
 )
 from customization_postgres_store import PostgresCustomizationStore
 from customization_store import CustomizationRepository, SQLiteCustomizationStore
@@ -63,6 +72,56 @@ from solar_authored_graph import reads_graph
 
 
 CONTRACT = "leaf.customization.v1"
+CUSTOMIZATION_ERROR_MESSAGES = {
+    "customization_stage_queue_full": "Tool builds are busy right now. This request was not queued and was not counted against your daily builds. Try again in a few minutes.",
+    "customization_stage_queue_unavailable": "Tool builds are temporarily unavailable. This request was not queued and was not counted against your daily builds.",
+    "revision_target_missing": "This Branch tool has no published version to revise. Publish a version first, or create a new tool.",
+    "invalid_stage_source_request": "Invalid staged source request.",
+    "stage_source_not_available": "Staged source is not available.",
+    "stage_source_failed": "Staged source could not be read.",
+    "customization_stage_disabled": (
+        "Tool authoring is not enabled for this workspace in this environment. "
+        "The approved request was not executed."
+    ),
+    "customization_publish_disabled": (
+        "Tool publication is not enabled for this workspace in this environment. "
+        "The approved request was not executed."
+    ),
+    "invalid_stage_request": (
+        "The requested authoring mode is not supported by the protected authoring path. "
+        "Use build mode."
+    ),
+    "builder_entitlement_missing": (
+        "This workspace does not have the builder entitlement required for tool authoring."
+    ),
+    "customization_harness_unavailable": (
+        "Protected tool authoring is temporarily unavailable. "
+        "The approved request was not executed."
+    ),
+    "idempotency_key_required": (
+        "Tool authoring requires a request identity. The approved request was not executed."
+    ),
+    "tenant_identity_binding_unavailable": (
+        "Tool authoring requires a verified workspace identity for the requester. "
+        "The approved request was not executed."
+    ),
+    "stage_authority_invalid": (
+        "Studio could not confirm this build came from your current conversation, so it was not started. Ask for it again."
+    ),
+    "stage_grant_expired": "This build waited too long and was not started. Ask for it again.",
+    "stage_grant_exhausted": (
+        "This build was tried twice and could not be finished. Ask for it again. "
+        "This build waited in line, so it ran without connected services. "
+        "If it needs one, ask again when the line is short."
+    ),
+    "stage_grant_turn_open": "The conversation that asked for this build was stopped, so it was not started. Ask for it again.",
+    "stage_grant_refused": "Your access changed while this request waited. It was not started.",
+    "stage_grant_unavailable": "This build could not be checked and was not started. Ask for it again.",
+    "stage_grant_withdrawn": "This build was withdrawn before it started.",
+    "stage_grant_cancelled": "This build was stopped from the conversation before it started.",
+}
+
+MAX_STAGED_SOURCE_BYTES = 256 * 1024
 DEFAULT_DB = Path(__file__).resolve().parent / "customization.db"
 _configured_lock = threading.Lock()
 _configured_services: dict[str, "CustomizationService"] = {}
@@ -91,6 +150,7 @@ _DANGLING_RECHECK_S = 0.25
 # expected-head CAS, a remote that did not accept). Only these end a change
 # SUPERSEDED; anything else, including an unreadable 409, stays recoverable.
 _HARNESS_PUBLISH_LOST = frozenset({"publish_conflict", "publish_not_accepted"})
+_BRANCH_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
 _DIAGNOSTIC_CODES = frozenset({
@@ -142,13 +202,34 @@ _DIAGNOSTIC_CODES = frozenset({
 })
 
 
+def refund_unstarted_build(
+    tenant_id: str, change_set_id: str, *, log: logging.Logger | None = None,
+) -> None:
+    log = _LOG if log is None else log
+    try:
+        refunded = author_quota.refund_unstarted(tenant_id, change_set_id)
+        log.info(
+            "author_quota_refund_unstarted: change_set=%s refunded=%s",
+            change_set_id, refunded,
+        )
+    except Exception as exc:  # noqa: BLE001 - terminal state wins
+        log.warning(
+            "author_quota_refund_unstarted_failed: exception=%s",
+            type(exc).__name__,
+        )
+
+
 class CustomizationServiceError(RuntimeError):
+    harness_not_called = False
+
     def __init__(
         self, code: str, status_code: int = 409, detail: str = "", *,
         diagnostic_code: str | None = None, cause: BaseException | None = None,
+        failures: list[dict[str, str]] | None = None,
     ) -> None:
         super().__init__(code)
         self.code, self.status_code = code, status_code
+        self.harness_not_called = code == "stage_grant_cancelled"
         selected = detail if diagnostic_code is None else diagnostic_code
         self.diagnostic_code = (
             selected if type(selected) is str and selected in _DIAGNOSTIC_CODES
@@ -157,6 +238,61 @@ class CustomizationServiceError(RuntimeError):
         self.exception_type = type(cause).__name__ if isinstance(cause, BaseException) else None
         # Legacy readers receive the validated branch code only.
         self.detail = self.diagnostic_code
+        self.failures = [
+            {"rule": str(item.get("rule", ""))[:100],
+             "path": str(item.get("path", ""))[:300],
+             "message": str(item.get("message", ""))[:300]}
+            for item in (failures or [])[:50]
+        ]
+
+
+def _stage_request_fingerprint(description: str, target: str | None = None) -> str:
+    payload = description if target != "branch" else json.dumps(
+        {"description": description, "target": "branch"}, sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _valid_compile_attempts(attempts: Any) -> bool:
+    def integer(value: Any, low: int, high: int) -> bool:
+        return type(value) is int and low <= value <= high
+
+    if not isinstance(attempts, list) or len(attempts) > 8:
+        return False
+    previous = 0
+    for attempt in attempts:
+        if not isinstance(attempt, dict) or attempt.keys() not in (
+                {"n", "decision", "errors", "diagnostics"},
+                {"n", "decision", "errors", "diagnostics", "source_decoded"}):
+            return False
+        if (not integer(attempt["n"], previous + 1, 8)
+                or attempt["decision"] not in ("accept", "compile_failed", "malformed", "unavailable")
+                or not integer(attempt["errors"], 0, 10000)):
+            return False
+        previous = attempt["n"]
+        if "source_decoded" in attempt:
+            decoded = attempt["source_decoded"]
+            if (attempt["decision"] != "accept" or not isinstance(decoded, dict)
+                    or decoded.keys() != {"entities", "original_sha256", "compiled_sha256"}
+                    or not integer(decoded["entities"], 1, 10000)
+                    or any(not isinstance(decoded[key], str) or not re.fullmatch(r"[0-9a-f]{64}", decoded[key])
+                           for key in ("original_sha256", "compiled_sha256"))
+                    or decoded["original_sha256"] == decoded["compiled_sha256"]):
+                return False
+        diagnostics = attempt["diagnostics"]
+        if not isinstance(diagnostics, list) or len(diagnostics) > 10:
+            return False
+        for diagnostic in diagnostics:
+            if not isinstance(diagnostic, dict) or diagnostic.keys() != {"code", "file", "line"}:
+                return False
+            if (not isinstance(diagnostic["code"], str)
+                    or not re.fullmatch(r"CS[0-9]{4}|scan|unparsed", diagnostic["code"])
+                    or not isinstance(diagnostic["file"], str)
+                    or not re.fullmatch(r"[A-Za-z0-9_./-]{1,120}", diagnostic["file"])
+                    or not integer(diagnostic["line"], 0, 1000000)):
+                return False
+    return True
 
 
 _SCHEMA_IDENTITY_MAX_DEPTH = 128
@@ -320,6 +456,37 @@ def _harness_config() -> tuple[str, str]:
             os.environ.get("LEAF_HARNESS_SECRET", "").strip())
 
 
+def _stage_queue_limit() -> int:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_MAX_QUEUED", "").strip()
+    try:
+        limit = int(value) if value.isascii() and value.isdecimal() else 0
+    except ValueError:
+        return 0
+    return limit if 1 <= limit <= 10000 else 0
+
+
+def _stage_queue_status_enabled() -> bool:
+    return os.environ.get("LEAF_CUSTOMIZATION_STAGE_QUEUE_STATUS", "").strip() == "1"
+
+
+def _stage_estimate_s() -> int:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_ESTIMATE_S", "").strip()
+    try:
+        estimate = int(value) if value.isascii() and value.isdecimal() else 0
+    except ValueError:
+        return 0
+    return estimate if 1 <= estimate <= 3600 else 0
+
+
+def _stage_worker_count() -> int:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_WORKERS", "").strip()
+    try:
+        workers = int(value) if value.isascii() and value.isdecimal() else 1
+    except ValueError:
+        return 1
+    return workers if 1 <= workers <= 4 else 1
+
+
 def _harness_stage_timeout_s() -> float:
     """Wait beyond the harness budget so a client retry cannot race its lease."""
     try:
@@ -405,7 +572,7 @@ def _git_trust(*paths: Path) -> list[str]:
     return flags
 
 
-def _git(bare: Path, *args: str) -> str:
+def _git(bare: Path, *args: str, strip: bool = True) -> str:
     try:
         result = subprocess.run(
             ["git", *_git_trust(bare), "--git-dir", str(bare), *args],
@@ -417,7 +584,7 @@ def _git(bare: Path, *args: str) -> str:
             "tenant_repository_unavailable", 503,
             diagnostic_code="git_failed", cause=exc,
         ) from exc
-    return result.stdout.strip()
+    return result.stdout.strip() if strip else result.stdout
 
 
 def _git_blob(bare: Path, object_name: str) -> bytes:
@@ -732,6 +899,8 @@ class CustomizationService:
         try:
             change, _created = self.store.reserve_stage(**kwargs)
             return change
+        except RetryTargetInvalidError as exc:
+            raise CustomizationServiceError("retry_target_invalid", 409) from exc
         except IdempotencyReplayError as exc:
             raise CustomizationServiceError("idempotency_replay", 409) from exc
         except (ChangeSetConflictError, ChangeSetNotFoundError) as exc:
@@ -943,6 +1112,14 @@ class CustomizationService:
             inherited = self._inherited_record_fields(change, seen)
             rows = self._record_fields_rows(change, change.staged_commit or "", change.catalog_digest)
             base = self._record_fields_rows(change, change.base_commit)
+            if change.tool_target == "branch":
+                if change.request_graph_input is not None:
+                    raise CustomizationServiceError("graph_input_consumer_unsupported", 422)
+                if rows != base:
+                    raise CustomizationServiceError("record_fields_invalid", 503)
+                return canonicalize_catalog_record_fields({
+                    "schema": "leaf.customization-record-fields.v1", "tools": inherited,
+                })
             self._verify_raw_graph_declarations(change, base, rows, inherited)
             if removal_target is None:
                 marker = self.store.get_removal_request(
@@ -990,11 +1167,20 @@ class CustomizationService:
     def stage(
         self, *, tenant: Any, description: str, mode: str,
         idempotency_key: str, target_tool_name: str | None = None,
+        target: str | None = None,
         authority_session_id: str | None = None,
         authority_turn_id: str | None = None,
         graph_input: Any = None,
     ) -> dict[str, Any]:
+        if target not in (None, "studio", "branch"):
+            raise CustomizationServiceError("invalid_target", 422)
         tenant_id = _tenant_id(tenant)
+        if customization_flags.plan_mode_enabled(tenant_id):
+            return self.enqueue_stage(
+                tenant=tenant, description=description, mode=mode, idempotency_key=idempotency_key,
+                target=target, target_tool_name=target_tool_name, graph_input=graph_input,
+                authority_session_id=authority_session_id, authority_turn_id=authority_turn_id,
+            )
         if not enabled(5, tenant_id):
             raise CustomizationServiceError("customization_stage_disabled", 404)
         if mode != "build" or not isinstance(description, str) or not description.strip():
@@ -1033,6 +1219,8 @@ class CustomizationService:
         base, predecessor = self._stage_admission_base(
             tenant_id, idempotency_key, graph_input, release
         )
+        if target == "branch" and target_tool_name:
+            self._branch_revision_base(tenant_id, base, target_tool_name)
         change = self._reserve_stage(
             tenant_id=tenant_id, idempotency_key=idempotency_key, base_commit=base,
             desired_platform_release=release.release_id,
@@ -1040,10 +1228,11 @@ class CustomizationService:
             author_subject=binding.subject or "", change_set_id=str(uuid4()),
             change_kind="revise" if target_tool_name else "create",
             target_tool_name=target_tool_name,
+            **({"tool_target": "branch"} if target == "branch" else {}),
             authority_session_id=authority_session_id,
             authority_turn_id=authority_turn_id,
             request_description=description,
-            request_fingerprint=hashlib.sha256(description.encode("utf-8")).hexdigest(),
+            request_fingerprint=_stage_request_fingerprint(description, target),
             request_graph_input=graph_input,
             base_catalog_change_set_id=predecessor,
         )
@@ -1080,16 +1269,55 @@ class CustomizationService:
     def enqueue_stage(
         self, *, tenant: Any, description: str, mode: str,
         idempotency_key: str, target_tool_name: str | None = None,
+        target: str | None = None,
         authority_session_id: str | None = None,
         authority_turn_id: str | None = None,
         graph_input: Any = None,
+        plan_confirmation_id: str | None = None,
+        retry_of_change_set_id: str | None = None,
     ) -> dict[str, Any]:
         """Reserve and charge one exact stage request without calling the harness."""
+        if target not in (None, "studio", "branch"):
+            raise CustomizationServiceError("invalid_target", 422)
         tenant_id = _tenant_id(tenant)
         if not enabled(5, tenant_id):
             raise CustomizationServiceError("customization_stage_disabled", 404)
+        plan_fields = {}
+        change_kind = "revise" if target_tool_name else "create"
+        if customization_flags.plan_mode_enabled(tenant_id):
+            record = agent_gate.consumed_build_plan(
+                tenant_id, authority_session_id, authority_turn_id,
+                getattr(tenant, "subject", None), plan_confirmation_id,
+            )
+            if record is None:
+                raise CustomizationServiceError("plan_required", 409)
+            plan = record["args"]["plan"]
+            if ((target is not None and target != plan["target"])
+                    or (target_tool_name is not None and target_tool_name != plan.get("target_tool_name"))
+                    or graph_input is not None):
+                raise CustomizationServiceError("plan_binding_mismatch", 422)
+            target = plan["target"]
+            change_kind = plan["change_kind"]
+            target_tool_name = plan.get("target_tool_name")
+            description = build_plan.render_description(plan)
+            plan_fields = {
+                "plan_confirmation_id": record["confirmation_id"],
+                "plan_digest": build_plan.plan_digest(plan),
+                "plan_json": build_plan.canonical_bytes(plan).decode("utf-8"),
+            }
+            gated_retry = record.get("retry_of_change_set_id")
+            if gated_retry is not None and retry_of_change_set_id not in (None, gated_retry):
+                raise CustomizationServiceError("retry_target_invalid", 409)
+            retry = gated_retry if gated_retry is not None else retry_of_change_set_id
+            if retry is not None:
+                if not isinstance(retry, str):
+                    raise CustomizationServiceError("retry_target_invalid", 409)
+                try:
+                    plan_fields["retry_of_change_set_id"] = require_uuid(retry)
+                except ValueError as exc:
+                    raise CustomizationServiceError("retry_target_invalid", 409) from exc
         if (mode != "build" or not isinstance(description, str)
-                or not description.strip() or len(description) > 8000):
+                or not description.strip() or (not plan_fields and len(description) > 8000)):
             raise CustomizationServiceError("invalid_stage_request", 422)
         if target_tool_name is not None and (
             not isinstance(target_tool_name, str)
@@ -1129,14 +1357,36 @@ class CustomizationService:
             tenant_id, idempotency_key, graph_input, release,
             check_harness=True,
         )
-        fingerprint = hashlib.sha256(description.encode("utf-8")).hexdigest()
+        if target == "branch" and target_tool_name:
+            self._branch_revision_base(tenant_id, base, target_tool_name)
+        limit = _stage_queue_limit()
+        if limit > 0:
+            # The cap is soft: concurrent admissions between this check and the
+            # staging transition can exceed it by their number.
+            try:
+                try:
+                    self.store.get_change_set_by_idempotency(
+                        tenant_id=tenant_id, idempotency_key=idempotency_key
+                    )
+                except ChangeSetNotFoundError:
+                    if self.store.stage_queue_depth() >= limit:
+                        raise CustomizationServiceError("customization_stage_queue_full", 503)
+            except ToolRecordFieldError as exc:
+                raise CustomizationServiceError("record_fields_invalid", 503) from exc
+            except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+                if isinstance(exc, CustomizationServiceError):
+                    raise
+                raise CustomizationServiceError("customization_stage_queue_unavailable", 503) from exc
+        fingerprint = _stage_request_fingerprint(description, target)
         change = self._reserve_stage(
             tenant_id=tenant_id, idempotency_key=idempotency_key,
             base_commit=base, desired_platform_release=release.release_id,
             workspace_contract_digest=release.workspace_contract_sha256,
             author_subject=binding.subject or "", change_set_id=str(uuid4()),
-            change_kind="revise" if target_tool_name else "create",
+            change_kind=change_kind,
             target_tool_name=target_tool_name, request_description=description,
+            **plan_fields,
+            **({"tool_target": "branch"} if target == "branch" else {}),
             request_fingerprint=fingerprint,
             request_graph_input=graph_input,
             base_catalog_change_set_id=predecessor,
@@ -1166,6 +1416,9 @@ class CustomizationService:
                 idempotency_key=f"stage:{idempotency_key}",
                 expected_state=ChangeState.CREATED,
             )
+            import customization_stage_grants
+            if customization_stage_grants.ttl_s() is not None:
+                customization_stage_grants.issue(self, change)
         return self.stage_status_change(change)
 
     def stage_removal(
@@ -1377,6 +1630,7 @@ class CustomizationService:
     def _complete_stage(
         self, durable: ChangeSet, receipt: Mapping[str, Any], *,
         body: Mapping[str, Any] | None = None,
+        compile_summary_json: str | None = None,
         lease_owner: str | None = None, lease_attempt: int | None = None,
     ) -> tuple[ChangeSet, tuple[str, ...]]:
         def agreement(winner: ChangeSet, snapshot: str | None) -> None:
@@ -1400,8 +1654,26 @@ class CustomizationService:
             policy_body = None
         try:
             self._verify_catalog(durable.tenant_id, receipt["staged_commit"], receipt["catalog_digest"])
-            changed = self._verify_bound_stage_policy(proposed, policy_body)
+            changed = self._verify_bound_stage_policy(
+                proposed, {"receipt": receipt} if proposed.tool_target == "branch" else policy_body
+            )
         except CustomizationServiceError as exc:
+            if (durable.tool_target == "branch" and exc.code == "branch_package_invalid"
+                    and durable.state is ChangeState.STAGING):
+                # Both stores bound reason_message to 500 characters, below the
+                # branch contract's 2000-character ceiling. Fail here so sync
+                # calls and harness callbacks retain the same worker diagnostic.
+                message = "; ".join(
+                    f"{item['rule']} {item['path']}: {item['message']}"
+                    for item in exc.failures
+                )[:500]
+                failed = self.store.fail_stage_claim(
+                    tenant_id=durable.tenant_id, change_set_id=durable.change_set_id,
+                    owner=lease_owner if lease_owner is not None else durable.stage_lease_owner,
+                    reason_code=exc.code, retryable=False, reason_message=message or None,
+                )
+                if failed is not None:
+                    finish_stage_authority_for_change(failed)
             if exc.code == "tenant_repository_unavailable" and (
                 durable.request_graph_input is not None
                 or durable.base_catalog_change_set_id is not None
@@ -1426,6 +1698,7 @@ class CustomizationService:
                 workspace_contract_digest=receipt["workspace_contract_digest"],
                 stage_lease_owner=lease_owner, stage_attempt=lease_attempt,
                 catalog_record_fields_json=snapshot,
+                compile_summary_json=compile_summary_json,
             )
         except (ChangeSetConflictError, InvalidTransitionError, IdempotencyReplayError) as exc:
             winner = self._record_fields_change(durable.tenant_id, durable.change_set_id)
@@ -1513,7 +1786,7 @@ class CustomizationService:
             return not_found
         if (not isinstance(change.request_description, str)
                 or not isinstance(change.request_fingerprint, str)
-                or hashlib.sha256(change.request_description.encode("utf-8")).hexdigest()
+                or _stage_request_fingerprint(change.request_description, change.tool_target)
                 != change.request_fingerprint):
             raise CustomizationServiceError("customization_stage_failed", 503)
         if change.state is ChangeState.CREATED:
@@ -1559,6 +1832,9 @@ class CustomizationService:
         tenant_id = _tenant_id(tenant)
         keep_authority = False
         try:
+            if customization_flags.plan_mode_enabled(tenant_id):
+                # Plan retries are new, separately approved enqueue requests.
+                raise CustomizationServiceError("plan_required", 409)
             self._authority().authorize_stage(
                 binding=binding,
                 builder_entitlement=BuilderEntitlement(tenant_id, binding.subject, True, True),
@@ -1603,7 +1879,149 @@ class CustomizationService:
             )
         except ToolRecordFieldError as exc:
             raise CustomizationServiceError("record_fields_invalid", 503) from exc
-        return self.stage_status_change(change)
+        result = self.stage_status_change(change)
+        import customization_stage_grants
+
+        if (customization_stage_grants.ttl_s() is not None
+                and result["status"] == "queued"
+                and change.tool_target == "branch"
+                and getattr(tenant, "subject", None) == change.author_subject):
+            try:
+                grant = self.store.get_stage_grant(change.tenant_id, change.change_set_id)
+                if grant is not None and grant["revoked_ms"] is None:
+                    result["withdrawable"] = True
+            except Exception:
+                pass
+        return result
+
+    def stage_source(self, *, tenant: Any, change_set_id: str) -> tuple[bytes, dict[str, str]]:
+        """Read only the original author's active, receipt-bound tool source."""
+        def eligible() -> ChangeSet:
+            tenant_id = _tenant_id(tenant)
+            if not enabled(5, tenant_id):
+                raise CustomizationServiceError("customization_stage_disabled", 404)
+            binding = _binding(tenant)
+            if not isinstance(binding.subject, str) or not binding.subject.strip():
+                raise CustomizationServiceError("tenant_identity_binding_unavailable", 403)
+            if binding.role not in {"owner", "editor"}:
+                raise CustomizationServiceError("tenant_role_denied", 403)
+            tier = entitlements.resolve_tier(tenant)
+            roles, elevated = entitlements.resolve_roles(tenant)
+            if not entitlements.entitlements_for(tier, roles, elevated).get("build", False):
+                raise CustomizationServiceError("builder_entitlement_missing", 403)
+            change = self.store.get_change_set(tenant_id=tenant_id, change_set_id=change_set_id)
+            if (change.tenant_id != tenant_id or change.change_set_id != change_set_id
+                    or not change.author_subject or change.author_subject != binding.subject
+                    or change.state is not ChangeState.STAGED
+                    or change.change_kind not in {"create", "revise"}
+                    or not isinstance(change.staged_commit, str)
+                    or not re.fullmatch(r"[a-f0-9]{40}", change.staged_commit)
+                    or not isinstance(change.catalog_digest, str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", change.catalog_digest)):
+                raise CustomizationServiceError("stage_source_not_available", 404)
+            return change
+
+        def declaration(change: ChangeSet) -> tuple[str, str]:
+            if change.tool_target == "branch":
+                # A Branch package's source is its one main.csx in the receipt-bound tree.
+                fields = self._branch_receipt_fields(change)
+                package = fields["package_path"]
+                entry = f"{package}/main.csx"
+                if entry not in fields["package_files"]:
+                    raise CustomizationServiceError("stage_source_not_available", 404)
+                return package.split("/", 1)[1], entry
+            tool = self._staged_tool(change)
+            slug = tool.get("name")
+            is_script = tool.get("kind") == "script"
+            if (not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", slug)
+                    or not is_script or tool.get("entry") != f"tools/{slug}/tool.py"):
+                raise CustomizationServiceError("stage_source_not_available", 404)
+            return slug, tool["entry"]
+
+        change = eligible()
+        slug, path = declaration(change)
+        # Metadata reads can block too. Recheck before crossing the private hop.
+        if eligible() != change:
+            raise CustomizationServiceError("stage_source_not_available", 404)
+        if change.tool_target == "branch":
+            data, headers = self._branch_staged_source(change, path)
+        else:
+            data, headers = self._harness_staged_source(change, slug)
+        if eligible() != change or declaration(change) != (slug, path):
+            raise CustomizationServiceError("stage_source_not_available", 404)
+        if eligible() != change:
+            raise CustomizationServiceError("stage_source_not_available", 404)
+        return data, {**headers, "X-Leaf-Source-Path": path}
+
+    @staticmethod
+    def _branch_staged_source(change: ChangeSet, path: str) -> tuple[bytes, dict[str, str]]:
+        """Read the Branch source blob from the staged commit; bounded, digest-bound."""
+        try:
+            data = _git_blob(_bare_repo(change.tenant_id), f"{change.staged_commit}:{path}")
+        except CustomizationServiceError as exc:
+            raise CustomizationServiceError("stage_source_failed", 503) from exc
+        if type(data) is not bytes or len(data) > MAX_STAGED_SOURCE_BYTES:
+            raise CustomizationServiceError("stage_source_failed", 503)
+        blob = hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
+        return data, {"Content-Length": str(len(data)), "X-Leaf-Source-Commit": change.staged_commit or "",
+                      "X-Leaf-Source-Blob": blob, "X-Leaf-Source-Sha256": hashlib.sha256(data).hexdigest()}
+
+    @staticmethod
+    def _harness_staged_source(change: ChangeSet, slug: str) -> tuple[bytes, dict[str, str]]:
+        """Bound the response before buffering; never follow a credential redirect."""
+        if _harness_misconfigured():
+            raise CustomizationServiceError("stage_source_failed", 503)
+        url, secret = _harness_config()
+        response = None
+        try:
+            import requests
+            response = requests.post(
+                f"{url}/internal/author/staged-source", timeout=(5, 30),
+                headers={"X-Harness-Secret": secret, "X-Tenant-Id": change.tenant_id,
+                         "Accept-Encoding": "identity"},
+                json={"tenant_id": change.tenant_id, "changeSetId": change.change_set_id,
+                      "stagedCommit": change.staged_commit, "slug": slug},
+                stream=True, allow_redirects=False,
+            )
+            if response.status_code != 200:
+                raise ValueError("source unavailable")
+            length = response.headers.get("Content-Length", "")
+            if not re.fullmatch(r"0|[1-9][0-9]{0,5}", length):
+                raise ValueError("invalid source length")
+            size = int(length)
+            commit = response.headers.get("X-Leaf-Source-Commit", "")
+            blob = response.headers.get("X-Leaf-Source-Blob", "")
+            sha256 = response.headers.get("X-Leaf-Source-Sha256", "")
+            if (size > MAX_STAGED_SOURCE_BYTES or commit != change.staged_commit
+                    or not re.fullmatch(r"[a-f0-9]{40}", blob)
+                    or not re.fullmatch(r"[a-f0-9]{64}", sha256)
+                    or response.headers.get("X-Leaf-Tool-Slug") != slug
+                    or response.headers.get("Content-Encoding", "identity") != "identity"
+                    or response.headers.get("Content-Type") != "application/octet-stream"):
+                raise ValueError("invalid source binding")
+            chunks: list[bytes] = []
+            received = 0
+            while received <= size:
+                chunk = response.raw.read(min(8192, size + 1 - received), decode_content=False)
+                if not chunk:
+                    break
+                if type(chunk) is not bytes or len(chunk) > min(8192, size + 1 - received):
+                    raise ValueError("invalid source chunk")
+                received += len(chunk)
+                if received > size:
+                    raise ValueError("source exceeds declared length")
+                chunks.append(chunk)
+            data = b"".join(chunks)
+            if (received != size or hashlib.sha256(data).hexdigest() != sha256
+                    or hashlib.sha1(f"blob {size}\0".encode("ascii") + data).hexdigest() != blob):
+                raise ValueError("source digest mismatch")
+            return data, {"Content-Length": str(size), "X-Leaf-Source-Commit": commit,
+                          "X-Leaf-Source-Blob": blob, "X-Leaf-Source-Sha256": sha256}
+        except Exception as exc:
+            raise CustomizationServiceError("stage_source_failed", 503) from exc
+        finally:
+            if response is not None:
+                response.close()
 
     def stage_status_change(self, change: ChangeSet) -> dict[str, Any]:
         if change.staged_commit and change.catalog_digest:
@@ -1631,27 +2049,108 @@ class CustomizationService:
             "poll_url": f"/api/author/stages/{change.change_set_id}",
             "retry_after_ms": 1000,
         }
+        if isinstance(change.stage_started_at, str) and change.stage_started_at:
+            result["stage_started_at"] = change.stage_started_at
+        if (_stage_queue_status_enabled() and status == "queued"
+                and change.state is ChangeState.STAGING):
+            # FIFO-order hint: retries or fair queuing can start in another order.
+            try:
+                ahead = self.store.stage_queue_ahead(change)
+            except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+                if isinstance(exc, CustomizationServiceError):
+                    raise
+            else:
+                queue = {"ahead": ahead, "position": ahead + 1}
+                estimate = _stage_estimate_s()
+                if estimate > 0:
+                    workers = _stage_worker_count()
+                    queue["estimated_wait_s"] = ((ahead + workers - 1) // workers) * estimate
+                result["queue"] = queue
         if change.target_tool_name:
             result["target_tool_name"] = change.target_tool_name
+        if change.plan_json and change.plan_digest:
+            plan = json.loads(change.plan_json)
+            result["plan"] = {key: plan[key] for key in ("title", "tool_name", "target", "change_kind")}
+            result["plan"]["digest"] = change.plan_digest
+        if status in ("staged", "failed") and change.compile_summary_json is not None:
+            result["compile"] = {"attempts": json.loads(change.compile_summary_json)}
+        if change.tool_target == "branch":
+            result["target"] = "branch"
+            if change.target_tool_name:
+                result["package_path"] = f"branch-tools/{change.target_tool_name}"
         if status == "staged":
+            key = {"tenant_id": change.tenant_id, "change_set_id": change.change_set_id}
+            review = self.store.get_review_decision(**key, staged_commit=change.staged_commit)
+            if review is not None:
+                result["review"] = {field: review[field] for field in (
+                    "decision", "approval_kind", "approver_role", "decided_at",
+                )}
+            if change.state is ChangeState.PUBLISHED:
+                result["publication"] = {"state": "published", "published_at": change.updated_at}
+                if change.tool_target == "branch":
+                    try:
+                        published = self._published_branch_result(change)
+                        result["publication"].update({
+                            field: published[field] for field in ("package_digest", "name", "version")
+                        })
+                    except Exception:
+                        _LOG.warning("publication_digest_unavailable: change_set=%s", change.change_set_id)
+            elif change.state in (ChangeState.PUBLISHING, ChangeState.SUPERSEDED, ChangeState.ROLLED_BACK):
+                result["publication"] = {"state": change.state.value}
+            else:
+                publication = self.store.get_publication_request(**key)
+                if publication is not None:
+                    result["publication"] = {"state": publication["status"]}
             receipt = self._raw_receipt(change)
             result["receipt"] = receipt
-            result["result"] = {"tool": self._decorate_stage_tool(change, self._staged_tool(change))}
+            if change.tool_target == "branch":
+                self._verified_record_fields(change, set())
+                result["package_path"] = receipt["package_path"]
+                if change.state is ChangeState.PUBLISHED:
+                    from branch_tools import run_receipts, sync_receipts
+                    from branch_tools.vendor.cad_tool_package.runner import package_digest
+
+                    files, name = self._branch_package_files(change)
+                    manifest = json.loads(files["tool.json"])
+                    digest = package_digest(files)
+                    try:
+                        branch = run_receipts.stage_view(
+                            self.store, change.tenant_id, name, manifest["version"], digest,
+                        )
+                    except Exception as exc:
+                        _LOG.warning("run_receipt_read_unavailable: exception=%s", type(exc).__name__)
+                        branch = None
+                    if branch is None:
+                        branch = sync_receipts.latest(
+                            self.store, change.tenant_id, name, manifest["version"], digest,
+                        )
+                    if branch is not None:
+                        result["branch"] = branch
+                else:
+                    manifest = self._staged_tool(change)
+                result["result"] = {"branch_package": manifest}
+            else:
+                result["result"] = {"tool": self._decorate_stage_tool(change, self._staged_tool(change))}
         elif status == "failed":
+            reason_code = change.stage_error_code or "customization_stage_failed"
+            message = change.stage_error_message
+            if not isinstance(message, str) or not message:
+                message = CUSTOMIZATION_ERROR_MESSAGES.get(reason_code)
             result["error"] = {
-                "reason_code": change.stage_error_code or "customization_stage_failed",
+                "reason_code": reason_code,
                 "retryable": bool(change.stage_error_retryable),
-                # The terminal reason a tenant can act on ("Agent SDK auth
-                # failure: ..."), persisted from the harness's own error body.
-                # Additive: absent when no reason was captured.
-                **({"message": change.stage_error_message}
-                   if change.stage_error_message else {}),
+                **({"message": message} if isinstance(message, str) and message else {}),
             }
         return result
 
     @staticmethod
     def _staged_tool(change: ChangeSet) -> dict[str, Any]:
         """Read the authored tool from the receipt-bound commit, never main."""
+        if change.tool_target == "branch":
+            package = CustomizationService._branch_receipt_fields(change)["package_path"]
+            return json.loads(_git_blob(
+                _bare_repo(change.tenant_id), f"{change.staged_commit}:{package}/tool.json"
+            ))
         try:
             bare = _bare_repo(change.tenant_id)
             staged_registry = json.loads(_git_blob(
@@ -1735,6 +2234,8 @@ class CustomizationService:
         if not isinstance(body, dict):
             return False, None
         error = body.get("error")
+        if isinstance(error, dict) and "reason" in error:
+            return True, cls._branch_failure_message(error["reason"])
         message = None
         if isinstance(error, dict) and isinstance(error.get("message"), str):
             message = error["message"]
@@ -1759,28 +2260,81 @@ class CustomizationService:
             return True, cleaned
         return True, None
 
+    @staticmethod
+    def _branch_failure_message(reason: Any) -> str | None:
+        if not isinstance(reason, dict):
+            return None
+        code = reason.get("code")
+        if code == "branch_revision_target_missing" and reason.keys() == {"code"}:
+            return "The Branch tool to revise has no published version to start from."
+        turns = reason.get("turns")
+        if type(turns) is not int or not 0 <= turns <= 10000:
+            return None
+        if code == "branch_author_unsuccessful" and reason.keys() == {"code", "turns"}:
+            return f"The Branch author session did not finish successfully (turns={turns})."
+        attempts = reason.get("submit_calls")
+        if type(attempts) is not int or not 0 <= attempts <= 10000:
+            return None
+        counts = f"(turns={turns}, submit attempts={attempts})."
+        if code == "branch_author_no_submission" and reason.keys() == {"code", "turns", "submit_calls"}:
+            return f"The Branch author session ended without submitting a package {counts}"
+        rule = reason.get("rule")
+        if (code == "branch_author_package_refused" and reason.keys() == {"code", "turns", "submit_calls", "rule"}
+                and isinstance(rule, str) and re.fullmatch(r"V[1-9][0-9]?", rule)):
+            return f"The Branch author's last package submission was refused by rule {rule} {counts}"
+        return None
+
     def _harness_stage(self, tenant_id: str, description: str, change: ChangeSet) -> Mapping[str, Any]:
         active_subject = deps.active_stage_author_subject(
             tenant_id,
             change.authority_session_id,
             change.authority_turn_id,
         )
+        without_services = False
         if (
             tenant_id != change.tenant_id
             or not active_subject
             or active_subject != change.author_subject
         ):
-            raise CustomizationServiceError("stage_authority_invalid", 409)
+            import customization_stage_grants
+            if (tenant_id == change.tenant_id and not active_subject and self is not None
+                    and customization_stage_grants.ttl_s() is not None):
+                without_services = True
+            else:
+                exc = CustomizationServiceError("stage_authority_invalid", 409)
+                exc.harness_not_called = True
+                raise exc
         url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)
+        revision_base = None
+        if getattr(change, "tool_target", None) == "branch" and change.target_tool_name:
+            revision_base = self._branch_revision_base(change.tenant_id, change.base_commit, change.target_tool_name)
+        # Last read before the request: a Stop or withdraw that landed during
+        # the URL and revision-base work still refuses this build.
+        import customization_stage_grants
+        if (self is not None and change.tool_target == "branch"
+                and customization_stage_grants.ttl_s() is not None):
+            try:
+                grant = self.store.get_stage_grant(tenant_id, change.change_set_id)
+            except Exception as exc:
+                refusal = CustomizationServiceError("stage_grant_refused", 409)
+                refusal.harness_not_called = True
+                raise refusal from exc
+            if grant is not None and grant["revoked_ms"] is not None:
+                code = "stage_grant_cancelled" if grant["revoked_reason"] == "cancelled" else "stage_grant_withdrawn"
+                refusal = CustomizationServiceError(code, 409)
+                refusal.harness_not_called = True
+                raise refusal
+        if without_services:
+            customization_stage_grants.admit(self, change, change.stage_lease_owner)
         try:
             import requests
             response = requests.post(
                 f"{url}/author/stage", timeout=_harness_stage_timeout_s(),
                 headers={
                     "X-Harness-Secret": secret,
-                    **({
+                    **({"X-Author-Services": "none"} if without_services else {
                         "X-Authority-Session-Id": change.authority_session_id,
                         "X-Authority-Turn-Id": change.authority_turn_id,
                     } if change.authority_session_id and change.authority_turn_id else {}),
@@ -1789,6 +2343,10 @@ class CustomizationService:
                       "expectedBaseSha": change.base_commit, "platformRelease": change.desired_platform_release,
                       "workspaceContractDigest": change.workspace_contract_digest,
                       "idempotencyKey": change.idempotency_key,
+                      **({"toolName": json.loads(change.plan_json)["tool_name"]}
+                         if getattr(change, "plan_json", None) else {}),
+                      **({"target": "branch"} if getattr(change, "tool_target", None) == "branch" else {}),
+                      **({"revisionBaseCommit": revision_base[1]} if revision_base else {}),
                       **({"targetToolName": getattr(change, "target_tool_name", None)}
                          if getattr(change, "target_tool_name", None) else {})},
             )
@@ -1798,7 +2356,7 @@ class CustomizationService:
             response = getattr(exc, "response", None)
             # Class-qualified: _harness_stage is also exercised unbound
             # (self=None), a convention test_customization_refusal_observability
-            # pins, so no attribute lookup may go through self.
+            # pins for studio requests.
             answered, reason = (
                 CustomizationService._harness_job_failure(response)
                 if response is not None else (False, None)
@@ -1814,7 +2372,18 @@ class CustomizationService:
                     "customization_author_job_failed", 502,
                     diagnostic_code="harness_stage_job_failed", cause=exc,
                 )
+                if without_services:
+                    notice = (
+                        "This build waited in line, so it ran without connected services. "
+                        "If it needs one, ask again when the line is short."
+                    )
+                    prefix = (reason or "")[:500 - len(notice) - 1].rstrip()
+                    reason = f"{prefix} {notice}" if prefix else notice
                 error.harness_reason = reason
+                if getattr(change, "tool_target", None) == "branch" and response.status_code == 422:
+                    refusal = response.json().get("error")
+                    if isinstance(refusal, dict):
+                        self._record_compile_attempts(change, refusal.get("compile"), staged_commit=None)
                 raise error from exc
             raise CustomizationServiceError(
                 "customization_harness_unavailable", 503,
@@ -1825,10 +2394,42 @@ class CustomizationService:
                 "invalid_staged_receipt", 502,
                 diagnostic_code="staged_receipt_not_a_mapping",
             )
+        if getattr(change, "tool_target", None) == "branch" and "compile_attempts" in body:
+            receipt = body.get("receipt")
+            if isinstance(receipt, Mapping):
+                staged_commit = self._validate_receipt(receipt, change)["staged_commit"]
+                self._record_compile_attempts(change, body, staged_commit=staged_commit)
         return body
+
+    def _record_compile_attempts(
+        self, change: ChangeSet, body: Any, *, staged_commit: str | None,
+    ) -> None:
+        summary = self._compile_summary_json(body)
+        if summary is not None:
+            self.store.record_compile_summary(change, summary, staged_commit=staged_commit)
+
+    @staticmethod
+    def _compile_summary_json(body: Any) -> str | None:
+        if not isinstance(body, Mapping) or "compile_attempts" not in body:
+            return None
+        attempts = body["compile_attempts"]
+        if not _valid_compile_attempts(attempts):
+            _LOG.warning("invalid_compile_attempts")
+            return None
+        return json.dumps(attempts)
 
     def _validate_receipt(self, body: Mapping[str, Any], change: ChangeSet) -> dict[str, Any]:
         fields = {"contract", "tenant_id", "change_set_id", "state", "base_commit", "staged_commit", "catalog_digest", "platform_release", "workspace_contract_digest", "idempotency_key"}
+        if change.tool_target == "branch":
+            fields |= {"target", "package_path", "package_files"}
+            package_path, package_files = body.get("package_path"), body.get("package_files")
+            if (body.get("target") != "branch" or not isinstance(package_path, str)
+                    or not re.fullmatch(r"branch-tools/[a-z][a-z0-9]*(?:-[a-z0-9]+)*", package_path)
+                    or not isinstance(package_files, list) or not 1 <= len(package_files) <= 64
+                    or any(not isinstance(path, str) or not path.startswith(package_path + "/")
+                           for path in package_files)
+                    or len(set(package_files)) != len(package_files)):
+                raise CustomizationServiceError("invalid_staged_receipt", 502)
         if set(body) != fields or any(body.get(k) != v for k, v in {
             "contract": CONTRACT, "tenant_id": change.tenant_id, "change_set_id": change.change_set_id,
             "state": "staged", "base_commit": change.base_commit, "platform_release": change.desired_platform_release,
@@ -1852,6 +2453,9 @@ class CustomizationService:
         saves ``_receipt`` a second subprocess per staged change just to stamp
         the change class.
         """
+        if change.tool_target == "branch":
+            receipt = body.get("receipt") if body is not None else self._raw_receipt(change)
+            return self._verify_branch_stage_policy(change, self._validate_receipt(receipt, change))
         removal = self.store.get_removal_request(
             tenant_id=change.tenant_id, change_set_id=change.change_set_id
         )
@@ -1868,6 +2472,174 @@ class CustomizationService:
             change, body, removal_target=removal["target_tool_name"],
             graph_bindings=bindings,
         )
+
+    @staticmethod
+    def _branch_receipt_fields(change: ChangeSet) -> dict[str, Any]:
+        """Reconstruct branch receipt fields from the immutable staged Git tree."""
+        bare = _bare_repo(change.tenant_id)
+        changed = [path for path in _git(
+            bare, "diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z",
+            change.base_commit, change.staged_commit or "",
+        ).split("\0") if path]
+        roots = {"/".join(path.split("/")[:2]) for path in changed}
+        if len(roots) != 1:
+            raise CustomizationServiceError("invalid_staged_paths", 422)
+        package_path = next(iter(roots))
+        if (not re.fullmatch(r"branch-tools/[a-z][a-z0-9]*(?:-[a-z0-9]+)*", package_path)
+                or any(not path.startswith(package_path + "/") for path in changed)):
+            raise CustomizationServiceError("invalid_staged_paths", 422)
+        files = [path for path in _git(
+            bare, "ls-tree", "-r", "--name-only", "-z", change.staged_commit or "",
+            "--", package_path + "/",
+        ).split("\0") if path]
+        return {"target": "branch", "package_path": package_path, "package_files": sorted(files)}
+
+    def _branch_revision_base(self, tenant_id: str, base_commit: str, name: str) -> tuple[str, str] | None:
+        bare = _bare_repo(tenant_id)
+        package = f"branch-tools/{name}"
+        path = f"{package}/tool.json"
+        missing = CustomizationServiceError("revision_target_missing", 422)
+        try:
+            entry = _git(bare, "ls-tree", base_commit, "--", path)
+        except CustomizationServiceError as exc:
+            raise missing from exc
+        if re.fullmatch(r"[0-7]+ blob [0-9a-f]+\t" + re.escape(path), entry):
+            return None
+        try:
+            published = self.store.list_published_branch_change_sets(tenant_id=tenant_id, tool_name=name)
+        except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+            raise CustomizationServiceError("record_fields_read_failed", 503) from exc
+        except ValueError as exc:
+            raise missing from exc
+        for row in published:
+            if row.tenant_id != tenant_id:
+                continue
+            try:
+                fields = self._branch_receipt_fields(row)
+            except CustomizationServiceError:
+                continue
+            if fields["package_path"] != package:
+                continue
+            try:
+                manifest = json.loads(_git_blob(bare, f"{row.staged_commit}:{path}"))
+            except (CustomizationServiceError, ValueError, RecursionError) as exc:
+                raise missing from exc
+            if (row.staged_commit and isinstance(manifest, dict) and manifest.get("name") == name
+                    and manifest.get("entry") == "main.csx" and isinstance(manifest.get("provenance"), dict)
+                    and manifest["provenance"].get("author") == "agent" and isinstance(manifest.get("version"), str)
+                    and _BRANCH_VERSION.fullmatch(manifest["version"])):
+                return row.change_set_id, row.staged_commit
+            raise missing
+        raise missing
+
+    def _published_branch_seed(self, change: ChangeSet, bare: Path, package_path: str) -> str:
+        missing = CustomizationServiceError("branch_revise_target_missing", 404)
+        try:
+            parents = _git(bare, "rev-list", "--parents", "-n", "1", change.staged_commit or "").split()
+            if len(parents) != 2:
+                raise ValueError("expected one seed parent")
+            seed = parents[1]
+            if _git(bare, "rev-list", "--parents", "-n", "1", seed).split() != [seed, change.base_commit]:
+                raise ValueError("seed must descend directly from the base")
+            # Whitespace is significant in NUL-delimited Git paths.
+            paths = [path for path in _git(
+                bare, "diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z",
+                change.base_commit, seed, strip=False,
+            ).split("\0") if path]
+            if not paths or any(not p.startswith(package_path + "/") for p in paths):
+                raise ValueError("seed must introduce only the revision package")
+            tree = _git(bare, "rev-parse", f"{seed}:{package_path}")
+            published = self.store.list_published_branch_change_sets(
+                tenant_id=change.tenant_id, tool_name=change.target_tool_name,
+            )
+        except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError, ValueError) as exc:
+            raise missing from exc
+        for row in published:
+            if row.tenant_id != change.tenant_id or row.change_set_id == change.change_set_id or not row.staged_commit:
+                continue
+            try:
+                if tree == _git(bare, "rev-parse", f"{row.staged_commit}:{package_path}"):
+                    return seed
+            except CustomizationServiceError:
+                continue
+        raise missing
+
+    def _verify_branch_stage_policy(self, change: ChangeSet, receipt: Mapping[str, Any]) -> tuple[str, ...]:
+        bare = _bare_repo(change.tenant_id)
+        package_path = receipt["package_path"]
+        changed = tuple(path for path in _git(
+            bare, "diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z",
+            change.base_commit, change.staged_commit or "",
+        ).split("\0") if path)
+        if not changed or any(not path.startswith(package_path + "/") for path in changed):
+            raise CustomizationServiceError("invalid_staged_paths", 422)
+        entries = {}
+        for entry in _git(
+            bare, "ls-tree", "-r", "-z", change.staged_commit or "", "--", package_path + "/",
+        ).split("\0"):
+            if not entry:
+                continue
+            metadata, _, path = entry.partition("\t")
+            mode, kind, oid = metadata.split(" ")
+            if mode not in {"100644", "100755"} or kind != "blob":
+                raise CustomizationServiceError("invalid_staged_paths", 422)
+            entries[path] = oid
+        if sorted(entries) != receipt["package_files"]:
+            raise CustomizationServiceError("invalid_staged_paths", 422)
+        base_entries = {}
+        for entry in _git(
+            bare, "ls-tree", "-r", "-z", change.base_commit, "--", package_path,
+        ).split("\0"):
+            if entry:
+                metadata, _, path = entry.partition("\t")
+                base_entries[path] = metadata.split(" ")[0]
+        if any(path not in entries and base_entries.get(path) not in {"100644", "100755"}
+               for path in changed):
+            raise CustomizationServiceError("invalid_staged_paths", 422)
+        if hashlib.sha256(_git_blob(bare, f"{change.base_commit}:registry.json")).hexdigest() != receipt["catalog_digest"]:
+            raise CustomizationServiceError("catalog_digest_mismatch", 409)
+        name = package_path.split("/")[1]
+        if getattr(change, "plan_json", None) and name != json.loads(change.plan_json)["tool_name"]:
+            raise CustomizationServiceError("plan_binding_mismatch", 422)
+        if change.target_tool_name and name != change.target_tool_name:
+            raise CustomizationServiceError("branch_target_mismatch", 422)
+        manifest_path = package_path + "/tool.json"
+        revision_base = change.base_commit
+        if change.target_tool_name:
+            if manifest_path not in base_entries:
+                revision_base = self._published_branch_seed(change, bare, package_path)
+        elif base_entries:
+            raise CustomizationServiceError("branch_tool_exists", 409)
+        files = {path[len(package_path) + 1:]: _git_blob(bare, oid) for path, oid in entries.items()}
+        checked = check_branch_package(files, name)
+        if (change.target_tool_name and checked.manifest is not None
+                and isinstance(checked.manifest.get("name"), str)
+                and checked.manifest["name"] != change.target_tool_name):
+            raise CustomizationServiceError("branch_target_mismatch", 422)
+        if not checked.ok:
+            raise CustomizationServiceError("branch_package_invalid", 422, failures=checked.failures)
+        if change.target_tool_name:
+            try:
+                try:
+                    base_manifest = json.loads(_git_blob(bare, f"{revision_base}:{manifest_path}"))
+                except CustomizationServiceError as exc:
+                    if revision_base == change.base_commit:
+                        raise
+                    raise CustomizationServiceError("branch_revise_target_missing", 404) from exc
+                if revision_base != change.base_commit and (
+                    not isinstance(base_manifest, dict) or base_manifest.get("entry") != "main.csx"
+                    or not isinstance(base_manifest.get("provenance"), dict)
+                    or base_manifest["provenance"].get("author") != "agent"
+                ):
+                    raise CustomizationServiceError("branch_revise_target_missing", 404)
+                base_version = _BRANCH_VERSION.fullmatch(base_manifest["version"])
+                staged_version = _BRANCH_VERSION.fullmatch(checked.manifest["version"])
+                if (not base_version or not staged_version
+                        or tuple(map(int, staged_version.groups())) <= tuple(map(int, base_version.groups()))):
+                    raise ValueError("version must increase")
+            except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
+                raise CustomizationServiceError("branch_version_not_greater", 409) from exc
+        return changed
 
     @staticmethod
     def _verify_raw_graph_declarations(
@@ -2024,6 +2796,8 @@ class CustomizationService:
                 raise CustomizationServiceError("invalid_staged_paths", 422)
         else:
             raise CustomizationServiceError("invalid_staged_catalog_delta", 422)
+        if getattr(change, "plan_json", None) and staged_tool.get("name") != json.loads(change.plan_json)["tool_name"]:
+            raise CustomizationServiceError("plan_binding_mismatch", 422)
         entry = staged_tool.get("entry")
         if (not isinstance(entry, str) or not entry.startswith("tools/")
                 or entry not in changed):
@@ -2093,9 +2867,202 @@ class CustomizationService:
             "change_set_id": change.change_set_id,
             "status": status,
         }
-        if status == "published":
+        if change.tool_target == "branch":
+            result["target"] = "branch"
+            if change.staged_commit:
+                manifest = CustomizationService._staged_tool(change)
+                result.update(name=manifest["name"], version=manifest["version"])
+            elif change.target_tool_name:
+                result["name"] = change.target_tool_name
+        elif status == "published":
             result["catalog_digest"] = change.catalog_digest
         return result
+
+    def _review_target(
+        self, viewer: TenantBinding, change_set_id: str, *, allow_author_view: bool = False,
+    ) -> tuple[ChangeSet, dict | None, dict | None]:
+        reviewer = viewer.role in {"owner", "reviewer"}
+        if not reviewer and not allow_author_view:
+            raise CustomizationServiceError("approver_role_denied", 403)
+        key = {"tenant_id": viewer.tenant_id, "change_set_id": change_set_id}
+        try:
+            change = self.store.get_change_set(**key)
+        except ChangeSetNotFoundError as exc:
+            if not reviewer:
+                raise CustomizationServiceError("approver_role_denied", 403) from exc
+            raise CustomizationServiceError("review_target_stale", 409) from exc
+        if not reviewer and viewer.subject != change.author_subject:
+            raise CustomizationServiceError("approver_role_denied", 403)
+        review = None
+        if change.staged_commit:
+            review = self.store.get_review_decision(**key, staged_commit=change.staged_commit)
+        return change, review, self.store.get_publication_request(**key)
+
+    def _review_eligibility(
+        self, viewer: TenantBinding, change: ChangeSet, review: dict | None, request: dict | None, *,
+        gate_open: bool, staged_commit: str | None, catalog_digest: str | None, decision: str | None = None,
+    ) -> str:
+        """Return the viewer's approval kind, or the reason this review is unavailable."""
+        if not gate_open or not customization_flags.inline_review_enabled(viewer.tenant_id):
+            raise CustomizationServiceError("inline_review_disabled", 404)
+        if viewer.role not in {"owner", "reviewer"}:
+            raise CustomizationServiceError("approver_role_denied", 403)
+        if not staged_commit or not catalog_digest or (staged_commit, catalog_digest) != (
+            change.staged_commit, change.catalog_digest
+        ):
+            raise CustomizationServiceError("review_target_stale", 409)
+        if review is not None:
+            raise CustomizationServiceError("review_already_decided", 409)
+        if change.state is not ChangeState.STAGED and not (
+            decision == "approve" and change.state is ChangeState.PUBLISHED
+        ):
+            raise CustomizationServiceError("review_target_stale", 409)
+        if request and request["status"] == "denied" and not (
+            decision == "request_changes" and request["reason_code"] == "reviewer_requested_changes"
+        ):
+            raise CustomizationServiceError("review_target_stale", 409)
+        is_self = viewer.subject == change.author_subject
+        if is_self and not customization_flags.self_approval_allowed(viewer.tenant_id):
+            raise CustomizationServiceError("self_approval_not_allowed", 403)
+        if change.state is ChangeState.STAGED and decision != "request_changes":
+            if not self._publication_policy_state(viewer.tenant_id)[0]:
+                raise CustomizationServiceError("tool_publication_disabled", 409)
+        return "self" if is_self else "independent"
+
+    def review_context(self, *, tenant: Any, change_set_id: str, gate_open: bool) -> dict[str, Any]:
+        viewer = _binding(tenant)
+        change, review, request = self._review_target(viewer, change_set_id, allow_author_view=True)
+        try:
+            kind = self._review_eligibility(
+                viewer, change, review, request, gate_open=gate_open,
+                staged_commit=change.staged_commit, catalog_digest=change.catalog_digest,
+            )
+        except CustomizationServiceError:
+            kind = None
+
+        # Refresh can finish bookkeeping for a committed publication. It has
+        # no authority to start or resume the external publish.
+        if gate_open and change.state is ChangeState.PUBLISHED and review is None:
+            fields = self._published_review_fields(change, request)
+            if fields is not None:
+                try:
+                    review = self._record_review(change, "approve", fields)
+                except IdempotencyReplayError:
+                    review = self.store.get_review_decision(
+                        tenant_id=viewer.tenant_id, change_set_id=change_set_id, staged_commit=change.staged_commit,
+                    )
+        return {
+            "viewer_may_approve": kind is not None,
+            "approval_kind_if_approved": kind,
+            "review": None if review is None else {
+                key: review[key] for key in ("decision", "approval_kind", "approver_role", "decided_at")
+            },
+            "flags": {
+                "plan_mode": customization_flags.plan_mode_enabled(viewer.tenant_id),
+                "inline_review": customization_flags.inline_review_enabled(viewer.tenant_id),
+                "self_approval": customization_flags.self_approval_allowed(viewer.tenant_id),
+            },
+        }
+
+    def _published_review_fields(self, change: ChangeSet, request: dict | None) -> dict | None:
+        if not request or not request["confirmation_id"]:
+            return None
+        confirmation_id = request["confirmation_id"]
+        record = self.store.get_confirmation(confirmation_id=confirmation_id)
+        if not record or not record["consumed"] or "approval_kind" not in record["payload"]:
+            return None
+        confirmation, _ = self._authority().verify_publish_confirmation(
+            tenant_id=change.tenant_id, confirmation_id=confirmation_id, allow_consumed=True,
+            request=PublishRequest(change.change_set_id, change.staged_commit, change.catalog_digest,
+                                   change.desired_platform_release, change.workspace_contract_digest),
+        )
+        if (confirmation.approver_subject != change.approver_subject
+                or confirmation.author_subject != change.author_subject
+                or confirmation.approver_role not in {"owner", "reviewer"}):
+            raise CustomizationServiceError("review_target_stale", 409)
+        return {
+            "confirmation_id": confirmation_id, "approval_kind": confirmation.approval_kind,
+            "approver_subject": confirmation.approver_subject, "approver_role": confirmation.approver_role,
+            "comment": json.loads(request["review_details_json"] or "{}").get("comment"),
+        }
+
+    def _record_review(self, change: ChangeSet, decision: str, fields: dict) -> dict:
+        decided_at = self.store.record_review_decision(
+            tenant_id=change.tenant_id, change_set_id=change.change_set_id, staged_commit=change.staged_commit,
+            catalog_digest=change.catalog_digest, decision=decision, **fields,
+        )
+        return {"decision": decision, "approval_kind": fields["approval_kind"],
+                "approver_role": fields["approver_role"], "decided_at": decided_at}
+
+    def decide_review(self, *, tenant: Any, change_set_id: str, staged_commit: str, catalog_digest: str,
+                      decision: str, comment: str | None) -> dict[str, Any]:
+        reviewer = _binding(tenant)
+        tenant_id = reviewer.tenant_id
+        key = {"tenant_id": tenant_id, "change_set_id": change_set_id}
+        change, review, request = self._review_target(reviewer, change_set_id)
+        kind = self._review_eligibility(reviewer, change, review, request, gate_open=True,
+                                        staged_commit=staged_commit, catalog_digest=catalog_digest, decision=decision)
+        fields = {"approver_subject": reviewer.subject, "approver_role": reviewer.role,
+                  "approval_kind": kind, "comment": comment, "confirmation_id": None}
+        if change.state is ChangeState.PUBLISHED:
+            fields = self._published_review_fields(change, request)
+            if fields is None:
+                raise CustomizationServiceError("review_target_stale", 409)
+        elif decision == "approve":
+            confirmation = self._authority().issue_publish_confirmation(
+                staged_change=StagedChange(
+                    tenant_id, change_set_id, staged_commit, catalog_digest, change.desired_platform_release,
+                    change.workspace_contract_digest, change.author_subject, True,
+                ),
+                author_binding=TenantBinding(tenant_id, change.author_subject, "owner", True),
+                approver_binding=reviewer, allow_self_approval=kind == "self", approval_kind=kind,
+            )
+            fields["confirmation_id"] = confirmation.confirmation_id
+            self.store.get_or_create_publication_request(**key)
+            request = self.store.bind_publication_confirmation(
+                **key, confirmation_id=confirmation.confirmation_id, review_comment=comment,
+            )
+            if request["status"] == "denied":
+                raise CustomizationServiceError("review_target_stale", 409)
+            author = deps.TenantContext(tenant_id, subject=change.author_subject)
+            try:
+                self._continue_publication(author, change, confirmation.confirmation_id)
+            except AuthorityError as exc:
+                if exc.reason_code == "confirmation_replayed":
+                    raise CustomizationServiceError("review_target_stale", 409) from exc
+                raise
+            except CustomizationServiceError as exc:
+                if exc.code == "publish_recovery_authority_invalid":
+                    raise CustomizationServiceError("review_target_stale", 409) from exc
+                raise
+        elif decision == "request_changes":
+            self.store.get_or_create_publication_request(**key)
+            request = self.store.deny_publication_request(**key, reason_code="reviewer_requested_changes",
+                                                          review_details=fields)
+            if request["reason_code"] != "reviewer_requested_changes":
+                raise CustomizationServiceError("review_target_stale", 409)
+            if request["review_details_json"]:
+                fields = json.loads(request["review_details_json"])
+        else:
+            raise CustomizationServiceError("invalid_review_request", 422)
+
+        status = "published" if decision == "approve" else "denied"
+        publication = self._publication_status(change, status)
+        try:
+            recorded = self._record_review(change, decision, fields)
+        except IdempotencyReplayError as exc:
+            # A card refresh can complete the audit after this POST published.
+            # Acknowledge only the receipt issued by this call in that race.
+            existing = self.store.get_review_decision(**key, staged_commit=staged_commit)
+            if (decision != "approve" or change.state is not ChangeState.STAGED or not existing
+                    or existing["confirmation_id"] != fields["confirmation_id"]):
+                raise CustomizationServiceError("review_already_decided", 409) from exc
+            recorded = {name: existing[name] for name in ("decision", "approval_kind", "approver_role", "decided_at")}
+        return {
+            **{key: publication[key] for key in ("contract", "change_set_id", "status", "name", "version")
+               if key in publication},
+            **recorded,
+        }
 
     def request_publication(
         self, *, tenant: Any, change_set_id: str
@@ -2131,6 +3098,9 @@ class CustomizationService:
             ) from exc
 
         if change.state is ChangeState.PUBLISHED:
+            if change.tool_target == "branch":
+                self._published_branch_result(change)
+                return self._publication_status(change, "published")
             try:
                 effective = self.store.get_effective_catalog(tenant_id=tenant_id)
             except ChangeSetNotFoundError as exc:
@@ -2143,6 +3113,8 @@ class CustomizationService:
             raise CustomizationServiceError("publish_superseded", 409)
         if change.state not in {ChangeState.STAGED, ChangeState.PUBLISHING}:
             raise CustomizationServiceError("publication_request_not_available")
+        if change.tool_target == "branch" and not customization_flags.plugin_builder_enabled(tenant_id):
+            self._branch_dev_root(tenant_id)
 
         # Denial is terminal for the durable request regardless of later
         # account-policy changes. It is resolved before policy or receipt
@@ -2154,6 +3126,9 @@ class CustomizationService:
         publication_enabled, approval_required = self._publication_policy_state(
             tenant_id
         )
+        if change.tool_target == "branch":
+            # Branch entries always need a human review.
+            approval_required = True
         if not publication_enabled:
             raise CustomizationServiceError("tool_publication_disabled", 409)
 
@@ -2176,12 +3151,22 @@ class CustomizationService:
                     change_set_id=change.change_set_id,
                     confirmation_id=record["confirmation_id"],
                 )
+                if continuation["status"] == "denied":
+                    return self._publication_status(change, "denied")
                 confirmation_id = continuation["confirmation_id"]
         elif confirmation_id is None:
             raise CustomizationServiceError(
                 "publish_recovery_authority_invalid", 403
             )
+        else:
+            bound = self.store.get_confirmation(confirmation_id=confirmation_id)
+            if bound and bound["payload"].get("approval_kind") is not None:
+                tenant = deps.TenantContext(tenant_id, subject=change.author_subject)
 
+        return self._continue_publication(tenant, change, confirmation_id)
+
+    def _continue_publication(self, tenant: Any, change: ChangeSet, confirmation_id: str) -> dict[str, Any]:
+        tenant_id = change.tenant_id
         request = PublishRequest(
             change.change_set_id,
             change.staged_commit or "",
@@ -2293,11 +3278,14 @@ class CustomizationService:
             tenant_id=tenant_id,
             change_set_id=change.change_set_id,
         )
-        self.store.deny_publication_request(
-            tenant_id=tenant_id,
-            change_set_id=change.change_set_id,
-            reason_code="independent_approver_denied",
-        )
+        try:
+            self.store.deny_publication_request(
+                tenant_id=tenant_id,
+                change_set_id=change.change_set_id,
+                reason_code="independent_approver_denied",
+            )
+        except ChangeSetConflictError as exc:
+            raise CustomizationServiceError("publication_denial_not_available") from exc
         return self._publication_status(change, "denied")
 
     def publish(self, *, tenant: Any, request: PublishRequest, confirmation_id: str, idempotency_key: str) -> dict[str, Any]:
@@ -2326,9 +3314,13 @@ class CustomizationService:
             raise CustomizationServiceError("staged_receipt_mismatch")
         if change.state not in {ChangeState.STAGED, ChangeState.PUBLISHING, ChangeState.PUBLISHED}:
             raise CustomizationServiceError("publish_not_available")
+        if change.tool_target == "branch" and not customization_flags.plugin_builder_enabled(tenant_id):
+            self._branch_dev_root(tenant_id)
         self._verify_catalog(tenant_id, request.staged_commit, request.catalog_digest)
         self._verified_record_fields(change, set())
         if change.state is ChangeState.PUBLISHED:
+            if change.tool_target == "branch":
+                return self._published_branch_result(change)
             effective = self._record_fields_pin(tenant_id)
             if self._pin_matches_change(effective, change):
                 return {"contract": CONTRACT, "tenant_id": effective.tenant_id,
@@ -2337,7 +3329,8 @@ class CustomizationService:
                         "platform_release": effective.effective_platform_release,
                         "workspace_contract_digest": effective.workspace_contract_digest}
             raise CustomizationServiceError("publish_not_available")
-        self._verify_record_fields_predecessor(change)
+        if change.tool_target != "branch":
+            self._verify_record_fields_predecessor(change)
         if change.state is ChangeState.PUBLISHING:
             try:
                 confirmation, signature = (
@@ -2362,7 +3355,13 @@ class CustomizationService:
             )
             # Before prepare_publish: a stale addition must leave the change
             # STAGED and its confirmation unconsumed.
-            self._refuse_stale_addition_base(change)
+            if change.tool_target != "branch":
+                self._refuse_stale_addition_base(change)
+        if (change.tool_target == "branch"
+                and confirmation.approver_subject == "leaf:server:auto-publication-policy"):
+            raise CustomizationServiceError("independent_approval_pending", 409)
+        if confirmation.approval_kind is not None and require_actor_binding:
+            raise CustomizationServiceError("inline_review_required", 403)
         publishing = self.store.prepare_publish(
             tenant_id=tenant_id,
             change_set_id=change.change_set_id,
@@ -2370,7 +3369,56 @@ class CustomizationService:
             confirmation_signature=signature,
             approver_subject=confirmation.approver_subject,
             idempotency_key=idempotency_key,
+            require_bound_confirmation=not require_actor_binding,
         )
+        if change.tool_target == "branch":
+            try:
+                files, name = self._branch_package_files(change)
+                review = None
+                if confirmation.approval_kind and confirmation.approver_role:
+                    review = {"approval": confirmation.approval_kind, "approver_role": confirmation.approver_role}
+                if customization_flags.plugin_builder_enabled(tenant_id):
+                    try:
+                        result = tenant_publish.publish_tenant_tool(
+                            files, name, tenant_id, online_signer.configured_signer(),
+                            os.environ["LEAF_TENANT_TOOLS_DIR"], datetime.now(timezone.utc))
+                    except online_signer.SignerUnavailable as exc:
+                        raise tenant_publish.TenantPublishError("signer_unavailable") from exc
+                    except tenant_catalog.TenantCatalogError as exc:
+                        raise tenant_publish.TenantPublishError("tenant_catalog_unavailable") from exc
+                else:
+                    result = publish_branch_package(files, name, self._branch_dev_root(tenant_id), review=review)
+            except (DevPublishError, tenant_publish.TenantPublishError) as exc:
+                if (exc.code not in {"signer_unavailable", "tenant_catalog_unavailable"}
+                        and (confirmation.approval_kind is None or exc.code != "branch_dev_catalog_unavailable")):
+                    self.store.supersede_publish(
+                        tenant_id=tenant_id, change_set_id=change.change_set_id,
+                        expected_version=publishing.version,
+                        idempotency_key=idempotency_key, reason_code="branch_" + exc.code,
+                    )
+                    _LOG.warning(
+                        "customization_publish_superseded: change_set=%s code=%s",
+                        change.change_set_id, exc.code,
+                    )
+                raise CustomizationServiceError(
+                    exc.code, exc.status_code if isinstance(exc, tenant_publish.TenantPublishError) else (
+                        409 if exc.code == "branch_version_conflict" else (
+                        422 if exc.code == "branch_package_invalid" else 503
+                    )), failures=exc.failures,
+                ) from exc
+            except OSError as exc:
+                code = ("tenant_catalog_unavailable" if customization_flags.plugin_builder_enabled(tenant_id)
+                        else "branch_dev_catalog_unavailable")
+                raise CustomizationServiceError(code, 503) from exc
+            try:
+                self.store.publish_branch(
+                    tenant_id=tenant_id, change_set_id=change.change_set_id,
+                    expected_version=publishing.version, idempotency_key=idempotency_key,
+                    approver_subject=confirmation.approver_subject,
+                )
+            except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+                raise CustomizationServiceError("record_fields_write_failed", 503) from exc
+            return self._branch_publish_result(change, result)
         self.store.verify_removal_predecessor(
             tenant_id=tenant_id, change_set_id=change.change_set_id
         )
@@ -2403,6 +3451,68 @@ class CustomizationService:
                 "catalog_commit": effective.catalog_commit, "catalog_digest": effective.catalog_digest,
                 "platform_release": effective.effective_platform_release,
                 "workspace_contract_digest": effective.workspace_contract_digest}
+
+    @staticmethod
+    def _branch_dev_root(tenant_id: str) -> Path:
+        if tenant_id not in customization_flags.internal_tenants():
+            raise CustomizationServiceError("branch_publish_internal_only", 403)
+        configured = os.environ.get("LEAF_BRANCH_DEV_TOOLS_DIR", "")
+        if os.environ.get("LEAF_BRANCH_DEV_TOOLS") != "1" or not configured.strip():
+            raise CustomizationServiceError("branch_dev_catalog_unavailable", 503)
+        return Path(configured)
+
+    @staticmethod
+    def _branch_package_files(change: ChangeSet) -> tuple[dict[str, bytes], str]:
+        receipt = CustomizationService._branch_receipt_fields(change)
+        package = receipt["package_path"]
+        bare = _bare_repo(change.tenant_id)
+        files = {
+            path[len(package) + 1:]: _git_blob(bare, f"{change.staged_commit}:{path}")
+            for path in receipt["package_files"]
+        }
+        return files, package.split("/")[1]
+
+    @staticmethod
+    def _branch_publish_result(
+        change: ChangeSet, result: DevPublishResult | tenant_publish.TenantPublishResult,
+    ) -> dict[str, Any]:
+        return {
+            "contract": CONTRACT, "tenant_id": change.tenant_id,
+            "change_set_id": change.change_set_id, "target": "branch",
+            "name": result.name, "version": result.version,
+            "package_digest": result.package_digest,
+            **({"catalog": "/api/tool-envelopes/tenant"}
+               if customization_flags.plugin_builder_enabled(change.tenant_id)
+               else {"dev_catalog": "/api/tool-envelopes/dev"}),
+        }
+
+    def _published_branch_result(self, change: ChangeSet) -> dict[str, Any]:
+        if customization_flags.plugin_builder_enabled(change.tenant_id):
+            files, name = self._branch_package_files(change)
+            try:
+                _, checked = tenant_publish.reviewed_package(files, name)
+                result = tenant_publish.read_publication(
+                    os.environ["LEAF_TENANT_TOOLS_DIR"], change.tenant_id,
+                    name, checked.manifest["version"])
+                if result.package_digest != checked.package_digest:
+                    _, legacy_checked = tenant_publish.reviewed_package(files, name, timeout_cap_ms=None)
+                    if result.package_digest != legacy_checked.package_digest:
+                        raise tenant_publish.TenantPublishError("branch_version_conflict", 409)
+            except (tenant_publish.TenantPublishError, OSError) as exc:
+                raise CustomizationServiceError("publish_not_available", 409) from exc
+            return self._branch_publish_result(change, result)
+        root = self._branch_dev_root(change.tenant_id)
+        files, name = self._branch_package_files(change)
+        checked = check_branch_package(files, name)
+        if not checked.ok:
+            raise CustomizationServiceError("branch_package_invalid", 422, failures=checked.failures)
+        try:
+            result = read_branch_publication(name, checked.manifest["version"], root)
+            if result.package_digest != checked.package_digest:
+                raise DevPublishError("branch_version_conflict")
+        except (DevPublishError, OSError) as exc:
+            raise CustomizationServiceError("publish_not_available", 409) from exc
+        return self._branch_publish_result(change, result)
 
     def _refuse_stale_addition_base(self, change: ChangeSet) -> None:
         """Refuse an addition staged on a catalog that is no longer effective.
@@ -2474,8 +3584,12 @@ class CustomizationService:
             raise CustomizationServiceError("record_fields_invalid", 503) from exc
         except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
             raise CustomizationServiceError("record_fields_read_failed", 503) from exc
+        summary = None
+        if change.tool_target == "branch" and "compile_attempts" in receipt:
+            summary = self._compile_summary_json(receipt)
+            receipt = {key: value for key, value in receipt.items() if key != "compile_attempts"}
         validated = self._validate_receipt(receipt, change)
-        change, _changed = self._complete_stage(change, validated)
+        change, _changed = self._complete_stage(change, validated, compile_summary_json=summary)
         return {"accepted": True, "change_set_id": change.change_set_id}
 
     def authorize_publish_callback(
@@ -2623,7 +3737,7 @@ class CustomizationService:
         already validated the paths the key is simply absent; nothing recomputes
         a diff to manufacture it.
         """
-        if (change.request_graph_input is not None
+        if change.tool_target != "branch" and (change.request_graph_input is not None
                 or change.base_catalog_change_set_id is not None
                 or change.catalog_record_fields_json is not None):
             self._verified_record_fields(change, set())
@@ -2640,6 +3754,9 @@ class CustomizationService:
                 extra["tool"] = self._decorate_stage_tool(change, tool)
         body = {"receipt": self._raw_receipt(change),
                 **{k: v for k, v in extra.items() if v is not None}}
+        if change.tool_target == "branch":
+            self._verified_record_fields(change, set())
+            body.update(target="branch", package_path=body["receipt"]["package_path"])
         klass = self._change_class(change, changed)
         if klass is not None:
             body["change_class"] = klass
@@ -2700,7 +3817,8 @@ class CustomizationService:
                 "catalog_digest": change.catalog_digest,
                 "platform_release": change.desired_platform_release,
                 "workspace_contract_digest": change.workspace_contract_digest,
-                "idempotency_key": change.idempotency_key}
+                "idempotency_key": change.idempotency_key,
+                **(CustomizationService._branch_receipt_fields(change) if change.tool_target == "branch" else {})}
 
     @staticmethod
     def _verify_catalog(tenant_id: str, commit: str, digest: str) -> None:

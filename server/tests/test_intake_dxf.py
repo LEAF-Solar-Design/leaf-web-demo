@@ -40,6 +40,97 @@ def _entity_bytes(data):
     return data.split(b"0\nSECTION\n2\nENTITIES\n", 1)[1].split(b"0\nENDSEC\n", 1)[0]
 
 
+@pytest.mark.parametrize(("sheets", "model_layout"), [
+    ([("Roof Plan", None)], None),
+    ([("Electrical Sheet", "0")], "Model"),
+    ([("North Roof", None), ("South Roof", "0")], "MODEL"),
+])
+def test_named_sheets_without_paper_flag_keep_model_only_count(sheets, model_layout):
+    import tool_loader
+
+    def insert(handle, x, layout, flag=None):
+        fields = ["0", "INSERT", "5", handle, "8", "PV", "2", "Panel",
+                  "10", str(x), "20", "1"]
+        if flag is not None:
+            fields.extend(["67", flag])
+        if layout is not None:
+            fields.extend(["410", layout])
+        return fields
+
+    fields = [
+        "0", "SECTION", "2", "BLOCKS",
+        "0", "BLOCK", "2", "Panel", "10", "0", "20", "0",
+        "0", "LWPOLYLINE", "8", "0", "90", "4", "70", "1",
+        "10", "0", "20", "0", "10", "0.25", "20", "0",
+        "10", "0.25", "20", "0.25", "10", "0", "20", "0.25",
+        "0", "ENDBLK", "0", "ENDSEC",
+        "0", "SECTION", "2", "ENTITIES", *insert("A", 1, model_layout),
+    ]
+    for index, (sheet, flag) in enumerate(sheets, start=1):
+        fields.extend(insert(f"{10 + index:X}", index + 1, sheet, flag))
+    fields.extend(["0", "ENDSEC", "0", "EOF"])
+    intake = dxf_intake.parse_dxf_bytes(("\n".join(fields) + "\n").encode())
+
+    registry = json.loads((SERVER_DIR.parent / "engine" / "registry.json").read_text())
+    tool = next(tool for tool in registry["tools"] if tool["name"] == "count-modules")
+    reopened, _ = _roundtrip(intake)
+    for drawing in (intake, reopened):
+        assert "space" not in drawing["inserts"][0]
+        paper = [(entity.get("space"), entity.get("layout")) for entity in drawing["inserts"][1:]]
+        assert paper == [("paper", sheet) for sheet, _ in sheets]
+        params = {"region": [0, 0, 10, 10]}
+        listing = tool_loader.run_tool_dynamic(tool, drawing, {}, aps_live=False)
+        assert listing["error"] is None
+        selected, = listing["result"]["sets"]
+        params["set_id"] = selected["set_id"]
+        count = tool_loader.run_tool_dynamic(tool, drawing, params, aps_live=False)
+        assert count["error"] is None
+        assert count["result"]["count"] == 1
+        assert count["overlay"]["highlight_handles"] == ["A"]
+
+
+@pytest.mark.parametrize(("entity_type", "geometry", "layout", "paper_flag", "kept_layout"), [
+    ("LINE", ["10", "0", "20", "0", "11", "1", "21", "0"], "X" * 256, [], None),
+    ("TEXT", ["10", "0", "20", "0", "40", "2", "1", "Note"], "Roof\x00Plan", [], None),
+    ("LWPOLYLINE", ["90", "2", "10", "0", "20", "0", "10", "1", "20", "0"],
+     "Roof\x7fPlan", ["67", "1"], None),
+    ("LINE", ["10", "0", "20", "0", "11", "1", "21", "0"], "É" * 255, [], "É" * 255),
+    ("TEXT", ["10", "0", "20", "0", "40", "2", "1", "Note"], "Roof Notes", [], "Roof Notes"),
+    ("TEXT", ["10", "0", "20", "0", "40", "2", "1", "Note"], "", ["67", "1"], None),
+], ids=["too-long", "nul", "del", "unicode-boundary", "ordinary", "empty"])
+def test_paper_entity_keeps_only_a_writable_layout_name(entity_type, geometry, layout, paper_flag, kept_layout):
+    fields = ["0", "SECTION", "2", "ENTITIES", "0", entity_type, "5", "A", "8", "Roof",
+              *paper_flag, "410", layout, *geometry, "0", "ENDSEC", "0", "EOF"]
+    intake = dxf_intake.parse_dxf_bytes(("\n".join(fields) + "\n").encode())
+    reopened, _ = _roundtrip(intake)
+    collection = "texts" if entity_type == "TEXT" else "polylines"
+    for drawing in (intake, reopened):
+        entity, = drawing[collection]
+        assert entity["handle"] == "A"
+        assert entity["space"] == "paper"
+        if kept_layout is None:
+            assert "layout" not in entity
+        else:
+            assert entity["layout"] == kept_layout
+
+
+@pytest.mark.parametrize(("layout", "in_model"), [("Model", True), ("MODEL", True), ("Roof Notes", False)])
+def test_multileader_uses_the_same_layout_classification(layout, in_model):
+    intake = {"layers": ["0"], "polylines": [], "mleaders": [{
+        "handle": "B", "layer": "0", "style": "Standard", "textstyle": "Standard",
+        "pts": [[0, 0, 0], [5, 4, 0]], "landing": [5, 4, 0], "dogleg_dir": [1, 0, 0],
+        "textpt": [5.45, 4.09, 0], "height": 0.18, "arrow": 0.18, "dogleg": 0.36,
+        "attachment": 1, "text": "Valve",
+    }], "mlstyles": [{"name": "Standard", "textstyle": "Standard", "segments": 1,
+                     "height": 0.18, "arrow": 0.18, "dogleg": 0.36, "gap": 0.09}]}
+    data = intake_dxf.intake_to_dxf(intake)
+    model_field = b"67\n0\n410\nModel\n"
+    assert _entity_bytes(data).count(model_field) == 1
+    data = data.replace(model_field, f"67\n0\n410\n{layout}\n".encode(), 1)
+    reopened = dxf_intake.parse_dxf_bytes(data)
+    assert [leader["handle"] for leader in reopened.get("mleaders", [])] == (["B"] if in_model else [])
+
+
 def _bulged_square(bulges):
     return {"layers": ["A"], "polylines": [
         {"layer": "A", "closed": True, "handle": "10", "xdata": None,
@@ -599,3 +690,144 @@ def test_bounds_hold(monkeypatch):
     with pytest.raises(intake_dxf.IntakeDxfError):
         intake_dxf.intake_to_dxf({"layers": [], "polylines": [
             {"layer": "A", "closed": False, "pts": [[0, 0], [1, 1], [2, 2]], "handle": "1"}]})
+
+
+# GAPS 51 (film take 4): a frozen or off layer in the source DXF is recorded as
+# hidden, in table order, and the writer emits it off so the round trip keeps it.
+def test_frozen_and_off_layers_parse_as_hidden_and_round_trip():
+    dxf = ("0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n70\n3\n"
+           "0\nLAYER\n2\nRAILS\n70\n1\n62\n7\n"
+           "0\nLAYER\n2\nMODULES\n70\n0\n62\n5\n"
+           "0\nLAYER\n2\nTAGS\n70\n0\n62\n-3\n"
+           "0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n").encode()
+    intake = dxf_intake.parse_dxf_bytes(dxf, source_name="x")
+    assert intake["layers"] == ["RAILS", "MODULES", "TAGS"]
+    assert intake["hidden_layers"] == ["RAILS", "TAGS"]
+    again, _ = _roundtrip(intake)
+    assert again["hidden_layers"] == ["RAILS", "TAGS"]
+    shown = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf({"layers": ["A"], "polylines": []}), source_name="x")
+    assert "hidden_layers" not in shown
+
+
+@pytest.mark.parametrize(("first", "second", "base", "length"), [
+    ("Rail", "Rail", 0, 5),
+    ("Tracker", "TRACKER", 3, 1),
+    ("Canopy", "canopy", 4, 6),
+])
+def test_dxf_refuses_ambiguous_block_names_in_either_order(first, second, base, length):
+    def block(name, handle, x, end):
+        return (f"0\nBLOCK\n2\n{name}\n10\n{x}\n20\n0\n"
+                f"0\nLINE\n5\n{handle}\n8\n0\n10\n0\n20\n0\n"
+                f"11\n{end}\n21\n1\n0\nENDBLK\n")
+
+    def drawing(*definitions):
+        return ("0\nSECTION\n2\nBLOCKS\n" + "".join(definitions) +
+                f"0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nINSERT\n5\nA1\n"
+                f"8\n0\n2\n{first.upper()}\n10\n0\n20\n0\n0\nENDSEC\n0\nEOF\n").encode()
+
+    original = block(first, "21", 0, 1)
+    conflict = block(second, "22", base, length)
+    for definitions in ((original, conflict), (conflict, original)):
+        with pytest.raises(dxf_intake.DxfParseError, match="conflicting block definitions"):
+            dxf_intake.parse_dxf_bytes(drawing(*definitions))
+
+    distinct = block(second + "_ALT", "22", base, length)
+    result = dxf_intake.parse_dxf_bytes(drawing(original, distinct))
+    assert list(result["blocks"]) == [first, second + "_ALT"]
+    assert result["inserts"][0]["name"] == first
+    assert result["blocks"][second + "_ALT"]["base"] == [base, 0, 0]
+
+
+def _dxf_with_format_headers(versions, codepages, encoding):
+    header = "".join(f"9\n$ACADVER\n1\n{version}\n" for version in versions)
+    header += "".join(f"9\n$DWGCODEPAGE\n3\n{page}\n" for page in codepages)
+    return (
+        f"0\nSECTION\n2\nHEADER\n{header}0\nENDSEC\n"
+        "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nRóof\n10\n0\n20\n0\n"
+        "0\nLINE\n5\n21\n8\nPánel\n10\n0\n20\n0\n11\n1\n21\n1\n0\nENDBLK\n"
+        "0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nINSERT\n5\nA1\n"
+        "8\nPánel\n2\nRóof\n10\n0\n20\n0\n0\nENDSEC\n0\nEOF\n"
+    ).encode(encoding)
+
+
+@pytest.mark.parametrize(("versions", "codepages", "fields"), [
+    (("AC1015", "AC1024"), ("ANSI_1252",), "$ACADVER"),
+    (("AC1015",), ("ANSI_1252", "ANSI_1251"), "$DWGCODEPAGE"),
+    (("AC1015", "AC1024"), ("ANSI_1252", "ANSI_1250"), "$ACADVER, $DWGCODEPAGE"),
+], ids=["version", "codepage", "both"])
+@pytest.mark.parametrize("reverse", [False, True], ids=["original", "reversed"])
+def test_conflicting_dxf_header_refuses_ambiguous_symbol_identity(versions, codepages, fields, reverse):
+    if reverse:
+        versions, codepages = versions[::-1], codepages[::-1]
+    raw = _dxf_with_format_headers(versions, codepages, "cp1252")
+    with pytest.raises(dxf_intake.DxfParseError) as exc:
+        dxf_intake.parse_dxf_bytes(raw)
+    assert str(exc.value) == f"conflicting DXF header declarations: {fields}"
+
+
+@pytest.mark.parametrize("copies", [1, 2])
+def test_matching_dxf_header_declarations_preserve_symbol_identity(copies):
+    raw = _dxf_with_format_headers(("AC1024",) * copies, ("ANSI_1252",) * copies, "utf-8")
+    result = dxf_intake.parse_dxf_bytes(raw)
+    assert list(result["blocks"]) == ["Róof"]
+    assert result["inserts"][0]["name"] == "Róof"
+    assert result["inserts"][0]["layer"] == "Pánel"
+
+
+@pytest.mark.parametrize("transform", [
+    {"x": 1},
+    {"x": -9, "rot": 1.570796, "scale": [-2, 1, 1]},
+    {"x": 50, "y": -110, "z": 8, "scale": [2, 3, 5]},
+])
+def test_invisible_insert_round_trip_preserves_identity_and_transform(transform):
+    hidden = dict({"handle": "1A", "name": "Rail", "layer": "Equipment",
+                   "y": 0, "z": 0, "invisible": True}, **transform)
+    shown = {**hidden, "handle": "1B", "invisible": False}
+    intake = {"layers": ["Equipment"], "polylines": [],
+              "blocks": {"Rail": {"base": [1, 2, 0], "children": []}},
+              "inserts": [hidden, shown]}
+    first, raw = _roundtrip(intake)
+    assert raw.count(b"60\n1\n") == 1
+    hidden, shown = first["inserts"]
+    assert hidden["handle"] == "1A" and hidden["invisible"] is True
+    assert shown["handle"] == "1B" and "invisible" not in shown
+    assert all(hidden[key] == shown[key] for key in ("name", "x", "y", "z", "rot", "scale"))
+    second, _ = _roundtrip(first)
+    assert second["inserts"] == first["inserts"]
+
+
+def test_invisible_nested_insert_keeps_definition_and_handle():
+    pairs = [
+        0, "SECTION", 2, "BLOCKS",
+        0, "BLOCK", 2, "Frame",
+        0, "INSERT", 5, "1A", 2, "Rail", 60, 1, 10, 2, 20, 3,
+        0, "INSERT", 5, "1B", 2, "Rail", 60, 0, 10, 5, 20, 7,
+        0, "ENDBLK", 0, "BLOCK", 2, "Rail", 0, "ENDBLK",
+        0, "ENDSEC", 0, "EOF", "",
+    ]
+    intake = dxf_intake.parse_dxf_bytes("\n".join(map(str, pairs)).encode())
+    hidden, shown = intake["blocks"]["Frame"]["nested_inserts"]
+    assert (hidden["handle"], hidden["name"], hidden["invisible"]) == ("1A", "Rail", True)
+    assert shown["handle"] == "1B" and "invisible" not in shown
+
+
+@pytest.mark.parametrize(("flags", "suffix", "outline"), [
+    (8, [0, "SEQEND"], {"layer": "Detail", "closed": False, "pts": [[1, 2, 3], [4, 5, 7]]}),
+    (9, [0, "SEQEND"], {"layer": "Detail", "closed": True, "pts": [[1, 2, 3], [4, 5, 7]]}),
+    (137, [0, "SEQEND"], {"layer": "Detail", "closed": True, "pts": [[1, 2, 3], [4, 5, 7]]}),
+    (73, [0, "SEQEND"], None),
+    (9, [], None),
+])
+def test_block_classic_3d_polyline_has_read_only_outline(flags, suffix, outline):
+    pairs = [
+        0, "SECTION", 2, "BLOCKS", 0, "BLOCK", 2, "Frame",
+        0, "POLYLINE", 8, "Detail", 70, flags, 210, 0, 220, 1, 230, 0,
+        0, "VERTEX", 70, 32, 10, 1, 20, 2, 30, 3,
+        0, "VERTEX", 70, 32, 10, 4, 20, 5, 30, 7,
+        *suffix, 0, "ENDBLK", 0, "ENDSEC", 0, "EOF", "",
+    ]
+    intake = dxf_intake.parse_dxf_bytes("\n".join(map(str, pairs)).encode())
+    block = intake["blocks"]["Frame"]
+    assert block["complete"] is False
+    assert block["children"][0]["kind"] == "OTHER"
+    assert block["children"][0].get("outline") == outline

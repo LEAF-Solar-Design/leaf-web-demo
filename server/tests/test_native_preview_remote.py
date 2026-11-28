@@ -77,6 +77,101 @@ def claim(c):
     return job, {k: job[k] for k in ('lease_owner', 'attempt')}
 
 
+@pytest.fixture
+def pinned(protocol, monkeypatch):
+    case = protocol
+    monkeypatch.setattr(jobs, 'job_store_mode', lambda: 'postgres')
+    records, keys = {}, {}
+
+    def insert(*args, idempotency_key, native_preview):
+        if idempotency_key not in keys:
+            job_id = str(uuid.uuid4())
+            keys[idempotency_key] = job_id
+            records[job_id] = dict(job_id=job_id, status='submitted', lease=None,
+                                   native_preview=copy.deepcopy(native_preview),
+                                   **{field: native_preview[field] for field in ('org_id', 'tenant_id', 'project_id')})
+        return keys[idempotency_key]
+
+    monkeypatch.setattr(jobs, '_submit_job', insert)
+    monkeypatch.setattr(jobs, 'get_job', records.get)
+    prior = submit(case)
+    records[prior]['status'] = 'failed'
+    monkeypatch.setattr(native.source, 'prepare_source', lambda *args, **kwargs: pytest.fail('regenerated'))
+    monkeypatch.setattr(case.backend, 'put_if_absent_or_verify', lambda *args: pytest.fail('custody write'))
+    return case, prior, records
+
+
+def test_pinned_recovery_preserves_source_and_deduplicates(pinned):
+    case, prior, records = pinned
+    previous = copy.deepcopy(records[prior])
+    headers = dict(case.headers(), **{'Idempotency-Key': 'recover-page:' + prior})
+    responses = [case.client.post(case.url, json={'prior_job_id': prior}, headers=headers) for _ in range(2)]
+    assert [item.status_code for item in responses] == [202, 202]
+    assert responses[0].json() == responses[1].json()
+    job = responses[0].json()['job_id']
+    assert job != prior and len(records) == 2 and records[prior] == previous
+    assert records[job]['native_preview']['source'] == previous['native_preview']['source']
+
+
+def test_real_postgres_pinned_recovery_converges_on_one_new_job(protocol, postgres_authority):
+    case = protocol
+    prior = submit(case)
+    _, identity = claim(case)
+    remote.complete(case.org, case.project, case.worker, prior, {**identity, 'outcome': 'failed'})
+    old = jobs.get_job(prior)
+    def recover():
+        return remote.submit(case.org, case.project, case.actor, {'prior_job_id': prior}, 'recover-page:' + prior)['job_id']
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(recover) for _ in range(2)]
+        first, second = [future.result() for future in futures]
+    assert first == second and first != prior
+    assert jobs.get_job(prior) == old
+    assert jobs.get_job(first)['native_preview']['source'] == old['native_preview']['source']
+
+
+@pytest.mark.parametrize(('change', 'status'), [
+    ('actor', 404), ('tenant', 404), ('project', 404), ('revoked', 403), ('worker-revoked', 403),
+    ('after-read', 403), ('binding-drift', 409), ('missing', 503), ('damaged', 503),
+    ('wrong-key', 422), ('running', 409), ('lease', 409), ('descriptor-input', 422)])
+def test_pinned_recovery_refuses_without_dispatch(pinned, monkeypatch, change, status):
+    case, prior, records = pinned
+    record = records[prior]
+    body, key = {'prior_job_id': prior}, 'recover-page:' + prior
+    if change == 'actor':
+        record['native_preview']['actor_id'] = case.worker
+    elif change in ('tenant', 'project'):
+        record[change + '_id'] = str(uuid.uuid4())
+    elif change in ('revoked', 'worker-revoked'):
+        case.revoked.add(case.actor if change == 'revoked' else case.worker)
+    elif change in ('after-read', 'binding-drift'):
+        real_read = native.source.read_source
+        def read(*args):
+            raw = real_read(*args)
+            if change == 'after-read':
+                case.revoked.add(case.actor)
+            else:
+                monkeypatch.setenv('LEAF_NATIVE_PREVIEW_WORKER_BINDINGS', json.dumps([{**case.binding, 'worker_id': 'changed'}]))
+            return raw
+        monkeypatch.setattr(native.source, 'read_source', read)
+    elif change in ('missing', 'damaged'):
+        archive, _ = native.source._keys(record['native_preview']['source'])
+        if change == 'missing':
+            case.backend.delete(archive)
+        else:
+            case.backend.put(archive, b'damaged')
+    elif change == 'wrong-key':
+        key = 'another-key'
+    elif change == 'running':
+        record['status'] = 'running'
+    elif change == 'lease':
+        record['lease'] = {'owner': case.worker}
+    else:
+        body['source'] = record['native_preview']['source']
+    response = case.client.post(case.url, json=body, headers=dict(case.headers(), **{'Idempotency-Key': key}))
+    assert response.status_code == status
+    assert list(records) == [prior]
+
+
 def png_bytes():
     # A complete one-pixel PNG used only as synthetic protocol evidence.
     import zlib

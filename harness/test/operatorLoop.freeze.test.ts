@@ -65,6 +65,7 @@ describe("operator wire vocabulary is pinned", () => {
     expect([...SPINE_TOOL_NAMES]).toEqual([...VENDOR_SPINE_TOOL_NAMES, "propose_project_page", "inspect_project_photo", "propose_project_photo_assignments", "device_list", "device_install_package", "device_ha_step", "device_light", "device_light_states", "device_command_status"].reduce<string[]>((names, name) => {
       names.push(name);
       if (name === "author_tool") names.push("author_stage_status");
+      if (name === "project_completion_status") names.push("view_control");
       return names;
     }, []));
     for (const name of SPINE_TOOL_NAMES) {

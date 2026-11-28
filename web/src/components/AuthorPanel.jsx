@@ -2,6 +2,7 @@ import { notYetAvailable } from '../site/studioAvailability.js'
 import { useEffect, useRef, useState } from 'react'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { authorTool } from '../api'
+import StagedSourceDownload from './StagedSourceDownload.jsx'
 import { authorStartFailureOf } from '../controllers/useAuthorStageController.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import { finiteOrNull, orDash, usageCostLabel } from '../usage.js'
@@ -148,11 +149,11 @@ function AuthorGate({ onLinkClaude }) {
     <div className="author-gate" role="status">
       <div className="author-gate-body">
         <b>Link your Claude account to author with the agent.</b>{' '}
-        Templated authoring still works below without it. Linking your Claude subscription lets the
+        Templated authoring still works below without it. Linking an Anthropic API key lets the
         real agent write richer tools.
         {onLinkClaude && (
           <div className="author-gate-act">
-            <button className="chip-act" onClick={onLinkClaude}>Link Claude account</button>
+            <button className="chip-act" onClick={onLinkClaude}>Link API key</button>
           </div>
         )}
       </div>
@@ -681,6 +682,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
             <div className="customization-detail"><span>Server diff</span><pre>{typeof (authored.diff_summary || authored.diff) === 'string' ? (authored.diff_summary || authored.diff) : JSON.stringify(authored.diff_summary || authored.diff, null, 2)}</pre></div>
           )}
           <pre className="code"><code>{authored.code}</code></pre>
+          <StagedSourceDownload staged={authored} disabled={publishing || busyNow || stageActivity?.enabled === false} />
           {!authored.published ? canRecover ? (
             <>
               <button type="button" className="chip-act" onClick={reviseDraft} disabled={publishing || busyNow}>Revise</button>

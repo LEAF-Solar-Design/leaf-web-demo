@@ -85,7 +85,12 @@ function setup() {
   return { probe, worker, viewer, viewerRef, history, scene, load, ...mounted,
     resize: () => { frustum = 3; pose = { ...pose, worldPerPixel: frustum / pose.zoom } } }
 }
-const input = () => screen.getByRole('combobox', { name: 'Find in drawing' })
+const input = () => {
+  if (!screen.queryByRole('combobox', { name: 'Find in drawing' })) {
+    fireEvent.click(screen.getByLabelText('Find in drawing', { selector: 'summary' }))
+  }
+  return screen.getByRole('combobox', { name: 'Find in drawing' })
+}
 const type = (query) => fireEvent.change(input(), { target: { value: query } })
 const enter = () => fireEvent.keyDown(input(), { key: 'Enter' })
 const find = (query) => { type(query); enter() }

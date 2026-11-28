@@ -113,7 +113,47 @@ def _catalog_relation_absence(status):
         return {}, set()
 
 
-def _unexplained_defects(status, pending, *, catalog=None, absent_relations=None):
+def _missing_table_absence(status):
+    """Tables with missing columns that do not exist at all, in one batched lookup.
+
+    Fails closed: any lookup error returns no tables, so no column is explained."""
+    names = sorted(table for table, columns in status.get("missing", {}).items()
+                   if isinstance(table, str) and table and columns)
+    if not names:
+        return set()
+    try:
+        db = importlib.import_module("platform_link").platform_db()
+        with db.get_pool().connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT name FROM unnest(%(names)s::text[]) AS name "
+                    "WHERE to_regclass(quote_ident(current_schema()) || '.' || "
+                    "quote_ident(name)) IS NULL",
+                    {"names": names},
+                )
+                return {row["name"] for row in cur.fetchall()}
+    except Exception:
+        return set()
+
+
+def _creates_table(relation, raw_texts):
+    """True when a pending migration text creates exactly this public relation.
+
+    Matches the statement head only, so CREATE TABLE x (LIKE y INCLUDING ...) counts even
+    though its columns are never named in the migration text."""
+    identifier = re.escape(relation)
+    create = re.compile(
+        r'(?<![A-Za-z0-9_])CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?'
+        r'(?:(?:public|"public")\s*\.\s*)?'
+        + r'(?:"' + identifier + r'"|' + identifier + r')'
+        + r'(?![A-Za-z0-9_$"])(?!\s*\.)',
+        re.IGNORECASE | re.ASCII,
+    )
+    return any(create.search(text) for text in raw_texts)
+
+
+def _unexplained_defects(status, pending, *, catalog=None, absent_relations=None,
+                         absent_tables=None):
     texts = []
     raw_texts = []
     if len(pending) > 64:
@@ -139,21 +179,26 @@ def _unexplained_defects(status, pending, *, catalog=None, absent_relations=None
         for candidate, relation in _catalog_candidates(status, catalog or {}).items():
             if absent_relations is None or relation not in absent_relations:
                 continue
-            identifier = re.escape(relation)
-            create = re.compile(
-                r'(?<![A-Za-z0-9_])CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?'
-                r'(?:(?:public|"public")\s*\.\s*)?'
-                + r'(?:"' + identifier + r'"|' + identifier + r')'
-                + r'(?![A-Za-z0-9_$"])(?!\s*\.)',
-                re.IGNORECASE | re.ASCII,
-            )
-            if any(create.search(text) for text in raw_texts):
+            if _creates_table(relation, raw_texts):
                 explained_catalog.add(candidate)
     except Exception:
         explained_catalog.clear()
 
+    # Every column of a table that does not exist yet is explained when a pending
+    # migration creates that table, however the columns are spelled (LIKE ... INCLUDING
+    # names none of them). A table that already exists keeps the per-column rule, because
+    # CREATE TABLE IF NOT EXISTS would not add its missing columns.
+    explained_tables = set()
+    try:
+        for table in status.get("missing", {}):
+            if absent_tables is not None and table in absent_tables and _creates_table(table, raw_texts):
+                explained_tables.add(table)
+    except Exception:
+        explained_tables.clear()
+
     defects = [(f"{table}.{column}", (table, column))
                for table, columns in status.get("missing", {}).items()
+               if table not in explained_tables
                for column in columns]
     for key, entries in status.items():
         if (key.startswith(("invalid_", "missing_"))
@@ -204,7 +249,8 @@ def run(env, schema_status=None) -> int:
                 if schema["pending"]:
                     catalog, absent = _catalog_relation_absence(status)
                     schema["unexplained"] = _unexplained_defects(
-                        status, schema["pending"], catalog=catalog, absent_relations=absent)
+                        status, schema["pending"], catalog=catalog, absent_relations=absent,
+                        absent_tables=_missing_table_absence(status))
                 if (schema["drift"] or (not schema["pending"] and not status["ok"])
                         or schema["unexplained"]):
                     failed("schema_status")

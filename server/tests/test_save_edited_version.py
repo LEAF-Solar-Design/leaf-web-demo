@@ -65,17 +65,19 @@ def client(tmp_path, monkeypatch):
 
 
 def _post(client, *, data: bytes = EDITED_DXF, digest: str | None = None,
-          parent: int | None = None, name: str = "edited.dxf"):
+          parent: int | None = None, name: str = "edited.dxf", origin: str | None = None):
     if parent is None:
         head = client.get(f"/api/drawings/{DRAWING}/versions",
                           headers={"X-Tenant-Id": TENANT}).json()["head"]
         parent = head
+    form = {"parent_version": str(parent), "source_digest": digest or hashlib.sha256(data).hexdigest()}
+    if origin is not None:
+        form["origin"] = origin
     return client.post(
         f"/api/drawings/{DRAWING}/versions/edited",
         headers={"X-Tenant-Id": TENANT},
         files={"file": (name, io.BytesIO(data), "application/dxf")},
-        data={"parent_version": str(parent),
-              "source_digest": digest or hashlib.sha256(data).hexdigest()},
+        data=form,
     )
 
 
@@ -110,6 +112,34 @@ def test_save_advances_the_chain_with_intake_payload_sidecar_and_receipt(client,
     assert chain["head"] == new_v
 
 
+@pytest.mark.parametrize("origin", [None, "autocad", "other", "autocad" + " " * 32])
+def test_save_records_publish_origin_in_history(client, origin):
+    resp = _post(client, origin=origin)
+    assert resp.status_code == 201, resp.text
+    chain = client.get(f"/api/drawings/{DRAWING}/versions",
+                       headers={"X-Tenant-Id": TENANT}).json()
+    entry = chain["versions"][-1]
+    if origin == "autocad":
+        assert entry["tool"] == "autocad-palette"
+        assert entry["note"] == "published from AutoCAD through the Leaf palette"
+    else:
+        assert entry["tool"] == "cad-edit-surface"
+        assert entry["note"] == "browser edit via the isolated engine worker"
+
+
+def test_generic_upload_inherits_parent_drawing_name(client, tmp_path):
+    import store
+    import write_loop
+
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    for filename, expected in [("roof-site.dxf", "roof-site.dxf"), ("edited.dxf", "roof-site.dxf"),
+                               ("new-site.dxf", "new-site.dxf")]:
+        resp = _post(client, name=filename)
+        assert resp.status_code == 201, resp.text
+        _, intake = write_loop.read_intake(backend, TENANT, DRAWING, resp.json()["head"])
+        assert intake["dwg"] == expected
+
+
 def test_digest_mismatch_is_refused_and_writes_nothing(client):
     before = client.get(f"/api/drawings/{DRAWING}/versions",
                         headers={"X-Tenant-Id": TENANT}).json()["head"]
@@ -132,6 +162,47 @@ def test_unparseable_bytes_are_refused_and_write_nothing(client):
     after = client.get(f"/api/drawings/{DRAWING}/versions",
                        headers={"X-Tenant-Id": TENANT}).json()["head"]
     assert after == before
+
+
+@pytest.mark.parametrize("damaged", [
+    pytest.param(
+        EDITED_DXF.replace(b"0\nENDSEC\n0\nEOF\n", b"0\nINSERT\n5\nA2\n2\n"),
+        id="truncated-insert",
+    ),
+    pytest.param(
+        b"0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nPanel\n0\nENDSEC\n" + EDITED_DXF,
+        id="unclosed-block-with-eof",
+    ),
+    pytest.param(
+        EDITED_DXF.replace(b"8\nRoof\n", b"bad-code\nRoof\n"),
+        id="broken-pair-with-eof",
+    ),
+])
+def test_incomplete_framing_retry_keeps_last_good_version(client, tmp_path, damaged):
+    import store  # noqa: PLC0415
+    import write_loop  # noqa: PLC0415
+
+    path = f"/api/drawings/{DRAWING}/versions"
+    headers = {"X-Tenant-Id": TENANT}
+    assert _post(client).status_code == 201
+    before = client.get(path, headers=headers).json()
+    head = before["head"]
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    current_key = write_loop.edited_source_key(TENANT, DRAWING, head)
+    next_key = write_loop.edited_source_key(TENANT, DRAWING, head + 1)
+
+    for _ in range(2):
+        refused = _post(client, data=damaged, parent=head)
+        assert refused.status_code == 422, refused.text
+        assert "DXF framing" in refused.json()["error"]["message"]
+        assert client.get(path, headers=headers).json() == before
+        assert backend.get(current_key) == EDITED_DXF
+        assert not backend.exists(next_key)
+
+    repaired = _post(client, parent=head)
+    assert repaired.status_code == 201, repaired.text
+    assert repaired.json()["head"] == head + 1
+    assert backend.get(next_key) == EDITED_DXF
 
 
 def test_stale_parent_is_a_409_compare_and_set_refusal(client):

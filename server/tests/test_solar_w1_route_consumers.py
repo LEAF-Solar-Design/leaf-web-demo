@@ -400,11 +400,17 @@ def test_route_consumers_create_homeruns_keeps_a_feeder(routed):
     assert [item["to_ref"] for item in output["routes"][:4]] == [L1_ID] * 4
     assert result["receipt"]["pathway_refs_dropped"] == 0
     readiness = availability.w1_graph_readiness(copy.deepcopy(output))
-    # W1 equipment does not model L1/L2 devices, so both W1 tools stay refused upstream.
-    assert readiness["solar-homeruns"] == {"input_ready": False,
-                                           "input_reason": "equipment_assignment_required"}
-    assert readiness["solar-schedule"] == {"input_ready": False,
-                                           "input_reason": "complete_routing_required"}
+    assert readiness["solar-homeruns"] == {"input_ready": True, "input_reason": None}
+    assert readiness["solar-schedule"] == {"input_ready": True, "input_reason": None}
+
+    local = homeruns().run(source, {"expected_rev": 2})
+    assert non_homeruns(local) == [feeder]
+    assert [item["to_ref"] for item in local["routes"] if item["route_kind"] != "feeder"] == [
+        L1_ID
+    ] * 4
+    scheduled = schedule().run(local, {"expected_rev": 3, "insertion_point": [10, 20]})
+    assert non_homeruns(scheduled) == [feeder]
+    assert canon_sha(scheduled["schedules"][-1]["rows"]) == SCHEDULE_ROWS
 
 
 def test_route_consumers_create_schedule_ignores_a_feeder(routed):

@@ -290,7 +290,7 @@ def test_lab_run_schema_proof(mode):
         "lease_owner", "lease_fence", "lease_expires_at", "next_seq", "event_count",
         "created_at", "updated_at", "finished_at",
         "claimed_build_revision", "claimed_color", "cancel_requested_at", "cancel_requested_by",
-        "corpus_authority_json",
+        "corpus_authority_json", "attempt_wall_cap_seconds",
     }
     assert columns["lab_run_events"] == {
         "tenant_id", "run_id", "seq", "block_id", "kind", "payload", "created_at",
@@ -335,6 +335,8 @@ def test_lab_run_schema_proof(mode):
         "lab_run_events", "FOREIGN KEY (tenant_id, run_id)",
         "REFERENCES lab_runs(tenant_id, run_id)", "ON DELETE CASCADE")
     assert "lab_runs_state_check" in catalog["constraints"]
+    assert catalog["constraints"]["lab_runs_attempt_wall_cap_seconds_check"] == db._catalog_contract(
+        "lab_runs", "CHECK", "attempt_wall_cap_seconds > 0")
     for constraint in ("lab_runs_claimed_color_check", "lab_worker_status_pkey",
                        "lab_worker_status_color_check", "lab_worker_control_pkey", "lab_worker_control_id_check"):
         assert constraint in catalog["constraints"]

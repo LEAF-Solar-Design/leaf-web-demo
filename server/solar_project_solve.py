@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from uuid import UUID
 
@@ -17,6 +18,7 @@ import solar_solve_results as kernel
 import solar_solve_request as requests
 import solar_tools
 from solar_design_graph import GraphValidationError
+from solar_grid_restitch import completed_prefix_strings
 
 logger = logging.getLogger(__name__)
 
@@ -386,8 +388,9 @@ def _derive_split(job, context, plan, exchange, *, conn=None, children=None):
     # Validate native restitch/cut semantics and exactly-once coverage before
     # publishing even a proposal. This is a pure graph calculation, no write.
     accepted = kernel.accept_split_candidate(context.graph, candidate, expected_rev=context.graph["rev"])
-    members = set(next(frame for frame in context.graph["frames"]
-                       if frame["id"] == plan["binding"]["frame_ref"])["panel_refs"])
+    frame = next(frame for frame in context.graph["frames"]
+                 if frame["id"] == plan["binding"]["frame_ref"])
+    members = set(kernel._frame_panel_ids(frame))
     summary = []
     for string in accepted["strings"]:
         refs = string["ordered_panel_refs"]
@@ -493,11 +496,51 @@ def readonly_assembly_attribution(tenant, observed_job, input_version_id):
         return result
 
 
+def _preview_groups(children, pieces):
+    if sum(len(child["candidate_bytes"]) for child in children) > 512 * 1024:
+        return []
+    responses = [json.loads(child["candidate_bytes"])["proposal"] for child in children]
+    pieces = pieces[:len(responses)]
+    indices = [piece["row_indices"] for piece in pieces]
+    # Bound the intermediate grid even when pieces occupy sparse rows.
+    width = sum(max((len(row["Panels"]) for row in response["data"]["final_grid"]["Rows"]),
+                    default=0) for response in responses)
+    height = 1 + max((row for rows in indices for row in rows), default=-1)
+    if width * height > 16384:
+        return []
+    expected, by_upper = [], {}
+    cells = sum(len(row["Panels"]) for piece in pieces for row in piece["request"]["grid"]["Rows"])
+    if cells > 16384:
+        return []
+    for piece in pieces:
+        ids = set()
+        for row in piece["request"]["grid"]["Rows"]:
+            for panel in row["Panels"]:
+                if panel["Code"] == 1:
+                    ref = panel["Id"]
+                    identity = ref.upper()
+                    if identity in by_upper:
+                        return []
+                    by_upper[identity] = ref
+                    ids.add(identity)
+        expected.append(ids)
+    result, panels = [], 0
+    for group in completed_prefix_strings(responses, indices, piece_panel_ids=expected):
+        panels += len(group)
+        if len(result) == 256 or panels > 4096:
+            break
+        result.append([by_upper[identity] for identity in group])
+    return result
+
+
 def _prepare_split(job, context, plan, exchange, scope, lease, guard):
     store, children = _store(), []
+    pieces = plan["split_binding"]["pieces"]
+    preview_source = os.environ.get("LEAF_SOURCE_SHA", "")
+    preview_enabled = re.fullmatch(r"[0-9a-f]{40}", preview_source) is not None
     # Reserve the complete deterministic piece set before any upstream side
     # effect, including pieces that may remain pending after a partial failure.
-    for index, piece in enumerate(plan["split_binding"]["pieces"]):
+    for index, piece in enumerate(pieces):
         if guard.lost:
             return None
         child_scope = _piece_scope(scope, plan["split_binding"], index)
@@ -508,7 +551,7 @@ def _prepare_split(job, context, plan, exchange, scope, lease, guard):
             child = store.prepare_exchange(child_scope, lease, **reservation)
         if any(child[key] != value for key, value in reservation.items()):
             raise store.ExchangeConflict()
-    for index in range(len(plan["split_binding"]["pieces"])):
+    for index in range(len(pieces)):
         try:
             child = _prepare_piece(job, context, plan, index, scope, lease, guard)
         except Exception as exc:
@@ -519,6 +562,16 @@ def _prepare_split(job, context, plan, exchange, scope, lease, guard):
         if child is None or guard.lost:
             return None
         children.append(child)
+        if preview_enabled:
+            try:
+                groups = _preview_groups(children, pieces)
+                if groups and not guard.lost:
+                    store.publish_completed_group_preview(scope, lease, source_sha=preview_source,
+                                                          piece_count=len(children), groups=groups)
+            except Exception:
+                # Preview is optional. Keep the last published prefix if projection fails.
+                logger.warning("Completed group preview unavailable for job=%s", job["job_id"])
+                preview_enabled = False
     raw = _piece_manifest(children)
     projected = {**exchange, "response_bytes": raw, "response_sha256": _sha(raw),
                  "solver_endpoint": cloud.SOLVER_URL, "solver_version": "1.0.0"}

@@ -1,0 +1,31 @@
+{
+  "missing_layer_field": [
+    {
+      "name": "Roof",
+      "color": 7,
+      "linetype": "Continuous"
+    }
+  ],
+  "duplicate_layers": [
+    {
+      "name": "Roof",
+      "color": 7,
+      "linetype": "Continuous",
+      "plot": true
+    },
+    {
+      "name": "ROOF",
+      "color": 7,
+      "linetype": "Continuous",
+      "plot": true
+    }
+  ],
+  "negative_count": [
+    {
+      "type": "LINE",
+      "layer": "Roof",
+      "count": -1
+    }
+  ],
+  "truncated_json": "{\"layers\":[{\"name\":\"Roof\"}"
+}

@@ -59,6 +59,7 @@ from pydantic import BaseModel
 import agent_audit
 import agent_gate
 import deps
+import drawing_identity
 import entitlements
 import entity_scope
 import platform_link
@@ -68,6 +69,27 @@ from envelopes import ErrorCode, error_response, with_envelope_fields
 from text_match import text_matches
 
 router = APIRouter()
+
+
+SAMPLE_DRAWING_BRANCH_REFUSAL = (
+    "sample_drawing_branch_refused: This is the built-in sample drawing, so a Branch tool "
+    "planned here would be built for the sample's layers, not yours. Open your own drawing "
+    "first (in AutoCAD, run Open in Studio, or open a drawing you sent to Studio), then ask again."
+)
+
+
+def sample_drawing_plan_refusal(action, args, session) -> Optional[str]:
+    """Refuse to plan a Branch tool against the built-in sample drawing; fails closed on a sample alias, never on a missing session."""
+    if (
+        action == "propose_build_plan"
+        and isinstance(args, dict)
+        and isinstance(args.get("plan"), dict)
+        and args["plan"].get("target") == "branch"
+        and isinstance(session, dict)
+        and drawing_identity.curated_identity(session.get("drawing_id")) is not None
+    ):
+        return SAMPLE_DRAWING_BRANCH_REFUSAL
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -164,6 +186,8 @@ def internal_gate(req: GateRequest,
         entity_scope.gate_scope_refusal(authority_session_id, authority_turn_id, req.tenant_id)
         if req.action in entity_scope.SCOPE_REFUSED_ACTIONS else None
     )
+    if scope_refusal is None:
+        scope_refusal = sample_drawing_plan_refusal(req.action, req.args, session)
     result = agent_gate.gate(req.tenant_id, req.session_id, req.turn_id,
                              req.action, req.args, tier_caps, tier=tier,
                              subject=turn_subject,
@@ -171,7 +195,8 @@ def internal_gate(req: GateRequest,
                              # The APP-owned session the client stored its
                              # approval policy against — req.session_id is the
                              # harness's private one (review round 1).
-                             policy_session_id=authority_session_id)
+                             policy_session_id=authority_session_id,
+                             authority_turn_id=authority_turn_id)
     return with_envelope_fields(result)
 
 
@@ -320,6 +345,13 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
             retryable=True, status_code=503,
         )
     if gate_status == "ok":
+        if gate_rec.get("action") == "propose_build_plan":
+            if (gate_rec["tenant_id"] != str(tenant)
+                    or gate_rec["session_id"] != approval["session_id"]):
+                return _not_found(confirmation_id)
+            if req.approved and not getattr(tenant, "subject", None):
+                return error_response(ErrorCode.BAD_PARAMS, "plan_approver_mismatch",
+                                      retryable=False, status_code=403)
         try:
             if req.approved:
                 ok, rec, reason = agent_gate.grant_approval(
@@ -364,6 +396,11 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
                     ErrorCode.INTERNAL,
                     "approval decision not recorded (gate record raced away) — retry",
                     retryable=True, status_code=503,
+                )
+            else:
+                return error_response(
+                    ErrorCode.BAD_PARAMS, reason, retryable=False,
+                    status_code=403 if reason == "plan_approver_mismatch" else 409,
                 )
     # gate_status absent => a pre-spine sessions-wire-only confirmation_id —
     # record-only semantics, unchanged. corrupt => the gate chain will deny

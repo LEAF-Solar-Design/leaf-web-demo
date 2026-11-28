@@ -1,0 +1,83 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-combiner-comparison",
+  "builtin": "builtins/solar_combiner_comparison.py",
+  "family": "equipment",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_COMBINER_REQUEST",
+  "readiness": {"kind": "hook"},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-combiner-comparison",
+    "version": "1.0.0",
+    "description": "Compare two to four combiner model input ratings on one saved drawing. Show the strings each candidate leaves unassigned under the existing collector capacity. This read evaluates nominal input capacity.",
+    "kind": "script",
+    "family_id": "equipment",
+    "engine_op": "solar_combiner_comparison",
+    "entry": "builtins/solar_combiner_comparison.py",
+    "params": {
+      "type": "object",
+      "required": ["expected_rev", "options"],
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S"},
+              "max_dc_voltage": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000},
+              "max_ac_power_kw": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000},
+              "total_dc_inputs": {"type": "integer", "minimum": 1, "maximum": 1000000}
+            },
+            "required": ["model", "max_dc_voltage", "max_ac_power_kw", "total_dc_inputs"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object",
+      "required": ["schema", "expected_rev", "string_count", "basis", "options"],
+      "properties": {
+        "schema": {"const": "leaf.solar-combiner-comparison.v1"},
+        "expected_rev": {"type": "integer", "minimum": 0},
+        "string_count": {"type": "integer", "minimum": 1},
+        "basis": {"const": "nominal_input_capacity"},
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "required": ["model", "total_dc_inputs", "unassigned_string_refs"],
+            "properties": {
+              "model": {"type": "string"},
+              "total_dc_inputs": {"type": "integer", "minimum": 1},
+              "unassigned_string_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "capabilities": ["drawing.read"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["combiner-auto-place"],
+  "trusted_inputs": ["source_intake"],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 106,
+  "scenario": "w2-rooftop"
+}

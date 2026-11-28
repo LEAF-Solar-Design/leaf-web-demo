@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import math
+from fractions import Fraction
 
 MAX_EXACT_COUNT = 2**53 - 1
 
@@ -71,40 +72,94 @@ def _unit_normal(value):
     return [v / magnitude for v in scaled]
 
 
-def _definition_points(definition):
+def _definition_points(name, definitions, cache, ancestors):
     from dxf_intake import _ocs_to_wcs
 
-    if not isinstance(definition, dict) or definition.get("complete") is not True:
+    definition = definitions.get(name)
+    if (not isinstance(definition, dict) or definition.get("nested_inserts_incomplete")
+            or not (definition.get("complete") is True or definition.get("region_curve_controls")
+                    or definition.get("nested_inserts"))):
         raise ValueError("Region containment requires a complete block definition. Re-import the drawing.")
     children = definition.get("children")
     if (not isinstance(children, list) or not children
             or definition.get("count", len(children)) != len(children)):
         raise ValueError("Region containment requires all block children. Re-import the drawing.")
-    base = _point3(definition.get("base"))
+    nested_inserts = definition.get("nested_inserts", [])
+    curve_controls = definition.get("region_curve_controls", {})
+    if not isinstance(nested_inserts, list) or not isinstance(curve_controls, dict):
+        raise ValueError("Region containment requires valid block evidence. Re-import the drawing.")
+    advanced_geometry = bool(nested_inserts or curve_controls)
+    base = _point3(definition.get("measurement_base", definition.get("base"))
+                   if advanced_geometry or len(ancestors) > 1 else definition.get("base"))
+    refs = iter(nested_inserts)
     points = []
-    for child in children:
-        if not isinstance(child, dict) or child.get("kind") not in ("POINT", "LINE", "LWPOLYLINE"):
-            raise ValueError("Region containment requires complete straight-edge block geometry.")
-        raw = [child.get("pt")] if child["kind"] == "POINT" else child.get("pts")
-        if not isinstance(raw, list) or len(raw) < (1 if child["kind"] == "POINT" else 2):
+    for index, child in enumerate(children):
+        if not isinstance(child, dict):
             raise ValueError("Region containment requires complete finite instance geometry.")
-        child_points = [_point3(point) for point in raw]
-        if child["kind"] == "LWPOLYLINE":
+        kind = child.get("kind")
+        if kind == "OTHER" and child.get("type") == "INSERT":
+            insert = next(refs, None)
+            if (not isinstance(insert, dict)
+                    or any(type(insert.get(key, 1)) is not int or insert.get(key, 1) != 1
+                           for key in ("rows", "columns"))):
+                raise ValueError("Region containment requires individual nested INSERT references.")
+            child_points = _insert_points(insert, definitions, cache, ancestors)
+        elif kind == "OTHER" and child.get("type") in ("HELIX", "SPLINE"):
+            # An affine image of a positive-weight spline lies inside the
+            # convex hull of the transformed control points.
+            raw = curve_controls.get(str(index))
+            if not isinstance(raw, list) or not 2 <= len(raw) <= 10000:
+                raise ValueError("Region containment requires a complete curve control net. Re-import the drawing.")
+            child_points = [_point3(point) for point in raw]
+        elif kind in ("POINT", "LINE", "LWPOLYLINE"):
+            raw = [child.get("pt")] if kind == "POINT" else child.get("pts")
+            if not isinstance(raw, list) or len(raw) < (1 if kind == "POINT" else 2):
+                raise ValueError("Region containment requires complete finite instance geometry.")
+            child_points = [_point3(point) for point in raw]
+        else:
+            raise ValueError("Region containment requires complete straight-edge block geometry.")
+        if kind == "LWPOLYLINE":
             normal = _unit_normal(child.get("nrm", [0, 0, 1]))
             elevation = _point3([child.get("elev", 0), 0, 0])[0]
             if child.get("thickness", 0) != 0 or any(child.get("bulges", [])):
                 raise ValueError("Region containment requires complete straight-edge block geometry.")
             child_points = [_ocs_to_wcs([p[0], p[1], elevation], normal) for p in child_points]
+        if (advanced_geometry or len(ancestors) > 1) and len(points) + len(child_points) > 10000:
+            raise ValueError("Region containment exceeded the block geometry limit.")
         points.extend(tuple(p[i] - base[i] for i in range(3)) for p in child_points)
-    return points
+    exhausted = object()
+    if next(refs, exhausted) is not exhausted:
+        raise ValueError("Region containment requires consistent nested INSERT evidence. Re-import the drawing.")
+    return points, advanced_geometry
 
 
-def _insert_points(entity, definitions, cache):
+def _insert_points(entity, definitions, cache, ancestors=(), source_placements=None):
     from dxf_intake import _ocs_to_wcs
 
     name = entity.get("name")
-    if name not in cache:
-        cache[name] = _definition_points(definitions.get(name))
+    if not isinstance(name, str):
+        raise ValueError("Region containment requires a named block reference.")
+    if name not in definitions and ancestors:
+        name = next((key for key in definitions
+                     if isinstance(key, str) and key.casefold() == name.casefold()), name)
+    if name in ancestors or len(ancestors) >= 32:
+        raise ValueError("Region containment found an invalid or too deeply nested block reference.")
+    cache_key = (name, bool(ancestors))
+    if cache_key not in cache:
+        cache[cache_key] = _definition_points(name, definitions, cache, (*ancestors, name))
+    definition_points, advanced_geometry = cache[cache_key]
+    if advanced_geometry or ancestors:
+        if entity.get("measurement_placement_invalid"):
+            raise ValueError("Region containment requires a valid instance transform. Re-import the drawing.")
+        placement = entity.get("measurement_placement")
+        if source_placements is not None:
+            matches = source_placements.get(entity.get("handle"), [])
+            if len(matches) > 1:
+                raise ValueError("Region containment requires an unambiguous instance transform.")
+            if matches:
+                placement = matches[0]
+        if isinstance(placement, dict):
+            entity = dict(entity, **placement)
     origin = _point3([entity.get("x"), entity.get("y"), entity.get("z", 0)])
     scale = _point3(entity.get("scale", [1, 1, 1]))
     normal = _unit_normal(entity.get("nrm", [0, 0, 1]))
@@ -113,7 +168,7 @@ def _insert_points(entity, definitions, cache):
         raise ValueError("Region containment requires a finite instance transform.")
     cosine, sine = math.cos(rotation), math.sin(rotation)
     points = []
-    for point in cache[name]:
+    for point in definition_points:
         x, y, z = (point[i] * scale[i] for i in range(3))
         rotated = [x * cosine - y * sine, x * sine + y * cosine, z]
         world = _ocs_to_wcs(rotated, normal)
@@ -121,11 +176,11 @@ def _insert_points(entity, definitions, cache):
     return points
 
 
-def _within_region(entity, key, bounds, dimensions, definitions, cache):
+def _within_region(entity, key, bounds, dimensions, definitions, cache, source_placements):
     if key == "inserts":
         if dimensions != (1, 1):
             raise ValueError("Design windows require individual INSERT references. Count an INSERT array as a whole set.")
-        points = _insert_points(entity, definitions, cache)
+        points = _insert_points(entity, definitions, cache, source_placements=source_placements)
     else:
         points = [_point3(point) for point in entity["pts"]]
     left, bottom = min(p[0] for p in points), min(p[1] for p in points)
@@ -246,13 +301,21 @@ def _cumulative_shares(counts):
                      "percentage": 100 * running / total})
     return rows
 
-def _coverage(counts, percent):
+def _coverage(counts, percent, excluded_layers=None):
     from fractions import Fraction
     from itertools import combinations
 
     target = Fraction(str(percent))
     if target < 0:
         raise InputValidationError("Choose a nonnegative coverage percentage.")
+    if excluded_layers is not None:
+        excluded = {name.casefold() for name in excluded_layers}
+        selected = {name.casefold() for name in counts}
+        if excluded - selected:
+            raise InputValidationError("An excluded layer is absent from the coverage selection. Check the layer names.")
+        counts = {name: count for name, count in counts.items() if name.casefold() not in excluded}
+        if not counts and target > 0:
+            return {"reachable": False, "solutions": []}
     required = target * _module_total(counts.values()) / 100
     weights = sorted(counts.values(), reverse=True)
     size = 0
@@ -291,6 +354,7 @@ def _compare_selections(intake, spec):
                  if first and second else None)
         changes[layer] = None if value is None else {"numerator": value.numerator,
                                                      "denominator": value.denominator}
+    result["schema_version"] = 1
     result["share_change"] = {"totals": [first, second], "percentage_points": changes,
                               "defined": bool(first and second)}
     result["selection_required"] = False
@@ -298,6 +362,11 @@ def _compare_selections(intake, spec):
 
 def run(intake, params):
     params = params or {}
+    excluded_tiers = params.get("exclude_highest_count_tiers")
+    if excluded_tiers is not None and (
+        type(excluded_tiers) is not int or excluded_tiers < 1 or params.get("rank_windows") is None
+    ):
+        raise InputValidationError("Choose a positive number of count tiers to exclude from each rank window.")
     if params.get("compare_selections") is not None:
         if any(v is not None for k, v in params.items() if k != "compare_selections"):
             raise InputValidationError("Use the two comparison selections on their own.")
@@ -305,20 +374,27 @@ def run(intake, params):
     if params.get("rank_windows") is None:
         return _run(intake, params)
     windows = params["rank_windows"]
-    if not isinstance(windows, list) or len(windows) != 2 or _selection_region(params) is not None:
-        raise InputValidationError("Choose two windows to compare.")
+    if not isinstance(windows, list) or not 2 <= len(windows) <= 8 or _selection_region(params) is not None:
+        raise InputValidationError("Choose two windows or an ordered series of up to eight windows.")
     for bounds in windows:
         if _selection_region({"region": bounds}) is None:
-            raise InputValidationError("Choose two complete windows.")
+            raise InputValidationError("Choose complete windows for the comparison.")
     base, overlay = _run(intake, dict(params, group_by="layer"))
+    base["schema_version"] = 1
     if not base["selected_sets"]:
         return base, overlay
     ids = [s["set_id"] for s in base["selected_sets"]]
     ranks = []
     for bounds in windows:
-        scoped, _ = _run(intake, {"region": bounds, "set_ids": ids, "group_by": "layer"},
-                         allow_absent_in_window=True)
+        scoped, _ = _run(
+            intake, {"region": bounds, "set_ids": ids, "group_by": "layer",
+                     "visible_layers_only": params.get("visible_layers_only", False)},
+            allow_absent_in_window=True,
+        )
         counts = scoped.get("counts", {})
+        if excluded_tiers is not None:
+            excluded_counts = set(sorted(set(counts.values()), reverse=True)[:excluded_tiers])
+            counts = {layer: count for layer, count in counts.items() if count not in excluded_counts}
         rank_by_layer = {}
         previous = None
         for index, (layer, count) in enumerate(sorted(counts.items(), key=lambda item: -item[1]), 1):
@@ -327,18 +403,57 @@ def run(intake, params):
                 previous = count
             rank_by_layer[layer] = place
         ranks.append(rank_by_layer)
-    base["window_ranks"] = {layer: [rank.get(layer) for rank in ranks]
-                            for layer in sorted(ranks[0].keys() | ranks[1].keys())}
+    layers = sorted({layer for window_rank in ranks for layer in window_rank})
+    window_ranks = {layer: [rank.get(layer) for rank in ranks] for layer in layers}
+    base["window_ranks"] = window_ranks
+    if len(windows) > 2:
+        base["consistently_rising_layers"] = [
+            layer for layer, places in window_ranks.items()
+            if None not in places and all(previous > current for previous, current in zip(places, places[1:]))
+        ]
     return base, overlay
 
 
 def _run(intake, params, *, allow_absent_in_window=False):
+    excluded_layers = params.get("coverage_excluded_layers")
+    if excluded_layers is not None and (
+        params.get("coverage_percent") is None
+        or params.get("group_by") != "layer"
+        or not isinstance(excluded_layers, list)
+        or not excluded_layers
+        or any(not isinstance(name, str) or not name.strip() for name in excluded_layers)
+    ):
+        raise InputValidationError("Supply named excluded layers with a coverage percentage and a layer breakdown.")
     top = params.get("top_layers")
     if "top_layers" in params and (type(top) is not int or top < 1):
         raise InputValidationError("Choose a positive integer for the number of top layers.")
+    share_threshold = params.get("layer_share_above")
+    if "layer_share_above" in params and (
+        type(share_threshold) not in (float, int)
+        or not 0 <= share_threshold <= 100
+        or params.get("group_by") != "layer"
+    ):
+        raise InputValidationError("Choose a layer share threshold from 0 to 100 and group by layer.")
+    count_threshold = params.get("layer_count_at_least")
+    if "layer_count_at_least" in params and (
+        type(count_threshold) is not int
+        or count_threshold < 0
+        or params.get("group_by") != "layer"
+    ):
+        raise InputValidationError("Choose a nonnegative integer layer count threshold and group by layer.")
+    highlight_ranked = params.get("highlight_ranked_layers", False)
+    if type(highlight_ranked) is not bool or (highlight_ranked and top is None):
+        raise InputValidationError("Ranked-layer highlights require a top layer ranking.")
     window = _selection_region(params)
     if not isinstance(intake, dict):
         raise InputValidationError("Saved intake must be an object; re-import the drawing.")
+    visible_only = params.get("visible_layers_only", False)
+    if type(visible_only) is not bool:
+        raise InputValidationError("Choose whether to count visible layers only.")
+    hidden_names = intake.get("hidden_layers", []) if visible_only else []
+    if not isinstance(hidden_names, list) or any(not isinstance(name, str) for name in hidden_names):
+        raise InputValidationError("Saved drawing layer visibility is incompatible; re-import the drawing.")
+    hidden_layers = {name.casefold() for name in hidden_names}
     for key in ("inserts", "polylines"):
         if key in intake and not isinstance(intake[key], list):
             raise InputValidationError(f"Saved intake {key} must be an array; re-import the drawing.")
@@ -363,7 +478,7 @@ def _run(intake, params, *, allow_absent_in_window=False):
         raise InputValidationError("Choose named panel layers or explicit module sets.")
     auto_shares = shares and "panel_scope" in params and not selected_ids
     if auto_shares:
-        listing, _ = run(intake, {})
+        listing, _ = run(intake, {"visible_layers_only": visible_only})
         candidates = listing["sets"]
         if names is not None:
             available = {group["layer"] for group in candidates}
@@ -387,6 +502,7 @@ def _run(intake, params, *, allow_absent_in_window=False):
     if window is not None and not selected_ids:
         raise ValueError("Select module sets before applying a design window region.")
     definitions = intake.get("blocks", {})
+    source_placements = intake.get("beam_insert_placements", {})
     if window is not None and not isinstance(definitions, dict):
         raise ValueError("Region containment requires a block-definition map. Re-import the drawing.")
     geometry_cache = {}
@@ -397,6 +513,8 @@ def _run(intake, params, *, allow_absent_in_window=False):
             if not _model(entity) or (key == "polylines" and not _four_corners(entity)):
                 continue
             layer = entity.get("layer") or "0"
+            if hidden_layers and layer.casefold() in hidden_layers:
+                continue
             block = (entity.get("name") or "") if key == "inserts" else ""
             identity = (entity_type, layer, block)
             handle = str(entity.get("handle") or "").strip().upper().removeprefix("0X")
@@ -408,7 +526,8 @@ def _run(intake, params, *, allow_absent_in_window=False):
                 raise InputValidationError("INSERT has invalid array multiplicity; rows and columns must be positive UInt16 integers.")
             selected = json.dumps(identity, ensure_ascii=True, separators=(",", ":")) in selected_ids
             if (window is not None and selected
-                    and not _within_region(entity, key, window, dimensions, definitions, geometry_cache)):
+                    and not _within_region(entity, key, window, dimensions, definitions, geometry_cache,
+                                           source_placements)):
                 continue
             group = groups.setdefault(identity, {"entity_type": entity_type,
                 "layer": layer, "block": block, "count": 0, "handles": [], "_keys": set()})
@@ -433,6 +552,7 @@ def _run(intake, params, *, allow_absent_in_window=False):
             raise ValueError("A selected module set has no candidates in this design window. Check the window and list the sets again.")
         raise ValueError("Selected module set is absent from this drawing; list the sets again.")
     selected = selected_sets[0] if len(selected_sets) == 1 else None
+    visible_selection_empty = visible_only and not sets and not selected_ids
     breakdown = {}
     if selected_sets and (params.get("group_by") == "layer" or top is not None):
         counts = _selected_layer_counts(selected_sets, multiplicities)
@@ -440,29 +560,50 @@ def _run(intake, params, *, allow_absent_in_window=False):
         if cumulative:
             breakdown["cumulative_shares"] = _cumulative_shares(counts)
         if params.get("coverage_percent") is not None:
-            breakdown["coverage"] = _coverage(counts, params["coverage_percent"])
+            breakdown["coverage"] = _coverage(counts, params["coverage_percent"], excluded_layers)
         if top is not None:
             breakdown["ranking"] = _rank_layers(counts, top)
 
-        if shares:
+        if shares or share_threshold is not None:
             total = _module_total(counts.values())
-            breakdown["shares"] = [
+            layer_shares = [
                 {"layer": layer, "numerator": count, "denominator": total,
                  "percentage": 100 * count / total}
                 for layer, count in counts.items()
             ]
+            if shares:
+                breakdown["shares"] = layer_shares
+            if share_threshold is not None:
+                threshold = Fraction(str(share_threshold)) * total
+                breakdown["layers_above_share"] = [
+                    row for row in layer_shares if 100 * row["numerator"] > threshold
+                ]
 
     def public_set(group):
         return {k: v for k, v in group.items() if k not in ("handles", "_keys")}
 
+    highlighted_sets = selected_sets
+    if highlight_ranked and selected_sets:
+        ranked_layers = {row["layer"] for row in breakdown["ranking"]}
+        highlighted_sets = [group for group in selected_sets if group["layer"] in ranked_layers]
+    if share_threshold is not None and selected_sets:
+        qualifying_layers = {row["layer"] for row in breakdown["layers_above_share"]}
+        highlighted_sets = [group for group in highlighted_sets if group["layer"] in qualifying_layers]
+    if count_threshold is not None and selected_sets:
+        highlighted_sets = [
+            group for group in highlighted_sets
+            if breakdown["counts"][group["layer"]] >= count_threshold
+        ]
+
     return ({"sets": [public_set(s) for s in sets],
              **({"region": list(window)} if window is not None else {}),
              "original_bytes_integrity": "unverified",
-             "selection_required": not selected_sets,
+             "selection_required": not selected_sets and not visible_selection_empty,
              **breakdown,
              "selected_sets": [public_set(s) for s in selected_sets],
              "selected_set": public_set(selected) if selected else None,
              "count": _module_total(multiplicities[key][0] * multiplicities[key][1]
-                          for key in set().union(*(s["_keys"] for s in selected_sets))) if selected_sets else None},
-            {"highlight_handles": list(dict.fromkeys(h for s in selected_sets for h in s["handles"]))}
+                          for key in set().union(*(s["_keys"] for s in selected_sets)))
+                 if selected_sets or visible_selection_empty else None},
+            {"highlight_handles": list(dict.fromkeys(h for s in highlighted_sets for h in s["handles"]))}
             if selected_sets else None)

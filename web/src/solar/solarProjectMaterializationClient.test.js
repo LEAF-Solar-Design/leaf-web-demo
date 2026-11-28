@@ -25,8 +25,10 @@ const client = fetchImpl => createSolarProjectMaterializationClient({ fetchImpl,
   headers: () => ({ 'Authorization': 'test-only', 'X-Checkout-Capability': 'test-checkout' }) })
 
 describe('canonical project Solar publication client', () => {
-  it.each(['current-native', 'historical-list-reuse'])('captures and sends explicit producer %s without rewriting intake', async semantics => {
-    const original = JSON.stringify({ units: 'm', boundary: [[0, 0], [10, 0], [0, 20]],
+  it.each([
+    ['m', 'current-native'], ['m', 'historical-list-reuse'], ['ft', 'current-native'], ['in', 'current-native'],
+  ])('captures and sends %s with producer %s without rewriting intake', async (units, semantics) => {
+    const original = JSON.stringify({ units, boundary: [[0, 0], [10, 0], [0, 20]],
       active_preset: { Name: 'Synthetic', PileTemplateName: 'Synthetic piles' },
       pile_template: { Name: 'Synthetic piles' } }, null, 2).replaceAll('\n', '\r\n')
     const parameters = originalSolarParameters(original, 150, semantics)

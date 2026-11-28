@@ -31,6 +31,8 @@ describe("B01 candidate identity adapter (fake producer, no runtime proof)", () 
       jobId: request.jobId, sourceCommit: request.sourceCommit, sourceTree: request.sourceTree,
     });
     expect(f.loadCandidate).toHaveBeenCalledTimes(2);
+    expect(f.loadCandidate).toHaveBeenNthCalledWith(1, authority, request.sourceRequestId, request, "write");
+    expect(f.loadCandidate).toHaveBeenNthCalledWith(2, authority, request.sourceRequestId, request, "write");
     expect(result).toEqual({ schema: "leaf.browser-candidate-preview.v1", candidate: witness, preview: f.preview });
     expect(Object.isFrozen(result.candidate)).toBe(true);
     expect(Object.isFrozen(result.preview.manifest.files[0])).toBe(true);

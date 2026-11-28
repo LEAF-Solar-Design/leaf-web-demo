@@ -265,3 +265,38 @@ def test_coming_soon_action_save_reload_and_export(client, page_project):
     with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
         name = next(name for name in archive.namelist() if name == 'page.json' or name.endswith('/page.json'))
         assert json.loads(archive.read(name)) == document
+
+
+@pytest.mark.parametrize('count,use_booking_links', [(4, False), (7, True), (12, False)])
+def test_coming_soon_contact_directory_revisions_and_export(client, page_project, count, use_booking_links):
+    org, project, actor = page_project
+    url, auth = f'/api/projects/{project}/page', headers(org, actor)
+    actions = [
+        {'label': f'Region {index}',
+         'href': f'https://example.com/book/{index}' if use_booking_links and index % 2 == 0
+         else f'mailto:region{index}@example.com'}
+        for index in range(1, count + 1)
+    ]
+    original = {**DOCUMENT, 'actions': actions}
+    revised = {**DOCUMENT, 'actions': actions[:2] + actions[3:]}
+    for revision, document in enumerate((original, revised), 1):
+        saved = client.put(url, json={'expected_revision': revision - 1, 'document': document}, headers=auth)
+        assert saved.status_code == 200, saved.text
+        assert saved.json()['page']['revision'] == revision
+        assert saved.json()['page']['document'] == document
+
+    over_limit = {**DOCUMENT, 'actions': actions + [
+        {'label': f'Extra contact {index}', 'href': f'mailto:extra{index}@example.com'}
+        for index in range(13 - count)
+    ]}
+    rejected = client.put(url, json={'expected_revision': 2, 'document': over_limit}, headers=auth)
+    assert rejected.status_code == 422, rejected.text
+    reloaded = client.get(url, headers=auth)
+    assert reloaded.status_code == 200, reloaded.text
+    assert reloaded.json()['page'] == saved.json()['page']
+    for revision, document in enumerate((original, revised), 1):
+        exported = client.get(url + f'/source?revision={revision}', headers=auth)
+        assert exported.status_code == 200, exported.text
+        with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
+            assert json.loads(archive.read('page.json')) == document
+    assert client.get(url + '/source?revision=3', headers=auth).status_code == 404

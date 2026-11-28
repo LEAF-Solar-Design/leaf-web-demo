@@ -32,6 +32,7 @@ import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
 import { createSolarProjectClient } from './solar/solarProjectClient.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
 import { notifyActiveScopeChanged, readActiveScope } from './auth/activeScope.js'
+import { setAccountWorkspace } from './auth/accountIdentity.js'
 import { serviceState, serviceHeaders, serviceRequestAuthority, authorityStorage, rememberServiceResponse, invalidateServiceResponse } from './lib/serviceAuthSession.js'
 
 // A deployed static bundle talks to the app through the same public origin.
@@ -489,10 +490,32 @@ export function isWorkspaceBootstrapRequired(error) {
 // --- Session / intake ---------------------------------------------------
 export async function getSessionIdentity(mock) {
   conversationMock = mock === true
-  if (mock) return { tenant: null, tier: null, org: null }
+  if (mock) return { tenant: null, tier: null, org: null, workspace: null }
   // Identity proof must be fresh, independently of any selected drawing.
   const data = await http('/api/session/identity', { cache: 'no-store' }, STARTUP_FETCH_TIMEOUT_MS)
-  return { tenant: data.tenant_id || null, tier: data.tier || null, org: data.org_id || null }
+  setAccountWorkspace(data.workspace ?? null)
+  return { tenant: data.tenant_id || null, tier: data.tier || null, org: data.org_id || null,
+    workspace: data.workspace && typeof data.workspace === 'object' ? data.workspace : null }
+}
+
+export async function getTenantToolStatus() {
+  try {
+    if (isMockConversation()) return null
+    const headers = authHeaders()
+    const serviceAuthority = serviceRequestAuthority()
+    const res = noteUnauthorized(
+      await fetchWithBudget(fetch, `${API_BASE}/api/tool-envelopes/tenant/status`, { cache: 'no-store', headers }, STARTUP_FETCH_TIMEOUT_MS),
+      '/api/tool-envelopes/tenant/status', headers.Authorization, { serviceAuthority },
+    )
+    if (!res.ok) return null
+    const data = await res.json()
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null
+    return {
+      workspaceId: typeof data.workspace_id === 'string' ? data.workspace_id : null,
+      workspaceName: typeof data.workspace_name === 'string' ? data.workspace_name : null,
+      lastPluginCheckAt: typeof data.last_plugin_check_at === 'string' ? data.last_plugin_check_at : null,
+    }
+  } catch { return null }
 }
 
 // Returns {intake, tenant}. `tenant` is the resolved tenant id echoed by
@@ -890,13 +913,19 @@ export async function listProjects(orgId) {
   return data.projects || []
 }
 
-// POST /api/projects {name} -> {project}. X-Org-Id scoped.
-export async function createProject(name, orgId) {
+// POST /api/projects {name} -> {project, created}. X-Org-Id scoped.
+// Retries remain idempotent unless the caller explicitly requires a new project.
+export async function createProject(name, orgId, { requireCreated = false } = {}) {
   const data = await http('/api/projects', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...orgHeaders(orgId) },
     body: JSON.stringify({ name }),
   })
+  if (requireCreated && data.created === false) {
+    throw Object.assign(new Error('A project with this name already exists. Choose a different name, or open the existing project from the project list.'), {
+      code: 'project_name_collision',
+    })
+  }
   return data.project
 }
 
@@ -1114,11 +1143,24 @@ export async function getEntitlements() {
   }
 }
 
+export async function fetchInlineAuthoringFlags() {
+  const disabled = { plan_mode: false, inline_review: false, self_approval: false }
+  try {
+    const flags = await http('/api/author/inline-authoring', { headers: { 'X-Tenant-Id': TENANT } })
+    if (!Object.keys(disabled).every(key => typeof flags?.[key] === 'boolean')) return disabled
+    const { plan_mode, inline_review, self_approval } = flags
+    return { plan_mode, inline_review, self_approval }
+  } catch {
+    return disabled
+  }
+}
+
 // --- Claude account grant (CONCERN 2 — the user's Claude login) ----------
 // This is the SIBLING of the platform JWT (Concern 1), and NEVER the same thing
 // (AUTH.md §0). It answers "whose Anthropic credit runs the authoring agent?" —
-// a per-user Claude OAuth token minted by `claude setup-token`, stored per tenant
-// server-side. The token is WRITE-ONLY from the UI: we POST it once and never
+// an Anthropic API key billed at API rates, stored per tenant server-side.
+// Existing oauth links from `claude setup-token` remain supported.
+// The credential is WRITE-ONLY from the UI: we POST it once and never
 // read it back (GET never returns it), never log it, never echo it.
 //   GET    /api/tenant/claude-grant -> {linked: bool, linked_at: str|null}
 //   POST   /api/tenant/claude-grant {token} -> {linked: true, linked_at}
@@ -1131,9 +1173,9 @@ export async function getClaudeGrant() {
 
 // POST the token ONCE. Callers must clear their field immediately after; this
 // layer keeps no reference to it beyond the request body and logs nothing.
-// `kind` ("oauth" = a Claude subscription token from `claude setup-token`;
-// "api_key" = an Anthropic org API key billed at API rates) is sent explicitly
-// from the user's choice. It is OPTIONAL in the contract (the server auto-detects
+// `kind` ("api_key" = an Anthropic API key billed at API rates) is sent explicitly
+// for new links. Existing "oauth" links from `claude setup-token` remain supported.
+// It is OPTIONAL in the contract (the server auto-detects
 // from the token shape when omitted); we send it so the linked kind is honest
 // even if detection is ambiguous. The token itself is never stored/echoed/logged.
 export async function linkClaudeGrant(token, kind, label, plan) {
@@ -1549,7 +1591,15 @@ export async function uploadDrawing(file, guestSession = null, engine = null) {
   const res = await apiFetch(`${API_BASE}/api/drawings/upload`, { method: 'POST', headers, body: form }, '/api/drawings/upload')
   const body = await res.json().catch(() => null)
   if (!res.ok) {
-    const error = new Error(body?.error?.message || `POST /api/drawings/upload -> ${res.status}`)
+    let message = body?.error?.message || `POST /api/drawings/upload -> ${res.status}`
+    if (res.status === 429 && typeof body?.quota?.resets_at === 'string') {
+      const reset = new Date(body.quota.resets_at)
+      if (!Number.isNaN(reset.getTime())) {
+        const time = reset.toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
+        message += ` Resets at ${time}.`
+      }
+    }
+    const error = new Error(message)
     error.status = res.status
     error.body = body
     throw error
@@ -1558,20 +1608,20 @@ export async function uploadDrawing(file, guestSession = null, engine = null) {
   return body
 }
 
-export function safeEditedFileName(value) {
-  return typeof value === 'string' && value.length <= 124 && /\.dxf$/i.test(value)
-    && !/[\\/"'\p{Cc}]/u.test(value) ? value : 'edited.dxf'
-}
-
 // Card F-3 (persistence leg): save a browser-edited DXF as a NEW VERSION of
 // the drawing. `digest` is the sha256 the CLIENT computed over the exact
 // bytes it edited — the server recomputes and refuses a mismatch, so a
 // corrupted body can never become a version. `parentVersion` rides the
 // server's compare-and-set (409 when the head moved). The single-writer
 // checkout capability travels the same header undo/redo use.
-export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null, fileName = 'edited.dxf') {
+export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null, opts = {}) {
   const form = new FormData()
-  form.append('file', new Blob([bytes], { type: 'application/dxf' }), safeEditedFileName(fileName))
+  const basename = typeof opts.fileName === 'string' ? opts.fileName.split(/[\\/]/).pop().trim() : ''
+  const stem = basename.replace(/\.[^.]*$/, '').slice(0, 116).replace(/[. ]+$/, '')
+  const safe = stem && !/^[.]|[<>:"|?*\x00-\x1f\x7f]/.test(basename)
+    && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(stem)
+  form.append('file', new Blob([bytes], { type: 'application/dxf' }), safe ? stem + '.dxf' : 'edited.dxf')
+  if (opts.origin === 'autocad') form.append('origin', 'autocad')
   form.append('parent_version', String(parentVersion))
   form.append('source_digest', digest)
   const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
@@ -1650,7 +1700,7 @@ export async function saveDrawingVersionPlan(drawingId, bytes, parentVersion, di
     }
   }
   const form = new FormData()
-  form.append('file', new Blob([bytes], { type: 'application/dxf' }), safeEditedFileName(opts.fileName))
+  form.append('file', new Blob([bytes], { type: 'application/dxf' }), 'edited.dxf')
   form.append('parent_version', String(parentVersion))
   form.append('source_digest', digest)
   form.append('plan', JSON.stringify({ mutations: mutations || {} }))
@@ -2107,6 +2157,52 @@ export function authorRetryDelay(value) {
   return Number.isFinite(delay) ? Math.min(5000, Math.max(250, delay)) : 1000
 }
 
+export function getAuthorStage(changeSetId, signal) {
+  return http(`/api/author/stages/${encodeURIComponent(changeSetId)}`, {
+    headers: { 'X-Tenant-Id': TENANT }, signal, cache: 'no-store',
+  })
+}
+
+export async function withdrawAuthorStage(changeSetId, signal) {
+  const result = await http(`/api/author/stages/${encodeURIComponent(changeSetId)}/withdraw`, {
+    method: 'POST', headers: { 'X-Tenant-Id': TENANT }, signal,
+  })
+  if (result?.contract !== 'leaf.customization-stage-withdraw.v1'
+    || typeof result.withdrawn !== 'boolean' || typeof result.revoked !== 'boolean') {
+    throw new Error('Invalid build withdrawal response.')
+  }
+  return result
+}
+
+export async function getAuthorStageSource(changeSetId, commit, signal) {
+  const path = `/api/author/stages/${encodeURIComponent(changeSetId)}?view=source`
+  const response = await apiFetch(`${API_BASE}${path}`, {
+    headers: { 'X-Tenant-Id': TENANT, ...authHeaders() }, signal, cache: 'no-store', redirect: 'error',
+  }, path)
+  const file = response.headers.get('X-Leaf-Source-Path')
+  if (!response.ok || response.headers.get('X-Leaf-Source-Commit') !== commit
+    || !/(?:^|\/)(main\.csx|tool\.py)$/.test(file || '')) return null
+  return { path: file, text: await response.text() }
+}
+
+export function reviewContext(changeSetId, signal) {
+  return http(`/api/author/reviews/context?change_set_id=${encodeURIComponent(changeSetId)}`, {
+    headers: { 'X-Tenant-Id': TENANT }, signal, cache: 'no-store',
+  })
+}
+
+export async function postReview({ change_set_id, staged_commit, catalog_digest, decision, comment }) {
+  if (comment != null) {
+    const guard = guardedText(comment)
+    if (!guard.ok) throw new SecretRefusedError(guard.refusal)
+  }
+  return http('/api/author/reviews', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+    body: JSON.stringify({ change_set_id, staged_commit, catalog_digest, decision, comment }),
+  })
+}
+
 function authorStageResult(body) {
   if (body?.result?.receipt) return body.result
   if (body?.receipt && body?.result && typeof body.result === 'object') {
@@ -2379,6 +2475,77 @@ async function toolManagementPost(mock, path, payload) {
 }
 
 const managementString = (value) => typeof value === 'string' && value.trim().length > 0
+
+export function stagedSourceIdentity(staged) {
+  const receipt = staged?.receipt
+  const tool = staged?.tool
+  if (staged?.demo || staged?.legacy_demo || staged?.published || receipt?.state !== 'staged'
+    || !isSourceUuid(receipt?.change_set_id) || !sourceHash(receipt?.staged_commit, 40)
+    || !sourceHash(receipt?.catalog_digest, 64) || tool?.kind !== 'script'
+    || typeof tool?.name !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(tool.name)
+    || tool.entry !== `tools/${tool.name}/tool.py`) return null
+  return { changeSetId: receipt.change_set_id, commit: receipt.staged_commit,
+    path: tool.entry, filename: `${tool.name}.py` }
+}
+
+export async function downloadStagedSource(staged, { expectedScope, signal } = {}) {
+  const identity = stagedSourceIdentity(staged)
+  const unavailable = () => new Error('Staged source could not be verified. Refresh the saved request and try again.')
+  const check = () => {
+    if (!identity || !expectedScope || signal?.aborted || readActiveScope() !== expectedScope
+      || !authHeaders().Authorization || isMockConversation()) throw unavailable()
+  }
+  check()
+  const path = `/api/author/stages/${identity.changeSetId}?view=source`
+  const url = new URL(`${API_BASE}${path}`, window.location.origin)
+  if (url.origin !== window.location.origin || url.pathname !== path.split('?')[0]
+    || url.search !== '?view=source' || url.hash || url.username || url.password) throw unavailable()
+  const response = await apiFetch(url.href, { method: 'GET', headers: authHeaders(),
+    cache: 'no-store', redirect: 'error', signal }, path)
+  check()
+  if (response.status !== 200 || response.redirected) throw unavailable()
+  const headers = response.headers
+  const length = headers.get('Content-Length')
+  const sha256 = headers.get('X-Leaf-Source-Sha256')
+  const blob = headers.get('X-Leaf-Source-Blob')
+  if (!/^(0|[1-9][0-9]{0,5})$/.test(length || '') || Number(length) > 262144
+    || headers.get('Content-Type') !== 'application/octet-stream'
+    || ![null, 'identity'].includes(headers.get('Content-Encoding'))
+    || headers.get('X-Leaf-Source-Commit') !== identity.commit
+    || headers.get('X-Leaf-Source-Path') !== identity.path
+    || !sourceHash(sha256, 64) || !sourceHash(blob, 40)
+    || !globalThis.crypto?.subtle || !response.body?.getReader) throw unavailable()
+  const reader = response.body.getReader()
+  const bytes = new Uint8Array(Number(length))
+  const typedArrayBrand = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      check()
+      if (done) break
+      if (!ArrayBuffer.isView(value) || typedArrayBrand.call(value) !== 'Uint8Array'
+        || total + value.byteLength > bytes.length) throw unavailable()
+      bytes.set(value, total)
+      total += value.byteLength
+    }
+    if (total !== bytes.length) throw unavailable()
+  } finally {
+    await reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
+  const prefix = new TextEncoder().encode(`blob ${bytes.length}\0`)
+  const gitBytes = new Uint8Array(prefix.length + bytes.length)
+  gitBytes.set(prefix)
+  gitBytes.set(bytes, prefix.length)
+  const hex = (buffer) => Array.from(new Uint8Array(buffer), (n) => n.toString(16).padStart(2, '0')).join('')
+  const [actualSha, actualBlob] = await Promise.all([
+    crypto.subtle.digest('SHA-256', bytes), crypto.subtle.digest('SHA-1', gitBytes),
+  ])
+  check()
+  if (hex(actualSha) !== sha256 || hex(actualBlob) !== blob) throw unavailable()
+  return { bytes, filename: identity.filename }
+}
 
 export async function getToolRemovalAuthority(mock, toolName) {
   const body = await toolManagementPost(mock, '/api/author/removals/authority', { tool_name: toolName })

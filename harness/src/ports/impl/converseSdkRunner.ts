@@ -9,7 +9,7 @@ import {
 } from "../../vendor/mushy-author/ports/impl/converseSdkRunner.js";
 import type { ConverseSdkRunnerOptions } from "../../vendor/mushy-author/ports/impl/converseSdkRunner.js";
 import type { ConverseRunInput, ConverseRunnerEvent } from "../index.js";
-import { AuthorStageStatusInput, SPINE_TOOL_NAMES, ProjectPhotoAssignmentRequest, PHOTO_ASSIGNMENT_FAILURE, PHOTO_ASSIGNMENT_SUMMARY } from "../index.js";
+import { AuthorStageStatusInput, ViewControlInput, SPINE_TOOL_NAMES, ProjectPhotoAssignmentRequest, PHOTO_ASSIGNMENT_FAILURE, PHOTO_ASSIGNMENT_SUMMARY } from "../index.js";
 import { ProjectPhotoInspectionShape, photoRequest, projectPhotoResult, PHOTO_FAILURE, type PhotoContent } from "../../agent/projectPhotoInspection.js";
 import { DEVICE_TOOL_INPUTS, DEVICE_TOOL_OPERATIONS } from "../../agent/deviceTools.js";
 import type { DeviceToolName } from "../../agent/deviceTools.js";
@@ -71,6 +71,11 @@ export class ConverseSdkRunner {
                       return { behavior: "deny", message: "Author stage status unavailable." };
                     }
                   }
+                  if (name === "view_control" || name.endsWith("__view_control")) {
+                    if (name !== "mcp__spine__view_control" || !ViewControlInput.safeParse(args).success) {
+                      return { behavior: "deny", message: "View control unavailable." };
+                    }
+                  }
                   return prior(name, args);
                 },
               } });
@@ -119,6 +124,24 @@ export class ConverseSdkRunner {
                   if (!parsed.success) return failure;
                   try {
                     const result = await input.tools.execute("author_stage_status", parsed.data);
+                    return { content: [{ type: "text", text: result.content }],
+                      ...(result.isError !== undefined ? { isError: result.isError } : {}) };
+                  } catch { return failure; }
+                },
+              ));
+              if (tools.some(tool => tool?.name === "view_control")) {
+                throw new Error("Duplicate view control tool");
+              }
+              if (input.tools.list().includes("view_control")) tools.push(target.tool(
+                "view_control",
+                "Move the user's drawing view in the CAD workspace: fit the whole drawing, zoom in or out, or zoom to a named layer (the app computes the layer's extent). Use it when the user asks to open, show, find or zoom to something. It changes only the view, never the drawing. The app applies it; if the result says the view did not change, tell the user why.",
+                ViewControlInput.shape,
+                async args => {
+                  const parsed = ViewControlInput.safeParse(args);
+                  const failure: TextResult = { content: [{ type: "text", text: "View control unavailable." }], isError: true };
+                  if (!parsed.success) return failure;
+                  try {
+                    const result = await input.tools.execute("view_control", parsed.data);
                     return { content: [{ type: "text", text: result.content }],
                       ...(result.isError !== undefined ? { isError: result.isError } : {}) };
                   } catch { return failure; }

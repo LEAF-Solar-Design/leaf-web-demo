@@ -1,7 +1,8 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { composerDraftAccountScope } from '../lib/composerDraft.js'
-import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, validateNativePreview, proposeProjectPage, portfolioTextChanges, validateProjectPageProposal, PHOTO_PROPOSAL_SCHEMA, validateProjectPhotoAssignmentProposal } from './projectPageClient.js'
+import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, validateNativePreview, proposeProjectPage, pageProposalChanges, validateProjectPageProposal, PHOTO_PROPOSAL_SCHEMA, validateProjectPhotoAssignmentProposal } from './projectPageClient.js'
+import { MAX_PAGE_ACTIONS, pageActions } from './projectPageClient.js'
 import { isValidPageAction } from './projectPageClient.js'
 import { getStoredOrgId } from '../api.js'
 import { getStoredActorBindingId } from '../projects/api.js'
@@ -32,11 +33,11 @@ export function PagePreview({ document, onSelectField, projectId, onInlineChange
       <h1 className="project-page__headline" data-element={`${selectionIdentity(document)}:textStyles.headline`} style={design('headline')}>{text('headline')}</h1>
       {(document.description || onInlineChange) && <p className="project-page__description" data-element={`${selectionIdentity(document)}:textStyles.description`} style={design('description')}>{text('description')}</p>}
       {(document.status || onInlineChange) && <p className="project-page__status" data-element={`${selectionIdentity(document)}:textStyles.status`} style={design('status')}>{text('status')}</p>}
-      {typeof document.action?.label === 'string' && document.action.label && <p className="project-page__action">
-        {isValidPageAction(document.action)
-          ? <a href={document.action.href} target={document.action.href.startsWith('https:') ? '_blank' : undefined} rel={document.action.href.startsWith('https:') ? 'noopener noreferrer' : undefined}>{document.action.label}</a>
-          : document.action.label}
-      </p>}
+      {pageActions(document).map((action, index) => typeof action?.label === 'string' && action.label && <p key={index} className="project-page__action">
+        {isValidPageAction(action)
+          ? <a href={action.href} target={action.href.startsWith('https:') ? '_blank' : undefined} rel={action.href.startsWith('https:') ? 'noopener noreferrer' : undefined}>{action.label}</a>
+          : action.label}
+      </p>)}
     </div>
   </main>
 }
@@ -69,6 +70,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
   const editor = useRef(null)
   const nativeSession = useRef(null)
   const nativePreparation = useRef(false)
+  const priorJobInput = useRef(null)
   const live = useRef(false)
   const operation = useRef(null)
   const preview = useRef(onPreview)
@@ -271,12 +273,21 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     document[field] = value
     changePortfolio(document, { coalesceKey: field })
   }
-  const changeAction = (field, value) => {
+  const changeActions = (update, coalesceKey) => {
     const document = cloneDocument(sourceSnapshot.current.draft)
-    const action = { label: '', href: '', ...document.action, [field]: value }
-    if (action.label || action.href) document.action = action
-    else delete document.action
-    changePortfolio(document, { coalesceKey: `action.${field}` })
+    const actions = update(pageActions(document))
+    delete document.action
+    delete document.actions
+    if (actions.length > 1) document.actions = actions
+    else if (actions[0]?.label || actions[0]?.href) document.action = actions[0]
+    changePortfolio(document, { coalesceKey })
+  }
+  const changeAction = (index, field, value) => {
+    changeActions(actions => {
+      const next = [...actions]
+      next[index] = { label: '', href: '', ...actions[index], [field]: value }
+      return next
+    }, `actions.${index}.${field}`)
   }
   const travel = direction => {
     if (!live.current || !enabled || operation.current) return
@@ -315,8 +326,9 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         void open()
         return
       }
-      if (proposalBlocked || !draft || draft.schema !== 'leaf.portfolio.v1' || proposal) { finish(false); return }
+      if (proposalBlocked || !draft || proposal) { finish(false); return }
       if (incomingProposal.result?.schema === PHOTO_PROPOSAL_SCHEMA) {
+        if (draft.schema !== 'leaf.portfolio.v1') { finish(false); return }
         const snapshot = sourceSnapshot.current
         const provenance = incomingProposal.provenance
         const scope = readActiveScope()
@@ -340,21 +352,20 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
       }
       const value = validateProjectPageProposal(projectId, saved, incomingProposal.result)
       const document = JSON.parse(JSON.stringify(value.proposed_document))
-      const changes = portfolioTextChanges(saved.document, document)
+      const changes = pageProposalChanges(saved.document, document)
       if (!changes.length) setNotice('No text changes proposed.')
       else setProposal({ snapshot: { ...sourceSnapshot.current, isCurrent: incomingProposal.isCurrent }, document, changes })
       finish(true)
     } catch { finish(false) }
   }, [incomingProposal, saved, draft, busy, enabled, dirty, validation, error, native]) // existing fenced operations own loading
   const generateProposal = () => {
-    if (!live.current || proposalBlocked || operation.current || !instruction.trim() || Array.from(instruction).length > 4000
-      || draft?.schema !== 'leaf.portfolio.v1') return
+    if (!live.current || proposalBlocked || operation.current || !instruction.trim() || Array.from(instruction).length > 4000) return
     const snapshot = sourceSnapshot.current
     void perform('proposing', async (signal, current) => {
       setProposal(null)
       const result = await proposeProjectPage(projectId, snapshot.saved, instruction, { signal })
       if (!current() || sourceSnapshot.current.saved !== snapshot.saved || sourceSnapshot.current.draft !== snapshot.draft) return
-      const changes = portfolioTextChanges(snapshot.saved.document, result.proposed_document)
+      const changes = pageProposalChanges(snapshot.saved.document, result.proposed_document)
       if (!changes.length) { setNotice('No text changes proposed.'); return }
       setProposal({ snapshot, document: result.proposed_document, changes })
     })
@@ -369,7 +380,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     if (!live.current || !proposal || proposalBlocked || operation.current || (nativeSession.current?.active || nativePreparation.current) || sourceSnapshot.current.saved !== proposal.snapshot.saved
       || sourceSnapshot.current.draft !== proposal.snapshot.draft || (proposal.snapshot.isCurrent && !proposal.snapshot.isCurrent())) { setProposal(null); return }
     const document = proposal.document
-    if (!proposal.photo) portfolioTextChanges(saved.document, document)
+    if (!proposal.photo) pageProposalChanges(saved.document, document)
     changePortfolio(cloneDocument(document, sourceSnapshot.current.draft), { coalesceKey: null })
     setNotice('Review the draft, then Save page.')
   }
@@ -410,12 +421,20 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     publish({})
     const step = async first => {
       try {
+        if (first && submit && session.priorJobId) {
+          const previous = await loadProjectNativePreview(projectId, session.priorJobId, { signal: controller.signal, expectedScope: session.expectedScope })
+          if (!current()) return
+          validateNativePreview(previous, { job_id: session.priorJobId, revision: session.revision, document_sha256: session.digest })
+          if (previous.status !== 'failed') throw new Error('Not a failed preview')
+          session.archive = previous.archive_sha256
+          session.submissionAttempted = true
+        }
         const value = first && submit
-          ? await submitProjectNativePreview(projectId, session.revision, session.key, { signal: controller.signal })
+          ? await submitProjectNativePreview(projectId, session.revision, session.key, { signal: controller.signal, priorJobId: session.priorJobId, expectedScope: session.expectedScope })
           : await loadProjectNativePreview(projectId, session.job.job_id, { signal: controller.signal })
         if (!current()) return
         // prepare_source copies page.digest into source.document_sha256.
-        const job = validateNativePreview(value, session.job || { revision: session.revision, document_sha256: session.digest })
+        const job = validateNativePreview(value, session.job || { revision: session.revision, document_sha256: session.digest, archive_sha256: session.archive })
         session.job = job
         if (job.status !== 'complete' && session.url) {
           URL.revokeObjectURL(session.url)
@@ -436,6 +455,12 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         } else session.timer = setTimeout(() => { if (current()) void step(false) }, 2000)
       } catch {
         if (!current()) return
+        if (session.priorJobId && !session.submissionAttempted) {
+          stop()
+          nativeSession.current = null
+          setNative({ revision: session.revision, active: false, message: 'Could not verify a failed preview for this saved page. No build was submitted.' })
+          return
+        }
         if (session.url) { URL.revokeObjectURL(session.url); session.url = null }
         stop()
         publish({ message: session.job
@@ -445,17 +470,21 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     }
     await step(true)
   }
-  const buildNative = async () => {
+  const buildNative = async (priorJobId = undefined) => {
     if (!enabled || operation.current || busy || dirty || validation || !saved
       || draft?.schema !== 'leaf.portfolio.v1' || (nativeSession.current?.active || nativePreparation.current)) return
     let session = nativeSession.current
     if (session?.job && !['failed', 'cancelled'].includes(session.job.status)) return
+    if (priorJobId && session && !session.job && session.priorJobId !== priorJobId) {
+      setNative(previous => ({ ...previous, message: 'A different submission is unconfirmed. Check that submission first.' }))
+      return
+    }
     if (!session || session.job) {
       let key
       nativePreparation.current = true
       try {
         // Live authentication derives the actor server-side; the dev binding is optional.
-        key = await nativePreviewSubmissionKey(localStorage,
+        key = priorJobId ? 'recover-page:' + priorJobId : await nativePreviewSubmissionKey(localStorage,
           [accountScope, getStoredOrgId(), getStoredActorBindingId() || accountScope, projectId, saved.revision, saved.digest], session?.job ? session.key : null)
         if (!live.current || sourceSnapshot.current.saved !== saved || !sourceSnapshot.current.enabled) return
       } catch {
@@ -467,7 +496,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         nativePreparation.current = false
       }
       clearNative()
-      session = { revision: saved.revision, digest: saved.digest, key, job: null, url: null, active: false }
+      session = { revision: saved.revision, digest: saved.digest, key, priorJobId, expectedScope: priorJobId ? readActiveScope() : undefined, job: null, url: null, active: false }
       nativeSession.current = session
     }
     void observeNative(session, true)
@@ -479,6 +508,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
   const nativeStatus = native?.job?.status
   const nativeLabel = nativeStatus === 'complete' ? native.url ? 'Ready' : native.active ? 'Building' : 'Screenshot unavailable'
     : ({ queued: 'Queued', running: 'Building', failed: 'Failed', cancelled: 'Cancelled' })[nativeStatus]
+  const nativeExpired = native?.job?.failure_disposition?.reason === 'execution_budget_expired'
 
   return <section className="project-page-editor" aria-label="Page editor" ref={editor} onFocusCapture={event => {
     const row = actionRow.current
@@ -500,9 +530,11 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         <button type="button" onClick={save} disabled={!enabled || Boolean(busy) || !dirty || Boolean(validation) || error?.conflict}>Save page</button>
         <p role="status" aria-live="polite">{state}</p>
       </div>
-      {draft.schema === 'leaf.portfolio.v1' && <section className="project-page-editor__proposal" aria-label="Ask for a text change">
+      <section className="project-page-editor__proposal" aria-label="Ask for a text change">
         <h3>Ask for a text change</h3>
-        <p className="project-page-editor__note">Propose text-only edits to a saved portfolio. Photos, layout and structure stay the same. Review before using any changes.</p>
+        <p className="project-page-editor__note">{draft.schema === 'leaf.portfolio.v1'
+          ? 'Propose text-only edits to a saved portfolio. Photos, layout and structure stay the same. Review before using any changes.'
+          : 'Propose changes to the text or contact links on this saved page. Review the proposal before using it.'}</p>
         <label htmlFor={`${id}-instruction`}><span>What should change?</span>
           <textarea id={`${id}-instruction`} rows={3} maxLength={4000} value={instruction} disabled={!enabled || Boolean(busy)} onChange={event => setInstruction(event.target.value)} />
         </label>
@@ -528,7 +560,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
           </div>
         </section>}
         {proposalNotice && <p role="status">{notice}</p>}
-      </section>}
+      </section>
       {validation && <div className="project-page-editor__validation">
         <p className="project-page-editor__error" role="alert">{validation}</p>
         {draft.schema === 'leaf.portfolio.v1' && <button type="button" onClick={() => setReviewRequest(value => value + 1)}>Show all fields to review errors</button>}
@@ -542,11 +574,18 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
             ? <textarea id={`${id}-${field}`} ref={node => { fields.current[field] = node }} value={draft[field]} maxLength={limit} rows={4} onChange={event => change(field, event.target.value)} />
             : <input id={`${id}-${field}`} ref={node => { fields.current[field] = node }} value={draft[field]} maxLength={limit} onChange={event => change(field, event.target.value)} />}
         </label>)}
-          <label><span>Contact link label</span><input value={draft.action?.label ?? ''} maxLength={120}
-            onChange={event => changeAction('label', event.target.value)} /></label>
-          <label><span>Contact link URL</span><input value={draft.action?.href ?? ''} maxLength={2048}
-            onChange={event => changeAction('href', event.target.value)} /></label>
-          <p className="project-page-editor__note">Optional. Use an HTTPS link or mailto address. Clear both fields to remove the link.</p>
+          {(pageActions(draft).length ? pageActions(draft) : [{}]).map((action, index) => <fieldset key={index}>
+            <legend>Contact link {index + 1}</legend>
+            <label><span>Contact link label</span><input value={action.label ?? ''} maxLength={120}
+              onChange={event => changeAction(index, 'label', event.target.value)} /></label>
+            <label><span>Contact link URL</span><input value={action.href ?? ''} maxLength={2048}
+              onChange={event => changeAction(index, 'href', event.target.value)} /></label>
+            {pageActions(draft).length > 1 && <button type="button" aria-label={`Remove contact link ${index + 1}`}
+              onClick={() => changeActions(actions => actions.filter((_, item) => item !== index))}>Remove</button>}
+          </fieldset>)}
+          {pageActions(draft).length > 0 && pageActions(draft).length < MAX_PAGE_ACTIONS && <button type="button"
+            onClick={() => changeActions(actions => [...actions, { label: '', href: '' }])}>Add contact link</button>}
+          <p className="project-page-editor__note">Use an HTTPS link or mailto address. Clear both fields to remove the only link.</p>
         <label htmlFor={`${id}-theme`}><span>Theme</span><select id={`${id}-theme`} value={draft.theme} onChange={event => change('theme', event.target.value)}>
           <option value="cream">Cream</option><option value="light">Light</option><option value="dark">Dark</option>
         </select></label>
@@ -564,12 +603,21 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         <h3>iOS preview</h3>
         <p className="project-page-editor__note">Build a private simulator preview of your saved portfolio. It is not an installed or published app.</p>
         <div className="project-page-editor__actions">
-          <button type="button" onClick={buildNative} disabled={!enabled || Boolean(busy) || dirty || Boolean(validation) || Boolean(native?.active)
+          <button type="button" onClick={() => buildNative()} disabled={!enabled || Boolean(busy) || dirty || Boolean(validation) || Boolean(native?.active)
             || Boolean(native?.job && !['failed', 'cancelled'].includes(nativeStatus))}>Build iOS preview</button>
           {native?.job && <button type="button" onClick={checkNative} disabled={!enabled || Boolean(busy) || Boolean(native.active)}>Check preview again</button>}
         </div>
+        <label>Failed preview job ID<input ref={priorJobInput} maxLength={36} /></label>
+        <button type="button" disabled={!enabled || Boolean(busy) || dirty || Boolean(validation) || Boolean(native?.active)
+          || Boolean(native?.job && !['failed', 'cancelled'].includes(nativeStatus))}
+          onClick={() => {
+            const prior = priorJobInput.current.value.trim()
+            if (prior) void buildNative(prior)
+          }}>Recover original iOS preview</button>
         {dirty && <p className="project-page-editor__note">Save changes before building a new preview.</p>}
-        {native && <p role="status" aria-live="polite">{nativeLabel || (native.active ? 'Submitting' : 'Submission unconfirmed')} · Saved revision {native.revision}</p>}
+        {native && <p role="status" aria-live="polite">{nativeExpired
+          ? `This iOS preview exceeded its build time limit. Saved revision ${native.revision} is still available.`
+          : `${nativeLabel || (native.active ? 'Submitting' : 'Submission unconfirmed')} · Saved revision ${native.revision}`}</p>}
         {native?.message && <p className="project-page-editor__note" role="status">{native.message}</p>}
         {native?.url && <img className="project-page-editor__native-image" src={native.url} alt={`iOS simulator preview of saved portfolio revision ${native.job.revision}`} />}
       </section>}

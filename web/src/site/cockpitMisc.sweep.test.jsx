@@ -65,7 +65,7 @@ it('S1-105 labels expanded geometry as rendered paths', () => {
   const viewerRef = { current: { getDrawingScene: () => ({ ready: true, intake: shown,
     renderStats: { paths: 3, layers: 1, markerReferences: 0, omitted: 0 } }) } }
   render(<CockpitStatus ground={null} viewerRef={viewerRef} shown={shown} />)
-  expect(screen.getByTestId('cockpit-status').textContent).toContain('3 rendered paths')
+  expect(screen.getByTestId('cockpit-status').querySelector('.cockpit-count').title).toContain('3 rendered paths')
   expect(screen.getByTestId('cockpit-status').textContent).not.toContain('3 entities')
 })
 

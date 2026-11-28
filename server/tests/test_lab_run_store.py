@@ -1,9 +1,11 @@
 """The same lease, tenant, event and retention proofs on both authorities."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import timedelta
 import hashlib
 import json
 import os
+import sqlite3
 import threading
 import uuid
 
@@ -228,9 +230,12 @@ def test_stale_fence_cannot_write_anything(authority, monkeypatch):
     before = store.get(authority, "run")
     assert store.append_events(authority, "run", "worker", old["fence"], [event(0)]) is False
     assert store.heartbeat(authority, "run", "worker", old["fence"], 120) is False
-    assert store.finish(authority, "run", "worker", old["fence"]) is False
+    assert store.finish(authority, "run", "worker", old["fence"], attempt_wall_cap_seconds=300) is False
     assert store.get(authority, "run") == before
+    assert before["attempt_wall_cap_seconds"] is None
     assert [row["kind"] for row in all_events(authority, "run")] == ["lease_takeover"]
+    assert store.finish(authority, "run", "worker", new["fence"], attempt_wall_cap_seconds=600)
+    assert store.get(authority, "run")["attempt_wall_cap_seconds"] == 600
 
 
 def test_heartbeat_extends_only_holder(authority, monkeypatch):
@@ -584,11 +589,13 @@ def test_cancel_running_queued_and_terminal(authority):
     assert store.request_cancel(authority, "queued", "actor") is True
     row = store.get(authority, "queued")
     assert row["state"] == "cancelled" and row["finished_at"] is not None
+    assert row["attempt_wall_cap_seconds"] is None
     assert [row["kind"] for row in all_events(authority, "queued")] == ["cancelled"]
     assert claim(authority, "queued", "worker", 60) is False
     create(authority, "finished")
     lease = claim(authority, "finished", "worker", 60)
     assert store.finish(authority, "finished", "worker", lease["fence"])
+    assert store.get(authority, "finished")["attempt_wall_cap_seconds"] is None
     assert store.request_cancel(authority, "finished", "actor") is False
     assert store.cancel_requested(authority, "finished") is False
 
@@ -641,6 +648,27 @@ def test_pause_on_and_off(authority):
 
 def test_pause_defaults_to_false_on_empty_local_store(local):
     assert store.paused() is False
+
+
+def test_first_read_upgrades_older_sqlite_run_store_for_concurrent_readers(local):
+    tenant = "older-local-runs"
+    create(tenant)
+    lease = claim(tenant, "run", "worker", 60)
+    assert store.finish(tenant, "run", "worker", lease["fence"], "failed")
+    with closing(sqlite3.connect(os.environ["LEAF_LAB_DB"])) as db:
+        db.execute("ALTER TABLE lab_runs DROP COLUMN attempt_wall_cap_seconds")
+        db.commit()
+
+    ready = threading.Barrier(8, timeout=10)
+
+    def read(_):
+        ready.wait()
+        return store.get(tenant, "run")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        rows = list(pool.map(read, range(8)))
+
+    assert all(row["state"] == "failed" and row["attempt_wall_cap_seconds"] is None for row in rows)
 
 
 def test_latest_build_and_oldest_queue_are_read_only(local, monkeypatch):

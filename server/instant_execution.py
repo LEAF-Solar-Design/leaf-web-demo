@@ -116,16 +116,16 @@ def _sha256(value: bytes) -> str:
 
 
 def _sanitized_drawing_context(drawing_id: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Return a bounded demo intake and its immutable invocation reference.
-
-    The general versioned-drawing adapter lands after the local trusted-tool
-    proof. Until then, any non-demo drawing fails closed for instant execution
-    and remains available through the existing batch path.
-    """
+    """Return the curated drawing using its content-derived version."""
     identity = drawing_identity.curated_identity(drawing_id)
     if identity is None:
-        raise ValueError("instant drawing context is not available for this drawing")
-    source = deps.load_cached_intake()
+        raise ValueError("unknown curated drawing")
+    data, reference = _bounded_context(deps.load_cached_intake(), drawing_id, "")
+    reference["version_id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"leaf:{identity.store_id}:{reference['content_digest']}"))
+    return data, reference
+
+
+def _bounded_context(source, drawing_id, version_id):
     sanitized = {key: source[key] for key in _DRAWING_FIELDS if key in source}
     encoded = json.dumps(
         sanitized, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
@@ -136,7 +136,7 @@ def _sanitized_drawing_context(drawing_id: str) -> Tuple[Dict[str, Any], Dict[st
     digest = _sha256(encoded)
     reference = {
         "drawing_id": drawing_id,
-        "version_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"leaf:{identity.store_id}:{digest}")),
+        "version_id": version_id,
         "content_digest": digest,
         "geometry_ref": f"drawing-context:{digest.removeprefix(_DIGEST)}",
     }
@@ -241,9 +241,9 @@ def _session_lock(key: Tuple[str, str]) -> threading.RLock:
 
 def _request_body(
     tenant_id: str, session_id: str, drawing_id: str, artifact: InstantArtifact,
-    effective_catalog_digest: str,
+    effective_catalog_digest: str, *, selected=None,
 ) -> Dict[str, Any]:
-    drawing_data, drawing_reference = _sanitized_drawing_context(drawing_id)
+    drawing_data, drawing_reference = selected if selected is not None else _sanitized_drawing_context(drawing_id)
     return {
         "contract": CONTRACT,
         "tenant_id": tenant_id,
@@ -281,7 +281,7 @@ def prepare_session(tenant_id: str, session_id: str, drawing_id: str) -> Dict[st
         return _prepare_session_uncached(str(tenant_id), str(session_id), drawing_id)
 
 
-def _prepare_session_uncached(tenant_id: str, session_id: str, drawing_id: str) -> Dict[str, Any]:
+def _prepare_session_uncached(tenant_id: str, session_id: str, drawing_id: str, *, selected=None) -> Dict[str, Any]:
     """Assign and preload one trusted instant artifact before the first call.
 
     Failure is fail closed for instant execution but does not break the existing
@@ -308,10 +308,17 @@ def _prepare_session_uncached(tenant_id: str, session_id: str, drawing_id: str) 
         artifact = ARTIFACT_REGISTRY.resolve(tool, catalog_commit=catalog_commit)
         body = _request_body(
             str(tenant_id), str(session_id), drawing_id, artifact,
-            _DIGEST + pin["effective_catalog_digest"],
+            _DIGEST + pin["effective_catalog_digest"], selected=selected,
         )
+        endpoint = f"{url}/v1/sessions"
+        if selected is not None:
+            cached = assignment_for_session(*key)
+            if cached and _assignment_valid(cached, *key, body):
+                return {"ready": True, "reason": None}
+            if cached:
+                endpoint += f"/{uuid.UUID(session_id)}/rebind"
         response = requests.post(
-            f"{url}/v1/sessions", json=body, headers=_control_headers(),
+            endpoint, json=body, headers=_control_headers(),
             timeout=(2.0, _control_timeout_s()),
             **_control_transport(url),
         )
@@ -324,6 +331,35 @@ def _prepare_session_uncached(tenant_id: str, session_id: str, drawing_id: str) 
         return {"ready": False, "reason": "invalid_instant_assignment"}
     _remember_assignment(key, assignment)
     return {"ready": True, "reason": None}
+
+
+def project_assignment(principal, session_id, binding):
+    """Stage a verified version for a project read after checking current access."""
+    if not _control_url():
+        return None
+    import project_execution_context as custody
+    import solar_project_context as projects
+    from leaf_platform import entitlements
+
+    try:
+        bound = custody.validate_binding(binding)
+        org_id = uuid.UUID(bound["organization_id"])
+        if entitlements.stored_job_entitlement_denial(org_id, "extract") is not None:
+            return None
+        context = projects.resolve_context(
+            principal, uuid.UUID(bound["project_id"]), uuid.UUID(bound["input_version_id"]),
+            drawing_id=uuid.UUID(bound["drawing_id"]), write=False,
+        )
+        if (context.intake_sha256 != bound["intake_sha256"] or
+                any(str(getattr(context.binding, key)) != bound[key] for key in custody.UUID_FIELDS)):
+            return None
+        selected = _bounded_context(context.intake, bound["drawing_id"], bound["input_version_id"])
+        key = (str(principal), session_id)
+        with _session_lock(key):
+            status = _prepare_session_uncached(*key, bound["drawing_id"], selected=selected)
+            return assignment_for_session(*key) if status["ready"] else None
+    except (projects.ProjectContextError, ValueError, TypeError, KeyError):
+        return None
 
 
 def assignment_for_session(tenant_id: str, session_id: str) -> Optional[Dict[str, Any]]:

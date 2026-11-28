@@ -1,8 +1,10 @@
 import './structural.css'
 import InviteAccept from './invites/InviteAccept.jsx'
 import { projectEngineObservationBinding } from './lib/projectDrawingObservation.js'
+import { planLabel } from './lib/planLabel.js'
 import { useSolarGraphOverlay, SOLAR_OVERLAY_REASONS } from './solar/useSolarGraphOverlay.js'
 import { solarOverlayCanvasIntake } from './solar/solarGraphOverlay.js'
+import { withHiddenLayerDefaults } from './lib/hiddenLayers.js'
 import './site/studioShell.css'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
 import { createPortal, flushSync } from 'react-dom'
@@ -20,6 +22,7 @@ import EngineObjectBridge from './cadedit/EngineObjectBridge.jsx'
 import { useLeavingGround, useStudioTransition } from './site/useStudioTransition.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 import { useLabSurfaceStatus } from './lab/useLabSurfaceStatus.js'
+import { useEstimatorSurfaceStatus } from './estimator/useEstimatorSurfaceStatus.js'
 import { parseLabRoute } from './lab/labRoute.js'
 import { useRoute } from './site/router.js'
 import { START_BOARD_COPY } from './site/startBoardCopy.js'
@@ -41,7 +44,7 @@ import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry
 import useEscapeOwner from './lib/useEscapeOwner.js'
 import usePhoneDrawerEscape from './lib/usePhoneDrawerEscape.js'
 import useDockRise from './lib/useDockRise.js'
-import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
+import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, routeErrorText, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
 import { pushOnOpen, useAsyncScope, useCameraViewParam, useViewParamSeat } from './lib/urlState.js'
@@ -86,6 +89,7 @@ import { requiresReconciliation } from './errorPresentation.js'
 import DrawingDependencyReport from './components/DrawingDependencyReport.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
 import PromptBox, { shouldSkipPromptFocus } from './components/PromptBox.jsx'
+import { BUILD_TOOL_STARTER } from './lib/starterPrompts.js'
 import RoutePanel from './components/RoutePanel.jsx'
 import DegradedBanner from './components/DegradedBanner.jsx'
 import OperatorEntry from './components/operator/OperatorEntry.jsx'
@@ -174,7 +178,7 @@ import DetailsDrawer, { ServiceStatus } from './components/DetailsDrawer.jsx'
 import ShortcutSheet from './components/ShortcutSheet.jsx'
 import {
   config, authHeaders, getSessionIdentity, getSession, getTools, getCapabilities, runTool, runToolAsync, attachToJob,
-  getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake,
+  getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake, fetchInlineAuthoringFlags,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
   createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
   saveEditedDrawingVersion,
@@ -198,7 +202,7 @@ import ProjectSourceCandidateReview from './site/ProjectSourceCandidateReview.js
 import ProjectLifecyclePanel from './projects/ProjectLifecyclePanel.jsx'
 import { ENV_LIFECYCLE_UI } from './projects/flag.js'
 import {
-  THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills, listPendingApprovals,
+  PLAN_MODE_CONTEXT_KEY, THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills, listPendingApprovals,
 } from './converse.js'
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
 import { entitlementAllowed } from './controllers/platform/index.js'
@@ -238,6 +242,7 @@ const LabWidgetsPreview = import.meta.env.DEV
 import { labPreviewEnabled } from './lab/labPreview.js'
 import { checkoutScopeDrawingId, deriveCheckout } from './controllers/checkout/createCheckoutController.js'
 import { useDrawingIdentity, useDrawingScopeReset } from './drawing/DrawingIdentityProvider.jsx'
+import SentCopyLine, { useLandOnQueryDrawing } from './drawing/SentCopyHeader.jsx'
 import { hasDrawingSelection } from './drawing/drawingIdentity.js'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
@@ -546,6 +551,7 @@ export function boardDrawingFacts({ projectMode, shown, standaloneName, selected
     || binding.drawing_id !== selectedVersion.drawing_id) return null
   const facts = { project: true, version_id: selectedVersion.version_id, drawing_id: selectedVersion.drawing_id,
     name: (typeof projectIntake?.dwg === 'string' && projectIntake.dwg) || selectedVersion.name || 'Project drawing' }
+  if (projectIntake?.solar_design_graph) facts.solar = true
   return Array.isArray(projectIntake?.polylines) && Array.isArray(projectIntake?.layers)
     ? { ...facts, polylines: projectIntake.polylines.length, layers: projectIntake.layers.length }
     : { ...facts, pending: true }
@@ -802,6 +808,82 @@ export function RunningJobStrip({ jobId, runProgress, runStatus, toolName, runEl
   )
 }
 
+export function headerChromeFor({ studioGround, surface }) {
+  // The drafting toolbar marks the CAD drawing surface (surface contract, never a surface-id literal).
+  const drawing = studioGround && surfaceContract(surface).toolbar.profile === 'drafting'
+  // The Claude accounts control stays on every surface: after a link it is the user's
+  // confirmation ("1 linked") and the way to add or remove accounts (rehearsal issue 26).
+  return { cost: !drawing, accounts: true }
+}
+
+function storedPlanMode(sessionId) {
+  if (!sessionId) return null
+  try {
+    const stored = localStorage.getItem(`leaf.planMode.${sessionId}`)
+    return stored === null ? null : stored === '1'
+  } catch { return null }
+}
+
+export function useComposerPlanMode(sessionId, live, catalogController, startAgentTurn) {
+  const [available, setAvailable] = useState(false)
+  useEffect(() => {
+    if (!live) {
+      setAvailable(false)
+      return
+    }
+    let active = true
+    // Defer the read so a StrictMode mount replay makes one tenant request.
+    Promise.resolve().then(async () => {
+      if (!active) return
+      try {
+        const flags = await fetchInlineAuthoringFlags()
+        if (active) setAvailable(flags?.plan_mode === true)
+      } catch {
+        if (active) setAvailable(false)
+      }
+    })
+    return () => { active = false }
+  }, [live])
+
+  const [choice, setChoice] = useState(() => ({ sessionId, on: storedPlanMode(sessionId) }))
+  if (choice.sessionId !== sessionId) {
+    setChoice({ sessionId, on: storedPlanMode(sessionId) })
+  }
+  const visible = live && available
+  const planMode = visible && choice.on === true
+  useEffect(() => {
+    if (!visible || !choice.sessionId || choice.on === null) return
+    try {
+      localStorage.setItem(`leaf.planMode.${choice.sessionId}`, choice.on ? '1' : '0')
+    } catch { /* Keep the choice for this conversation while mounted. */ }
+  }, [choice, visible])
+
+  useLayoutEffect(() => {
+    if (!planMode) return
+    catalogController.setContext({ [PLAN_MODE_CONTEXT_KEY]: true })
+    // setContext merges patches. Clear the previous value when leaving Plan.
+    return () => catalogController.setContext({ [PLAN_MODE_CONTEXT_KEY]: undefined })
+  }, [catalogController, planMode])
+  return {
+    planMode,
+    onTogglePlanMode: visible ? () => setChoice({ sessionId, on: !planMode }) : undefined,
+    startComposerTurn: !sessionId && planMode ? async (...args) => {
+      const turn = await startAgentTurn(...args)
+      const sentSessionId = turn?.session_id
+      if (sentSessionId) {
+        // An attachment alone never inherits the draft. Match the actual turn's
+        // receipt and preserve a choice made while the send was in flight.
+        setChoice(current => {
+          const attachedWithoutChoice = current.sessionId === sentSessionId && current.on === null
+          if (current !== choice && !attachedWithoutChoice) return current
+          return { sessionId: sentSessionId, on: storedPlanMode(sentSessionId) ?? true }
+        })
+      }
+      return turn
+    } : startAgentTurn,
+  }
+}
+
 export default function App() {
   // W1 (convergence): the console's drawing identity is now owned by
   // DrawingIdentityProvider, seeded from the SAME rule these two module
@@ -890,6 +972,7 @@ export default function App() {
   const [mock, setMock] = useState(() => config.mockDefault
     || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const labStatus = useLabSurfaceStatus(mock)
+  useEstimatorSurfaceStatus(mock)
   const { path: surfacePath } = useRoute()
   useEffect(() => {
     const cancelSurfaceSwitch = () => request(committedSurfaceRef.current)
@@ -1357,12 +1440,23 @@ export default function App() {
     listProjects,
     createProject,
     openProject,
+    // A 409 on first-workspace create adopts the org the verified session resolves to.
+    resolveOrgId: async () => (await getSessionIdentity(false)).org,
   }), [])
+  // First sign-in creates the caller's workspace without a prompt; the
+  // handler (assigned below, once identity state exists) re-reads tenant
+  // state in place so no reload is needed.
+  const autoProvisionEnabled = !mock && !knownGuest && authConfigured && signedIn
+  const workspaceProvisionedRef = useRef(null)
   const workspaceController = useWorkspaceController({
     mock,
     readsPaused: knownGuest,
     services: workspaceServices,
     formatError: humanizeError,
+    autoProvision: {
+      enabled: autoProvisionEnabled,
+      onProvisioned: (org) => workspaceProvisionedRef.current?.(org),
+    },
   })
   const {
     orgId,
@@ -1379,11 +1473,14 @@ export default function App() {
     adoptOrgId,
     openProject: onOpenProject,
     createOrg: createWorkspaceOrg,
-    createProject: createWorkspaceProject,
+    createProject: createWorkspaceProjectRequest,
     rehydrate,
     closeProject: onCloseProject,
     selectCanonicalVersion,
   } = workspaceController
+  const createWorkspaceProject = useCallback((name) => (
+    createWorkspaceProjectRequest(name, { requireCreated: true })
+  ), [createWorkspaceProjectRequest])
   const deviceRegistry = useDeviceRegistry({ mock: mock || knownGuest, projectId: openProjectId })
   const [linkDeviceOpen, setLinkDeviceOpen] = useState(false)
   useDrawingScopeReset(openProjectId)
@@ -1512,6 +1609,7 @@ export default function App() {
     orgId, projectId: openProjectId, workspace, versionId: canonicalVersionId })
   const projectEditorKey = projectDrawingEditorScopeKey(projectEditorBinding)
   const projectSelectedDrawingVersion = workspace?.drawing_versions?.find((row) => row.version_id === canonicalVersionId)
+  useLandOnQueryDrawing({ mock, openProjectId, workspace, canonicalVersionId, selectCanonicalVersion })
   const canUndo = projectMode ? !!projectSelectedDrawingVersion && !!projectEditorTarget?.restoreVersion
     && workspace.drawing_versions.some((row) => row.drawing_id === projectSelectedDrawingVersion.drawing_id
       && row.seq < projectSelectedDrawingVersion.seq) : standaloneCanUndo
@@ -1671,6 +1769,9 @@ export default function App() {
       } : {}),
     },
   })
+  const { planMode, onTogglePlanMode, startComposerTurn } = useComposerPlanMode(
+    agentSessionId, !mock && !knownGuest, catalogController, startAgentTurn,
+  )
   const {
     tools,
     toolsError: toolsErr,
@@ -1979,6 +2080,19 @@ export default function App() {
     // Both proofs share token, recovery and workspace fencing.
   }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, isScopeCurrent, resetCatalogTransient, resetDrawing, seatIntake,
       session.recoveries, sessionProof, sessionActions, knownGuest])
+
+  // After the first workspace exists, drop the unbound reads' 403 state and
+  // re-read identity, intake and the platform trust state (Claude accounts).
+  workspaceProvisionedRef.current = () => {
+    setIdentityFailure(null)
+    setIntakeRetryKey((key) => key + 1)
+    platformActions.refreshAll()
+  }
+  // While the first workspace is being set up, the setup card explains the
+  // unbound identity 403; the identity card would only repeat it.
+  useEffect(() => {
+    if (autoProvisionEnabled && workspaceController.autoProvision !== 'idle') setIdentityFailure(null)
+  }, [autoProvisionEnabled, workspaceController.autoProvision])
 
   // App owns the transport; controls only express the user's choice.
   const localCadUpdateRef = useRef(null)
@@ -2497,16 +2611,21 @@ export default function App() {
   // insert/face-only layers (e.g. the ?fixture=edit Blocks/Surfaces layers)
   // stop reading 0 in the legend.
   const projectScene = viewerRef.current?.getDrawingScene?.()
-  const projectDrawing = projectSolarDrawingView({
-    solarBinding: projectSolar.scope.binding,
-    contextView: projectSolarRuntime.contextView,
-    current: projectMode && projectSolarRuntime.contextCurrent(),
-    scene: projectScene ? {
-      intake: projectScene.intake,
-      drawingKey: projectScene.drawingKey,
-      current: projectScene.ready === true,
-    } : null,
-  })
+  const projectDrawingBinding = projectSolar.scope.binding
+  const projectContextView = projectSolarRuntime.contextView
+  const projectSolvePreview = projectSolarRuntime.solvePreview
+  const projectContextCurrent = projectMode && projectSolarRuntime.contextCurrent()
+  const projectSceneIntake = projectScene?.intake
+  const projectSceneKey = projectScene?.drawingKey
+  const projectSceneReady = projectScene?.ready === true
+  const projectDrawing = useMemo(() => projectSolarDrawingView({
+    solarBinding: projectDrawingBinding,
+    contextView: projectContextView,
+    solvePreview: projectSolvePreview,
+    current: projectContextCurrent,
+    scene: { intake: projectSceneIntake, drawingKey: projectSceneKey, current: projectSceneReady },
+  }), [projectDrawingBinding, projectContextView, projectSolvePreview, projectContextCurrent,
+    projectSceneIntake, projectSceneKey, projectSceneReady])
   const projectEngineIntake = projectEditorEngine?.scopeKey === projectEditorKey ? projectEditorEngine.intake : null
   const engineObservationBinding = useMemo(() => projectEngineObservationBinding({
     projectMode, scopeKey: projectEditorEngine?.scopeKey, currentScopeKey: projectEditorKey,
@@ -2516,7 +2635,12 @@ export default function App() {
     engineDocument, engineDirty, canonicalVersionId, projectDrawing.drawingKey])
   const drawingIntake = projectMode ? projectEngineIntake || projectDrawing.intake : activeIntake || shown
   const projectDrawingName = projectDrawing.intake?.dwg || projectSolar.scope.binding?.drawing_id || ''
+  const projectHiddenLayers = projectMode ? projectDrawing.intake?.hidden_layers : undefined
   const visibleLayers = projectMode ? projectSolarRuntime.visibleLayers : standaloneVisibleLayers
+  // GAPS 51: what the canvas and the layer list show; the drawing's own frozen
+  // or off layers start hidden until the user toggles them (identity-stable,
+  // memoised inside the helper).
+  const shownLayers = withHiddenLayerDefaults(visibleLayers, projectHiddenLayers)
   const setVisibleLayers = projectMode ? projectSolarRuntime.setVisibleLayers : setStandaloneVisibleLayers
   // Context reads can briefly hide the drawing during checkout refresh. Retire
   // selection for a canonical identity change, not that read's pending state.
@@ -2560,7 +2684,7 @@ export default function App() {
   const viewNavigation = useViewNavigation({
     viewerRef, history: viewHistoryRef.current, setHistorySize: setViewHistorySize,
     selectedHandle, selectedLayer: selection?.layer ?? null, setSelectedHandle,
-    visibleLayers, setVisibleLayers, intake: drawingIntake,
+    visibleLayers: shownLayers, setVisibleLayers, intake: drawingIntake,
     navigationSource: navigationSourceRef,
   })
   const {
@@ -3031,7 +3155,7 @@ export default function App() {
   }, [tools, mock, session.status, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext, engineDirty, refuseProjectSolar])
   const projectSource = useProjectSourceController({ projectId: openProjectId, orgId, signedIn, mock, startAgentTurn,
     sourceContext: activeSurface === 'ios' ? 'native' : 'browser' })
-  catalogUiRef.current = { armDecision, startAgentTurn, running,
+  catalogUiRef.current = { armDecision, startAgentTurn: startComposerTurn, running,
     openProjectSource: (text, options) => ['browser', 'ios'].includes(activeSurface) ? projectSource.open(text, options) : false }
 
   const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog', { complete = false } = {}) => {
@@ -4104,8 +4228,8 @@ export default function App() {
   }, [])
 
   const toggleLayer = useCallback((layer) => {
-    setVisibleLayers((v) => ({ ...v, [layer]: projectMode ? v[layer] === false : !v[layer] }))
-  }, [projectMode, setVisibleLayers])
+    setVisibleLayers((v) => ({ ...v, [layer]: projectMode ? withHiddenLayerDefaults(v, projectHiddenLayers)?.[layer] === false : !v[layer] }))
+  }, [projectMode, setVisibleLayers, projectHiddenLayers])
 
   const applyVersion = useCallback(() => {
     seatDrawingVersion({ intake: editFixtureV2 }, { source: 'fixture' })
@@ -4187,6 +4311,8 @@ export default function App() {
   const signedOut = consoleSignedOut({ mock, authRequired, authConfigured, isSignedIn })
   // A signed-out visitor's catalog read can only 401; SignedOutGate already tells them to sign in.
   const visibleCatalogErr = signedOut ? null : catalogErr
+  // Take-3 film cleanup: which account chips the CAD drawing header keeps (see headerChromeFor).
+  const headerChrome = headerChromeFor({ studioGround, surface: activeSurface, grant, signedOut, grantLoading, grantErr })
 
   // Product-surface navigation (Browser / CAD / Solar CAD / iOS). 'cad' is the
   // module default, so the drawing workspace renders exactly as before unless
@@ -4416,6 +4542,7 @@ export default function App() {
   }, [projectMode, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
   const [browserPanel, setBrowserPanel] = useState('none')
+  const [browserHeaderActionsOpen, setBrowserHeaderActionsOpen] = useState(false)
   const transcriptDestination = resolveConversationDestination({
     hasDockHost: Boolean(commandTranscriptHost), agentMode, sessionId: agentSessionId,
   })
@@ -4876,6 +5003,12 @@ export default function App() {
   // so they can read the ONE engine session through context. Studio-only:
   // off a studio drafting surface the ribbon never mounts and this list is
   // never read.
+  // The one New conversation handler: the Profile ribbon and the assistant
+  // head both call it, so the two controls share one set of guards (null
+  // while the agent is unavailable, signed out, running or routing).
+  const startNewConversation = useMemo(() => (!agentDisabled && signedIn && !running && !routing
+    ? () => { clearAgentSession(); openAgentMode(); barInputRef.current?.focus() } : null),
+  [agentDisabled, signedIn, running, routing, clearAgentSession, openAgentMode])
   // One profile ribbon over the same project, catalog and conversation owners.
   const profileTabs = useMemo(() => {
     const openProjects = () => {
@@ -4907,16 +5040,14 @@ export default function App() {
       },
       files: { onUpload: !mock && (openProjectId ? signedIn : standalonePolicyReady) ? () => setProjectPane('material') : null },
       conversation: {
-        onNew: !agentDisabled && signedIn && !running && !routing
-          ? () => { clearAgentSession(); openAgentMode(); barInputRef.current?.focus() } : null,
+        onNew: startNewConversation,
       },
       activity: { onJobs: openJobs, onReceipts: jobs.length ? openJobs : null },
       ship,
     })
   }, [surfaceSlots.toolbar.profile, railFamilies, onRequestCatalogRun, setFamilyOpen,
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
-    orgId, openProjectId, standalonePolicyReady, projectBusy, agentDisabled, routing, clearAgentSession,
-    openAgentMode, jobs.length, ship, openToolRail, setJobRailExpanded,
+    orgId, openProjectId, standalonePolicyReady, projectBusy, startNewConversation, jobs.length, ship, openToolRail, setJobRailExpanded,
     solarRoutesStatus, showSolarStrings, selectedHandle, drafting, catalog.families, solarFormTool, catalogRunContext?.projectId, onOpenSolarForm])
   const previousRibbonProfile = useRef(null)
   const entryRibbonTab = profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)
@@ -4965,7 +5096,7 @@ export default function App() {
       onToggleHistory: onToggleHistoryTracked,
     })
     const layers = layersCluster({
-      layers: projectMode ? drawingIntake?.layers : shown?.layers, counts: layerCounts, visibleLayers, onToggle: toggleLayer, colorFor: colorForLayer,
+      layers: projectMode ? drawingIntake?.layers : shown?.layers, counts: layerCounts, visibleLayers: shownLayers, onToggle: toggleLayer, colorFor: colorForLayer,
     })
     // Seating (Slice D): the tool rail hides behind the band on drafting
     // surfaces, so the band carries the rail's two affordances: `expand`
@@ -5112,7 +5243,7 @@ export default function App() {
     }
   }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, browserPanel, openToolRail, toggleStudioToolRail, drafting, profileTabs, surfaceSlots.toolbar.profile, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, drawerViewport, studioDrawer,
     shown, drawingState, hasVersions, canUndo, canRedo, versionBusy, running, previewing,
-    drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
+    drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, shownLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
     pushViewSnapshot, lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
   const ribbonClusters = (() => {
@@ -5220,12 +5351,12 @@ export default function App() {
       inserts,
       faces,
       layers: layers.length,
-      layersShown: layers.filter((l) => visibleLayers[l] !== false).length,
+      layersShown: layers.filter((l) => shownLayers[l] !== false).length,
       extents: drawingExtents(drawingIntake.polylines),
       source: projectMode ? 'project drawing' : activeIntake ? 'browser drawing' : mock ? 'sample data' : 'project drawing',
       ...(!projectMode && activeIntake && engineHistory ? engineHistory : {}),
     }
-  }, [projectMode, activeDrawingName, studioGround, drafting, drawingIntake, activeIntake, engineHistory, visibleLayers, mock])
+  }, [projectMode, activeDrawingName, studioGround, drafting, drawingIntake, activeIntake, engineHistory, shownLayers, mock])
 
   // W4d Slice A: the ONE engine-session mount wraps the drawing workspace,
   // so the ribbon's engine clusters and the import pane consume the same
@@ -5287,7 +5418,7 @@ export default function App() {
             REQUESTED_DRAWING_ID, bytes, parent, digest, plan.mutations, cap, { onStatus, fileName })
         }
         return await saveEditedDrawingVersion(
-          REQUESTED_DRAWING_ID, bytes, parent, digest, cap, fileName)
+          REQUESTED_DRAWING_ID, bytes, parent, digest, cap, { fileName })
       } catch (error) {
         keepLock = error?.outcomeUnknown === true
         if (acquired && keepLock) {
@@ -5414,6 +5545,7 @@ export default function App() {
           routeActive={!!route}
           mcpDiscoveryEnabled={!mock && !knownGuest}
           liveCallsAllowed={signedIn && !mock && !knownGuest && !signedOut}
+          starter={signedIn && !mock && !knownGuest && !signedOut ? BUILD_TOOL_STARTER : null}
           mock={mock}
           onOpenAuthor={onOpenAuthor}
           // Slice 8a round 3: the bar has no guard of its own. This is the
@@ -5428,6 +5560,8 @@ export default function App() {
           skills={catalogSkills}
           commandActions={slashCommandActions}
           sessionId={agentSessionId}
+          planMode={planMode}
+          onTogglePlanMode={onTogglePlanMode}
           // Slice 10b/10c: the act-scope palette's action rows (the ribbon's
           // own live tools, a second time) and the drawing the versions
           // artifact index and the find-scope search are scoped to.
@@ -5540,6 +5674,7 @@ export default function App() {
             loading={projectsLoading}
             orgBusy={orgBusy}
             projectBusy={projectBusy}
+            projectDraftError={workspaceController.projectDraftError}
             createRequest={projectCreateRequest}
             onCreateOrg={onCreateOrg}
             onCreateProject={onCreateProject}
@@ -5560,65 +5695,70 @@ export default function App() {
         <ProjectWorkspaceControls {...projectLayout} active={!studioShell && projectLayout.active} />
         <div className="spacer" />
         <div className="who">
-          {/* Header metadata (org · tenant · tier · spend · API base) is demoted
-              behind Details -> the DT2 session drawer, per the standard. */}
-          {canOpenCustomize && (
-            <button type="button" className="chip-act" onClick={() => setCustomizeOpen(true)}>Customize</button>
-          )}
-          {!mock && agentSessionId && (
-            <button
-              type="button"
-              className="chip-act"
-              onClick={openAgentMode}
-              aria-label={`Pending approvals ${pendingApprovalCount}`}
-              title={pendingApprovalsUnavailable
-                ? 'Pending approvals could not be refreshed. Open the inbox to retry.'
-                : 'Open pending approvals'}
-            >
-              Approvals
-              {/* S20 (F-studio-nt2-count): a dot, never a visible number, while
-                  items wait; the count lives in the aria-label above. */}
-              {pendingApprovalCount > 0 && !pendingApprovalsUnavailable && <span className="dot approvals-dot" aria-hidden="true" />}
-              {pendingApprovalsUnavailable && <span className="dot red approvals-dot" aria-hidden="true" />}
+          <AccountSignOut signedIn={isSignedIn()} onSignOut={sessionActions.signOut} />
+          {browserAssetActive && (
+            <button type="button" className="chip-act browser-header-actions-toggle"
+              aria-expanded={browserHeaderActionsOpen} aria-controls="studio-header-actions"
+              onClick={() => setBrowserHeaderActionsOpen(open => !open)}>
+              Workspace actions
             </button>
           )}
-          <button type="button" className="chip-act" onClick={openSessionDetails} title={`Session details · build ${__BUILD_HASH__}`}>Details</button>
-          {/* Persistent identity control: before this, sign-out lived only
-              behind Details -> the session drawer, so the header carried no
-              reachable exit for a signed-in operator (2026-09-02
-              reconciliation, row B11). Same signOut path the drawer's action
-              already calls -- never raw logout(). */}
-          <AccountSignOut signedIn={isSignedIn()} onSignOut={sessionActions.signOut} />
-          {devControls && (
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={mock}
-                disabled={tourOn}
-                onChange={(e) => setMock(e.target.checked)}
-                aria-label="Use mock data (off = live backend)"
+          <div id="studio-header-actions" className="studio-header-actions">
+            {/* Header metadata (org · tenant · tier · spend · API base) is demoted
+                behind Details -> the DT2 session drawer, per the standard. */}
+            {canOpenCustomize && (
+              <button type="button" className="chip-act" onClick={() => setCustomizeOpen(true)}>Customize</button>
+            )}
+            {!mock && agentSessionId && (
+              <button
+                type="button"
+                className="chip-act"
+                onClick={openAgentMode}
+                aria-label={`Pending approvals ${pendingApprovalCount}`}
+                title={pendingApprovalsUnavailable
+                  ? 'Pending approvals could not be refreshed. Open the inbox to retry.'
+                  : 'Open pending approvals'}
+              >
+                Approvals
+                {/* S20 (F-studio-nt2-count): a dot, never a visible number, while
+                    items wait; the count lives in the aria-label above. */}
+                {pendingApprovalCount > 0 && !pendingApprovalsUnavailable && <span className="dot approvals-dot" aria-hidden="true" />}
+                {pendingApprovalsUnavailable && <span className="dot red approvals-dot" aria-hidden="true" />}
+              </button>
+            )}
+            <button type="button" className="chip-act" onClick={openSessionDetails} title={`Session details · build ${__BUILD_HASH__}`}>Details</button>
+            {devControls && (
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={mock}
+                  disabled={tourOn}
+                  onChange={(e) => setMock(e.target.checked)}
+                  aria-label="Use mock data (off = live backend)"
+                />
+                <span>Mock</span>
+              </label>
+            )}
+            {/* Live-only chrome (Claude-account terminal panel) is hidden in the
+                demo — it can't work signed-out. Guarded on !mock. */}
+            {headerChrome.cost && <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />}
+            {!mock && headerChrome.accounts && (
+              <ClaudeAccountPanel
+                mock={mock}
+                signedOut={signedOut}
+                grant={grant}
+                loading={grantLoading}
+                busy={grantBusy}
+                error={grantErr}
+                open={claudeOpen}
+                onToggle={setClaudeOpen}
+                onLink={onLinkClaude}
+                onRefresh={platformActions.loadGrant}
+                onUnlink={onUnlinkClaude}
               />
-              <span>Mock</span>
-            </label>
-          )}
-          {/* Live-only chrome (Claude-account terminal panel) is hidden in the
-              demo — it can't work signed-out. Guarded on !mock. */}
-          <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />
-          {!mock && (
-            <ClaudeAccountPanel
-              mock={mock}
-              signedOut={signedOut}
-              grant={grant}
-              loading={grantLoading}
-              busy={grantBusy}
-              error={grantErr}
-              open={claudeOpen}
-              onToggle={setClaudeOpen}
-              onLink={onLinkClaude}
-              onUnlink={onUnlinkClaude}
-            />
-          )}
-          {!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
+            )}
+            {!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
+          </div>
         </div>
       </header>
 
@@ -5698,6 +5838,17 @@ export default function App() {
           >
             Restart guided tour
           </button>
+        )}
+        {autoProvisionEnabled && workspaceController.autoProvision === 'creating' && (
+          <div className="card enter workspace-setup" role="status">Setting up your workspace…</div>
+        )}
+        {autoProvisionEnabled && workspaceController.autoProvision === 'failed' && (
+          <div className="card enter workspace-setup">
+            <p role="alert">{workspaceController.autoProvisionError}</p>
+            <button type="button" className="btn primary" onClick={() => {
+              void workspaceController.retryAutoProvision()
+            }}>Retry</button>
+          </div>
         )}
         {!mock && identityFailure?.scope === sessionProofScope && session.status !== 'active' && (
           <div className="card enter">
@@ -6300,6 +6451,7 @@ export default function App() {
               )}
               </>}
             </div>
+            <SentCopyLine mock={mock} workspace={workspace} shownDrawingId={projectMode ? projectSelectedDrawingVersion?.drawing_id : REQUESTED_DRAWING_ID} />
             {studioGround && drafting && shown && (
               <button
                 type="button"
@@ -6533,7 +6685,7 @@ export default function App() {
                   colorForLayer={studioGround ? studioColorForLayer : surfaceColorForLayer}
                   paletteRevision={studioGround ? (surfaceSlots.groundMaterial.layerAccent === 'solar' ? 'solar' : 'base') : undefined}
                   stringRoutes={projectMode ? undefined : solarStringRoutes}
-                  visibleLayers={visibleLayers}
+                  visibleLayers={shownLayers}
                   highlightHandles={projectMode ? undefined : overlay?.highlight_handles}
                   markers={projectMode ? undefined : overlay?.markers}
                   overlayPolylines={projectMode ? undefined : overlay?.polylines}
@@ -6592,7 +6744,7 @@ export default function App() {
                   layers={drawingIntake.layers}
                   counts={layerCounts}
                   colorForLayer={surfaceColorForLayer}
-                  visibleLayers={visibleLayers}
+                  visibleLayers={shownLayers}
                   onToggle={toggleLayer}
                 />
               ) : null
@@ -6768,6 +6920,7 @@ export default function App() {
             onCatalogChanged={refreshCatalog}
             consumeCatalogPublication={catalogController.consumeCatalogPublication}
             onDismiss={() => { clearAgentMode(); if (boardConversation) setProjectPane(null) }}
+            onNewConversation={startNewConversation}
             onLinkClaude={() => setClaudeOpen(true)}
             onAttachJob={onAttachAgentJob}
             onJobLinked={refreshJobs}
@@ -6843,7 +6996,7 @@ export default function App() {
               <span className="dot red" aria-hidden="true" />
               <span className="strip-sentence">
                 {routeErr
-                  ? `Couldn’t route the prompt: ${routeErr}`
+                  ? routeErrorText(routeErr)
                   : runErr}
                 <span className="dim"> · your last good result is unchanged</span>
               </span>
@@ -6997,7 +7150,7 @@ export default function App() {
             spend are muted metadata (green is reserved for genuine states). */}
         <ServiceStatus mock={mock} health={health} healthError={healthError} authRequired={authRequired} />
         {/* One census per surface: under the studio the footer counts the same surface-scoped families the rail shows. */}
-        <span className="dim">Tools: {studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount} available · Plan: {gateTier}</span>
+        <span className="dim">Tools: {studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount} available · Plan: {planLabel(gateTier) || gateTier}</span>
         {!mock && usage && (
           <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
         )}
@@ -7029,7 +7182,9 @@ export default function App() {
         {/* W4b cockpit: live cursor coordinates, scale, counts, selection
             (studio only; DOM-written at rAF rate, never React state). */}
         {studioGround && groundShowsDrawing(activeSurface) && (
-          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={drawingIntake} selectedHandle={selectedHandle} canvasSelector=".viewer-canvas" />
+          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={drawingIntake}
+            canvasIntake={solarOverlayCanvasIntake(viewerOverride, projectMode ? projectDrawing.intake : intake ?? SOLAR_STARTER_EMPTY_INTAKE)}
+            selectedHandle={selectedHandle} canvasSelector=".viewer-canvas" />
         )}
         {/* W4e: ORTHO and OSNAP real through StatusModesBridge; the rest honestly off, plus fullscreen. */}
         <SurfaceFrame.Cockpit />

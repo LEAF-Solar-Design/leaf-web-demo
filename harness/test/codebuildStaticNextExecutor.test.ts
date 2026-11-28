@@ -102,7 +102,7 @@ describe("CodeBuild static Next executor over injected ports", () => {
   it("writes the exact wire serialization and decodes two files", async () => {
     const f = fixture();
     const value = input();
-    f.receipt(value);
+    f.receipt(value, { providerBuildId: "untrusted-output-id" });
     const result = await f.executor.run(value);
     expect(f.executor.isolation).toBe("filesystem-and-network");
     expect(f.objects.get(`in/${value.executionId}.json`)).toEqual(Buffer.from(JSON.stringify({
@@ -115,12 +115,26 @@ describe("CodeBuild static Next executor over injected ports", () => {
       executionId: value.executionId, buildId: "build-new", bundleSha256: value.bundleSha256,
       admittedAt: "1970-01-01T00:00:00.000Z",
     });
-    expect(result).toEqual({ protocol: value.protocol, executionId: value.executionId,
+    expect(result).toEqual({ providerBuildId: "build-new", protocol: value.protocol, executionId: value.executionId,
       bindingId: value.bindingId, toolchainSha256: value.toolchainSha256,
       bundleSha256: value.bundleSha256, exitCode: 0,
       files: exported.map(file => ({ ...file, body: Buffer.from(file.body, "base64") })),
     });
     expect(result.files.every(file => Buffer.isBuffer(file.body))).toBe(true);
+  });
+
+  it.each([
+    ["/series.json", "application/json", "[1,2]"],
+    ["/captions.vtt", "text/vtt", "WEBVTT"],
+    ["/schedule.csv", "text/csv", "box,input"],
+  ])("binds the exported %s to the observed provider job", async (path, contentType, text) => {
+    const f = fixture();
+    const value = input();
+    const file = { path, contentType, body: Buffer.from(text).toString("base64") };
+    f.receipt(value, { files: [exported[0], file], providerBuildId: "untrusted-output-id" });
+    const result = await f.executor.run(value);
+    expect(result.providerBuildId).toBe("build-new");
+    expect(result.files[1]).toEqual({ path, contentType, body: Buffer.from(text) });
   });
 
   it("reuses a persisted build across executor instances and rejects different admitted bytes", async () => {
@@ -158,7 +172,7 @@ describe("CodeBuild static Next executor over injected ports", () => {
     const f = fixture();
     f.mapping();
     f.receipt();
-    await expect(f.executor.run(input())).resolves.toMatchObject({ exitCode: 0 });
+    await expect(f.executor.run(input())).resolves.toMatchObject({ exitCode: 0, providerBuildId: "build-existing" });
     await expect(f.executor.stop(input())).resolves.toMatchObject({ confirmed: true });
     expect(f.provider.start).not.toHaveBeenCalled();
     expect(f.provider.state.mock.calls).toEqual([["build-existing"], ["build-existing"]]);
@@ -316,7 +330,7 @@ describe("CodeBuild static Next executor over injected ports", () => {
       if (key.startsWith("map/")) { f.mapping("build-winner"); return "exists"; }
       return put(key, bytes);
     });
-    await expect(f.executor.run(input())).resolves.toMatchObject({ exitCode: 0 });
+    await expect(f.executor.run(input())).resolves.toMatchObject({ exitCode: 0, providerBuildId: "build-winner" });
     expect(f.provider.stop).toHaveBeenCalledExactlyOnceWith("build-new");
     expect(f.provider.state).toHaveBeenCalledExactlyOnceWith("build-winner");
   });
@@ -422,6 +436,7 @@ describe("CodeBuild static Next executor over injected ports", () => {
     const runtime = new ExecutorManagedNextRuntime(f.executor);
     const lease = await runtime.create(scope);
     await expect(lease.destroy()).resolves.toEqual({ confirmed: true });
+    expect(lease.cleanedBuild()).toBeNull();
     expect(f.provider.start).not.toHaveBeenCalled();
   });
 
@@ -449,5 +464,50 @@ describe("CodeBuild static Next executor over injected ports", () => {
     expect(f.provider.start).toHaveBeenCalledExactlyOnceWith(nextRequestDigest(scope));
     await expect(lease.destroy()).resolves.toEqual({ confirmed: true });
     expect(f.provider.stop).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["/series.json", "application/json", "[1,2]"],
+    ["/captions.vtt", "text/vtt", "WEBVTT"],
+    ["/schedule.csv", "text/csv", "box,input"],
+  ])(
+    "exports the actual cleanup evidence for %s only after a confirmed stop", async (path, contentType, body) => {
+      const f = fixture();
+      const value = input();
+      f.receipt(value, { files: [exported[0], { path, contentType, body: Buffer.from(body).toString("base64") }] });
+      const lease = await new ExecutorManagedNextRuntime(f.executor).create(scope);
+      const built = await lease.build(value.bundle, value.bundleSha256, NEXT_PLAN);
+      const original = Buffer.from(built.files[0].body);
+      built.files[0].body.fill(0);
+      expect(lease.cleanedBuild()).toBeNull();
+      f.provider.state.mockResolvedValue("IN_PROGRESS");
+      await expect(lease.destroy()).rejects.toMatchObject({ code: "cleanup_required" });
+      expect(lease.cleanedBuild()).toBeNull();
+      f.provider.state.mockResolvedValue("STOPPED");
+      await expect(lease.destroy()).resolves.toEqual({ confirmed: true });
+      const cleaned = lease.cleanedBuild()!;
+      expect(cleaned.stop).toEqual({ protocol: value.protocol, executionId: value.executionId,
+        bindingId: value.bindingId, confirmed: true });
+      expect(cleaned.result).toMatchObject({ providerBuildId: "build-new",
+        executionId: value.executionId, bundleSha256: value.bundleSha256 });
+      expect(cleaned.result.files.map(f => f.path)).toContain(path);
+      expect(cleaned.result.files[0].body).toEqual(original);
+      cleaned.result.files[0].body.fill(0);
+      expect(lease.cleanedBuild()!.result.files[0].body).toEqual(original);
+    },
+  );
+
+  it("keeps a legacy executor result without a provider identity out of custody", async () => {
+    const f = fixture();
+    const value = input();
+    f.receipt(value);
+    const runtime = new ExecutorManagedNextRuntime({ ...f.executor, async run(job) {
+      const result = await f.executor.run(job);
+      return { ...result, providerBuildId: undefined };
+    } });
+    const lease = await runtime.create(scope);
+    await lease.build(value.bundle, value.bundleSha256, NEXT_PLAN);
+    await expect(lease.destroy()).resolves.toEqual({ confirmed: true });
+    expect(lease.cleanedBuild()).toBeNull();
   });
 });

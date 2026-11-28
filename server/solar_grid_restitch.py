@@ -211,6 +211,56 @@ def restitch(piece_responses, piece_row_indices=None):
     return response
 
 
+def _panels_by_sequence(grid, *, reject_duplicates=False):
+    by_sequence = {}
+    for panel in _panels(grid):
+        sequence = _int(panel.get("Seq"))
+        if sequence > 0 and panel.get("Id"):
+            if reject_duplicates and sequence in by_sequence:
+                raise ValueError("Duplicate positive panel sequence")
+            # ReadSolvedMatrix (683-684, 749-755): first panel for each Seq wins.
+            by_sequence.setdefault(sequence, str(panel["Id"]).upper())
+    return [by_sequence[sequence] for sequence in sorted(by_sequence)]
+
+
+def completed_prefix_strings(piece_responses, piece_row_indices, *, piece_panel_ids=None):
+    """Project explicit cuts from authenticated consecutive split children.
+
+    The caller must verify each child receipt and its bound request membership.
+    Return no preview when restitch loses or reorders known panels or lengths.
+    """
+    if (not piece_responses or len(piece_responses) != len(piece_row_indices)
+            or piece_panel_ids is not None and len(piece_responses) != len(piece_panel_ids)):
+        return []
+    expected_ids, expected_lengths = [], []
+    try:
+        for index, response in enumerate(piece_responses):
+            if is_response_failed(response):
+                return []
+            data = _object(response)["data"]
+            ids = _panels_by_sequence(data["final_grid"], reject_duplicates=True)
+            if piece_panel_ids is not None and set(ids) != piece_panel_ids[index]:
+                return []
+            expected_ids.extend(ids)
+            expected_lengths.extend(_array(data["best_result"]["info"].get("sequence_length")))
+        data = restitch(piece_responses, piece_row_indices)["data"]
+        panel_ids = _panels_by_sequence(data["final_grid"], reject_duplicates=True)
+        lengths = _array(data["best_result"]["info"].get("sequence_length"))
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+        return []
+    if (panel_ids != expected_ids or len(set(panel_ids)) != len(panel_ids)
+            or lengths != expected_lengths):
+        return []
+    result, offset = [], 0
+    for value in lengths:
+        length = _int(value)
+        if length <= 0 or offset + length > len(panel_ids):
+            break
+        result.append(panel_ids[offset:offset + length])
+        offset += length
+    return result
+
+
 def ordered_strings(merged_response):
     """Cut final-grid Seq order as StringPlacement.DrawAllSequencesCore does.
 
@@ -224,16 +274,11 @@ def ordered_strings(merged_response):
         return []
     data = _object(merged_response)["data"]
     sequences = _array(data["best_result"]["info"].get("sequence_length"))
-    by_sequence = {}
-    for panel in _panels(data["final_grid"]):
-        sequence = _int(panel.get("Seq"))
-        if sequence > 0 and panel.get("Id"):
-            # ReadSolvedMatrix (683-684, 749-755): first panel for each Seq wins.
-            by_sequence.setdefault(sequence, str(panel["Id"]).upper())
+    panel_ids = _panels_by_sequence(data["final_grid"])
     length = (_int(sequences[0]) if sequences else 0) or 6
     result, current, index = [], [], 0
-    for sequence in sorted(by_sequence):
-        current.append(by_sequence[sequence])
+    for panel_id in panel_ids:
+        current.append(panel_id)
         if len(current) == length:
             result.append(current)
             current = []

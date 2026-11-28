@@ -2,10 +2,25 @@ import type { DatasetReadV1, DatasetRowGroupingV1 } from "../../../assistant-con
 import { DataTableCore, type DataTableColumn } from "./DataTableCore";
 
 type Row = DatasetReadV1["rows"][number];
+type MemberFilter = NonNullable<DatasetRowGroupingV1["member_filter"]>;
+
+function matchesMember(row: Row, filter: MemberFilter): boolean {
+  const value = row.values[filter.field];
+  if (filter.op === "is_null") return value == null;
+  if (typeof value !== "number") return false;
+  switch (filter.op) {
+    case "lt": return value < filter.value;
+    case "lte": return value <= filter.value;
+    case "gt": return value > filter.value;
+    case "gte": return value >= filter.value;
+  }
+}
 export function ProviderPairTable({ rows, columns, grouping, complete, label }: {
   rows: readonly Row[]; columns: readonly DataTableColumn<Row>[];
   grouping: DatasetRowGroupingV1; complete: boolean; label: string;
 }) {
+  const filter = grouping.member_filter;
+  if (!complete && filter) return <p role="status">Pair filtering requires complete dataset results.</p>;
   if (!complete) return <>
     <p role="status">Pair grouping is incomplete. Original rows are shown.</p>
     <DataTableCore rows={rows} columns={columns} getRowKey={row => row.key} label={label} />
@@ -28,9 +43,11 @@ export function ProviderPairTable({ rows, columns, grouping, complete, label }: 
     const pair = ordered.map(matches => matches[0]!);
     pair.forEach(row => paired.add(row)); groups.push({ key, rows: pair });
   }
-  const unpaired = rows.filter(row => !paired.has(row));
+  const unpairedCount = rows.length - paired.size;
+  const unpaired = filter ? [] : rows.filter(row => !paired.has(row));
   type Presented = { key: string; title: string; slots: readonly (Row | undefined)[] };
-  const presented: Presented[] = groups.map(group => ({
+  const eligibleGroups = filter ? groups.filter(group => group.rows.some(row => matchesMember(row, filter))) : groups;
+  const presented: Presented[] = eligibleGroups.map(group => ({
     key: `pair:${JSON.stringify([group.key, ...group.rows.map(row => row.key)])}`,
     title: `Pair ${group.key}`, slots: group.rows,
   }));
@@ -59,7 +76,14 @@ export function ProviderPairTable({ rows, columns, grouping, complete, label }: 
       </span> });
   }));
   return <>
-    <p>Each verified pair shares one row. Provider values stay separate. Unpaired accounts follow; missing providers are unavailable.</p>
-    <DataTableCore rows={presented} columns={pairedColumns} getRowKey={row => row.key} label={`${label}: provider pairs`} />
+    {filter
+      ? <p role="status">
+        {eligibleGroups.length} of {groups.length} verified pairs match the saved condition.
+        {unpairedCount > 0 && ` ${unpairedCount} account rows without a verified pair are excluded.`}
+      </p>
+      : <p>Each verified pair shares one row. Provider values stay separate. Unpaired accounts follow; missing providers are unavailable.</p>}
+    <DataTableCore rows={presented} columns={pairedColumns} getRowKey={row => row.key} label={`${label}: provider pairs`}
+      emptyTitle={filter ? "No verified pairs match" : undefined}
+      emptyDescription={filter ? "The saved condition must match at least one account in a verified pair." : undefined} />
   </>;
 }

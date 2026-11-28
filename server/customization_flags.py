@@ -48,3 +48,39 @@ def enabled(rung: int, tenant_id: str) -> bool:
         selected is RolloutMode.INTERNAL and str(tenant_id) in internal_tenants()
     )
     return permitted and (rung != 6 or enabled(5, tenant_id))
+
+
+def _tenant_mode_enabled(name: str, tenant_id: str) -> bool:
+    selected = mode(name)
+    return selected is RolloutMode.ALL or (
+        selected is RolloutMode.INTERNAL and tenant_id in internal_tenants()
+    )
+
+
+def plan_mode_enabled(tenant_id: str) -> bool:
+    """Plan authoring rollout gate, never a security control."""
+    return enabled(5, tenant_id) and _tenant_mode_enabled("LEAF_STUDIO_PLAN_MODE", tenant_id)
+
+
+def inline_review_enabled(tenant_id: str) -> bool:
+    """Inline review rollout gate, never a security control."""
+    return enabled(6, tenant_id) and _tenant_mode_enabled("LEAF_STUDIO_INLINE_REVIEW", tenant_id)
+
+
+def self_approval_allowed(tenant_id: str) -> bool:
+    """Internal or Plugin Builder self-approval, conditional on inline review."""
+    return inline_review_enabled(tenant_id) and (
+        plugin_builder_enabled(tenant_id)
+        or (os.environ.get("LEAF_STUDIO_INLINE_REVIEW") == "internal"
+            and tenant_id in internal_tenants()))
+
+
+def plugin_builder_enabled(tenant_id: str) -> bool:
+    if not os.environ.get("LEAF_TENANT_TOOLS_DIR", "").strip():
+        return False
+    selected = os.environ.get("LEAF_PLUGIN_BUILDER", "").strip().lower()
+    internal = str(tenant_id) in internal_tenants()
+    invited = {part.strip() for part in os.environ.get(
+        "LEAF_PLUGIN_BUILDER_TENANTS", "").split(",") if part.strip()}
+    return (selected == "all" or (selected == "internal" and internal)
+            or (selected == "1" and (internal or str(tenant_id) in invited)))

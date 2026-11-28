@@ -33,6 +33,7 @@ import itertools
 import math
 import os
 import zlib
+from bisect import bisect_left
 from dataclasses import dataclass, field
 
 from pdfminer.pdfdevice import PDFTextDevice
@@ -42,12 +43,14 @@ from pdfminer.pdffont import PDFCIDFont, PDFUnicodeNotDefined
 from pdfminer.pdfinterp import PDFContentParser, PDFPageInterpreter, PDFResourceManager
 from pdfminer.pdfpage import PDFPage
 from pdfminer.pdfparser import PDFParser
-from pdfminer.pdftypes import PDFStream, resolve1, stream_value
-from pdfminer.psparser import PSEOF, PSKeyword, PSLiteral, keyword_name, literal_name
+from pdfminer.pdftypes import PDFObjRef, PDFStream, resolve1, stream_value
+from pdfminer.psparser import LIT, PSEOF, PSKeyword, PSLiteral, keyword_name, literal_name
+from pdfminer.utils import MATRIX_IDENTITY, apply_matrix_pt, decode_text, mult_matrix
 
 
 MAX_PDF_BYTES = 64 * 1024 * 1024
 MAX_PAGES = 1000
+MAX_ANNOTATIONS = 10_000
 MAX_CONTENT_BYTES = 256 * 1024 * 1024
 MAX_OPERATORS = 5_000_000
 MAX_PATHS = 1_000_000
@@ -60,6 +63,10 @@ MAX_CMAP_BYTES = 2 * 1024 * 1024
 MAX_CMAP_ENTRIES = 65536
 MAX_CMAP_REPLACEMENT = 256
 MAX_TEXT_CHARACTERS = 1_000_000
+MAX_COPY_TEXT_BYTES = 1_000_000
+MAX_LAYER_GROUPS = 4096
+MAX_LAYER_DEPTH = 32
+MAX_LAYER_STEPS = 100_000
 
 BLACK = (0.0, 0.0, 0.0)
 
@@ -70,6 +77,119 @@ class SolarEdgePdfError(ValueError):
     def __init__(self, code, detail=""):
         super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code
+
+
+def _layer_value(value):
+    # Resolve only an indirection chain here. Expression recursion is separately bounded.
+    seen = set()
+    while isinstance(value, PDFObjRef):
+        if value.objid in seen or len(seen) >= MAX_LAYER_DEPTH:
+            raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "layer reference cycle or depth")
+        seen.add(value.objid)
+        value = value.resolve()
+    return value
+
+
+def _layer_dict(value):
+    value = _layer_value(value)
+    if not isinstance(value, dict):
+        raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "layer dictionary")
+    return value
+
+
+def _layer_list(value, limit=MAX_LAYER_GROUPS):
+    value = _layer_value(value)
+    if not isinstance(value, list):
+        raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "layer array")
+    if len(value) > limit:
+        raise SolarEdgePdfError("PDF_RESOURCE_LIMIT", "layer array")
+    return value
+
+
+class _DefaultLayers:
+    """Document-local default view and bounded membership evaluation."""
+
+    def __init__(self, properties):
+        self.states = {}
+        self.memberships = {}
+        self.steps = 0
+        if properties is None:
+            return
+        props = _layer_dict(properties)
+        default = _layer_dict(props.get("D"))
+        base = _layer_value(default.get("BaseState", LIT("ON")))
+        if base not in (LIT("ON"), LIT("OFF")) or _layer_value(default.get("AS", [])) != []:
+            raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "unsupported default view settings")
+        for group in _layer_list(props.get("OCGs")):
+            if (not isinstance(group, PDFObjRef)
+                    or _layer_dict(group).get("Type") is not LIT("OCG")
+                    or group.objid in self.states):
+                raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "invalid group registration")
+            self.states[group.objid] = base is LIT("ON")
+        overrides = set()
+        for enabled, key in ((True, "ON"), (False, "OFF")):
+            for group in _layer_list(default.get(key, [])):
+                self._group_state(group)
+                if group.objid in overrides:
+                    raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "duplicate group override")
+                overrides.add(group.objid)
+                self.states[group.objid] = enabled
+
+    def _group_state(self, group):
+        if not isinstance(group, PDFObjRef) or group.objid not in self.states:
+            raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "unknown layer group")
+        return self.states[group.objid]
+
+    def _visit(self, amount=1):
+        self.steps += amount
+        if self.steps > MAX_LAYER_STEPS:
+            raise SolarEdgePdfError("PDF_RESOURCE_LIMIT", "layer evaluation")
+
+    def _expression(self, value, depth=0):
+        self._visit()
+        if depth >= MAX_LAYER_DEPTH:
+            raise SolarEdgePdfError("PDF_RESOURCE_LIMIT", "layer expression depth")
+        if depth and isinstance(value, PDFObjRef) and value.objid in self.states:
+            return self._group_state(value)
+        expression = _layer_list(value)
+        if not expression:
+            raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "empty layer expression")
+        op, *entries = expression
+        if op is LIT("Not") and len(entries) == 1:
+            return not self._expression(entries[0], depth + 1)
+        if op not in (LIT("And"), LIT("Or")) or len(entries) < 2:
+            raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "invalid layer expression")
+        # Validate every operand, even when the first resolves the Boolean result.
+        states = [self._expression(entry, depth + 1) for entry in entries]
+        return all(states) if op is LIT("And") else any(states)
+
+    def visible(self, value):
+        if isinstance(value, PDFObjRef):
+            if value.objid in self.states:
+                return self._group_state(value)
+            if value.objid in self.memberships:
+                return self.memberships[value.objid]
+        self._visit()
+        membership = _layer_dict(value)
+        if _layer_value(membership.get("Type", LIT("OCMD"))) is not LIT("OCMD"):
+            raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "invalid layer membership")
+        if "VE" in membership:
+            result = self._expression(membership["VE"])
+        else:
+            groups = membership.get("OCGs")
+            values = _layer_value(groups)
+            entries = _layer_list(values) if isinstance(values, list) else [groups]
+            policy = _layer_value(membership.get("P", LIT("AnyOn")))
+            if not entries or policy not in (LIT("AnyOn"), LIT("AllOn"), LIT("AnyOff"), LIT("AllOff")):
+                raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "invalid layer membership policy")
+            self._visit(len(entries))
+            states = [self._group_state(group) for group in entries]
+            if policy in (LIT("AnyOff"), LIT("AllOff")):
+                states = [not state for state in states]
+            result = all(states) if policy in (LIT("AllOn"), LIT("AllOff")) else any(states)
+        if isinstance(value, PDFObjRef):
+            self.memberships[value.objid] = result
+        return result
 
 
 def _bounded_auxiliary_data(stream, limit):
@@ -161,6 +281,20 @@ class PagePrimitives:
     curves: list = field(default_factory=list)
     letters: list = field(default_factory=list)
     paths: list = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class StrokeInk:
+    page: int
+    bounds: tuple[float, float, float, float]
+    space: str
+    colorant: str | None
+    components: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class _Separation:
+    colorant: str
 
 
 def _num(value):
@@ -315,13 +449,18 @@ def _cid_truetype_metrics(font):
 class _PrimitiveDevice(PDFTextDevice):
     """Collects painted paths (feed B) and letters (feed C)."""
 
-    def __init__(self, rsrcmgr, out):
+    def __init__(self, rsrcmgr, out, *, page=1, stroke_inks=None):
         super().__init__(rsrcmgr)
         self.out = out
         self.segments = 0
         self.paint_colors = None  # set by the interpreter before each paint
+        self.page = page
+        self.stroke_inks = stroke_inks
+        self.stroke_color = None
+        self.visible = True
         self._cid_metrics = {}
         self.text_characters = 0
+        self.schedule_geometry = None
 
     def paint_path(self, graphicstate, stroke, fill, evenodd, path):
         paths = self.out.paths
@@ -330,6 +469,8 @@ class _PrimitiveDevice(PDFTextDevice):
         self.segments += len(path)
         if self.segments > MAX_SEGMENTS:
             raise SolarEdgePdfError("TOO_MANY_SEGMENTS", str(MAX_SEGMENTS))
+        if not self.visible:
+            return
         a, b, c, d, e, f = self.ctm
         min_x = min_y = math.inf
         max_x = max_y = -math.inf
@@ -374,6 +515,13 @@ class _PrimitiveDevice(PDFTextDevice):
         fill_rgb, stroke_rgb = self.paint_colors
         paths.append((bool(fill), bool(stroke), bbox,
                       fill_rgb if fill else None, stroke_rgb if stroke else None))
+        if stroke and bbox is not None and self.stroke_inks is not None:
+            space, components = self.stroke_color
+            if isinstance(space, _Separation):
+                ink = StrokeInk(self.page, bbox, "Separation", space.colorant, components)
+            else:
+                ink = StrokeInk(self.page, bbox, space, None, components)
+            self.stroke_inks.append(ink)
 
     def render_char(self, matrix, font, fontsize, scaling, rise, cid, ncs, graphicstate):
         letters = self.out.letters
@@ -389,12 +537,20 @@ class _PrimitiveDevice(PDFTextDevice):
         if self.text_characters + len(value) > MAX_TEXT_CHARACTERS:
             raise SolarEdgePdfError("RESOURCE_LIMIT", "extracted text characters")
         self.text_characters += len(value)
+        if not self.visible:
+            return adv
         a, b, c, d, e, f = matrix
         x = c * rise + e
         y = d * rise + f
         # PdfPig: Width of the rectangle (0, 0)-(w, 0) pushed through the rendering matrix.
         width = math.hypot(a * adv + x - x, b * adv + y - y)
         letters.append((value, x, y, width))
+        if self.schedule_geometry is not None:
+            dx, dy = a * adv, b * adv
+            length = math.hypot(dx, dy)
+            direction = (dx / length, dy / length) if 0 < length < math.inf else None
+            first, _ = self.schedule_geometry
+            self.schedule_geometry = first or ((x, y), direction), ((x + dx, y + dy), direction)
         return adv
 
     def _glyph_width(self, font, cid):
@@ -428,6 +584,121 @@ _ARG_COUNTS = {"m": 2, "l": 2, "c": 6, "v": 4, "y": 4, "re": 4, "RG": 3, "rg": 3
 _PAINT_OPS = {"S", "s", "f", "F", "f*", "B", "B*", "b", "b*"}
 
 
+@dataclass(frozen=True)
+class CopyTextMismatch:
+    page: int
+    visible_id: str
+    copy_text: str
+    x: float
+    y: float
+
+
+@dataclass
+class _ReplacementSpan:
+    start: int
+    text: str
+    nonpainting: bool = False
+
+
+class _CopyTextAudit:
+    def __init__(self, approved_ids):
+        self.approved_ids = frozenset(approved_ids)
+        self.findings = []
+        self.page = 0
+        self.bytes_read = 0
+
+    def decode(self, value):
+        self.bytes_read += len(value)
+        if self.bytes_read > MAX_COPY_TEXT_BYTES:
+            raise SolarEdgePdfError("PDF_RESOURCE_LIMIT", "replacement text bytes")
+        try:
+            if value.startswith(b"\xfe\xff"):
+                return value[2:].decode("utf-16-be")
+            if value.startswith(b"\xef\xbb\xbf"):
+                return value[3:].decode("utf-8")
+            return decode_text(value)
+        except UnicodeDecodeError as exc:
+            raise SolarEdgePdfError("BAD_ACTUAL_TEXT", "invalid text encoding") from exc
+
+    def finish(self, span, letters):
+        if span.nonpainting or span.start == len(letters):
+            return
+        visible_id = "".join(letter[0] for letter in letters[span.start:])
+        if visible_id in self.approved_ids and visible_id != span.text:
+            _, x, y, _ = letters[span.start]
+            self.findings.append(CopyTextMismatch(self.page, visible_id, span.text, x, y))
+
+
+@dataclass(frozen=True, slots=True)
+class PageTagPlacement:
+    tag: str
+    x: float
+    y: float
+
+
+@dataclass(frozen=True)
+class PageScheduleMatch:
+    page: int
+    expected: tuple[str, ...] | None
+    observed: tuple[str, ...] | None
+
+    @property
+    def matches(self) -> bool:
+        return self.expected == self.observed
+
+
+class _PageScheduleAudit:
+    def __init__(self, approved_pages):
+        self.approved_ids = frozenset(itertools.chain.from_iterable(approved_pages))
+        self.sorted_ids = sorted(self.approved_ids)
+        self.placements: list[PageTagPlacement] = []
+        self.pending = None
+
+    def _has_longer_id(self, text):
+        index = bisect_left(self.sorted_ids, text)
+        if index < len(self.sorted_ids) and self.sorted_ids[index] == text:
+            index += 1
+        return index < len(self.sorted_ids) and self.sorted_ids[index].startswith(text)
+
+    def _record(self, tag, position):
+        if tag in self.approved_ids:
+            self.placements.append(PageTagPlacement(tag, *position))
+
+    def break_run(self):
+        if self.pending is not None:
+            tag, position, _ = self.pending
+            self._record(tag, position)
+            self.pending = None
+
+    def observe(self, letters, start, geometry):
+        tag = "".join(letters[index][0] for index in range(start, len(letters)))
+        (position, direction), end = geometry
+        if self.pending is not None:
+            prefix, origin, (previous_end, previous_direction) = self.pending
+            # Permit PDF decimal rounding on a shared, directed baseline.
+            continuous = (direction is not None and previous_direction is not None
+                          and math.dist(previous_direction, direction) <= 1e-6
+                          and math.dist(previous_end, position) <= 0.01)
+            combined = prefix + tag
+            separate_ids = prefix in self.approved_ids and tag in self.approved_ids
+            if continuous and not separate_ids and (
+                    combined in self.approved_ids or self._has_longer_id(combined)):
+                tag, position = combined, origin
+                self.pending = None
+            else:
+                self.break_run()
+        if self._has_longer_id(tag):
+            self.pending = tag, position, end
+        else:
+            self._record(tag, position)
+
+    def finish_page(self):
+        self.break_run()
+        placements = tuple(self.placements)
+        self.placements.clear()
+        return placements
+
+
 class _PrimitiveInterpreter(PDFPageInterpreter):
     """pdfminer interpreter that also records feed A and tracks colour exactly.
 
@@ -435,13 +706,23 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
     with its own q/Q stack: (stroke_space, stroke_components, fill_space, fill_components).
     """
 
-    def __init__(self, rsrcmgr, device, out, counter, depth=0):
+    def __init__(self, rsrcmgr, device, out, counter, layers, depth=0, *, appearance=False,
+                 copy_audit=None, schedule_audit=None):
         super().__init__(rsrcmgr, device)
         self.out = out
         self.counter = counter
         self.depth = depth
+        self.appearance = appearance
+        self.layers = layers
+        self.marked_content = []
+        self.copy_audit = copy_audit
+        self.schedule_audit = schedule_audit
+        self.replacement_span = None
+        self.raw_pending = ([], []) if layers.states else None
+        self.records_raw = depth == 0 or (appearance and depth == 1) or bool(layers.states)
         self.color = ("DeviceGray", (0.0,), "DeviceGray", (0.0,))
-        self.color_stack = []
+        self.text_alpha = (1.0, 1.0)  # fill, stroke
+        self.paint_stack = []
         # Feed A state: never reset by q/Q, S or BT, exactly as the converter keeps it.
         self.raw_stroke = BLACK
         self.raw_point = None
@@ -450,8 +731,11 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         if self.depth + 1 > MAX_FORM_DEPTH:
             raise SolarEdgePdfError("FORM_TOO_DEEP", str(MAX_FORM_DEPTH))
         child = _PrimitiveInterpreter(self.rsrcmgr, self.device, self.out, self.counter,
-                                      self.depth + 1)
+                                      self.layers, self.depth + 1, appearance=self.appearance,
+                                      copy_audit=self.copy_audit, schedule_audit=self.schedule_audit)
         child.color = self.color
+        child.text_alpha = self.text_alpha
+        child.replacement_span = self.replacement_span
         return child
 
     # ---- execution with bounds and strict operands ----
@@ -464,6 +748,9 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
             total += len(stream.get_data())
             if total > MAX_CONTENT_BYTES:
                 raise SolarEdgePdfError("CONTENT_TOO_LARGE", str(MAX_CONTENT_BYTES))
+        self.counter[1] += total
+        if self.counter[1] > MAX_CONTENT_BYTES:
+            raise SolarEdgePdfError("CONTENT_TOO_LARGE", str(MAX_CONTENT_BYTES))
         try:
             parser = PDFContentParser(streams)
         except PSEOF:
@@ -480,6 +767,8 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
             if self.counter[0] > MAX_OPERATORS:
                 raise SolarEdgePdfError("TOO_MANY_OPERATORS", str(MAX_OPERATORS))
             name = keyword_name(obj)
+            if self.appearance and name in ("W", "W*"):
+                raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "explicit clipping path")
             expected = _ARG_COUNTS.get(name)
             if expected is not None and len(self.argstack) < expected:
                 raise SolarEdgePdfError("MISSING_OPERANDS", name)
@@ -489,38 +778,99 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
                 self.argstack = []
                 continue
             nargs = func.__code__.co_argcount - 1
-            if nargs:
-                args = self.pop(nargs)
-                if len(args) != nargs:
-                    raise SolarEdgePdfError("MISSING_OPERANDS", name)
-                if name in _PAINT_OPS:
-                    self._set_paint_colors()
-                func(*args)
-            else:
-                if name in _PAINT_OPS:
-                    self._set_paint_colors()
-                func()
+            args = self.pop(nargs) if nargs else []
+            if len(args) != nargs:
+                raise SolarEdgePdfError("MISSING_OPERANDS", name)
+            if name in _PAINT_OPS:
+                self._set_paint_colors()
+            func(*args)
+            if self.raw_pending is not None and (name in _PAINT_OPS or name == "n"):
+                self._finish_raw_path(name)
             self.argstack = []
+        if self.marked_content:
+            raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "unclosed marked content")
+
+    @property
+    def visible(self):
+        return not self.marked_content or self.marked_content[-1][0]
+
+    def _begin_marked_content(self, visible, properties=None):
+        if len(self.marked_content) >= MAX_LAYER_DEPTH:
+            raise SolarEdgePdfError("PDF_RESOURCE_LIMIT", "marked content depth")
+        visible = self.visible and visible
+        previous = self.replacement_span
+        if self.copy_audit is not None and visible and previous is None:
+            self.replacement_span = self._open_replacement_span(properties)
+        self.marked_content.append((visible, previous))
+
+    def _open_replacement_span(self, properties):
+        if isinstance(properties, PSLiteral):
+            named = _layer_value(self.resources.get("Properties"))
+            properties = named.get(literal_name(properties)) if isinstance(named, dict) else None
+        properties = _layer_value(properties)
+        if not isinstance(properties, dict) or "ActualText" not in properties:
+            return None
+        replacement = _layer_value(properties["ActualText"])
+        if not isinstance(replacement, bytes):
+            raise SolarEdgePdfError("BAD_ACTUAL_TEXT", "replacement must be a PDF string")
+        return _ReplacementSpan(len(self.out.letters), self.copy_audit.decode(replacement))
+
+    def do_BMC(self, tag):
+        self._begin_marked_content(True)
+
+    def do_BDC(self, tag, properties):
+        if tag is LIT("OC"):
+            if isinstance(properties, PSLiteral):
+                properties = _layer_dict(self.resources.get("Properties")).get(literal_name(properties))
+            self._begin_marked_content(self.layers.visible(properties), properties)
+        else:
+            self._begin_marked_content(True, properties)
+
+    def do_EMC(self):
+        if not self.marked_content:
+            raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "unbalanced marked content")
+        _, previous = self.marked_content.pop()
+        span = self.replacement_span
+        if span is not previous:
+            self.copy_audit.finish(span, self.out.letters)
+        self.replacement_span = previous
 
     # ---- colour tracking (feed B) ----
     def _set_paint_colors(self):
+        self.device.visible = self.visible
         s_space, s_comp, f_space, f_comp = self.color
         self.device.paint_colors = (f_comp if f_space == "DeviceRGB" else None,
                                     s_comp if s_space == "DeviceRGB" else None)
+        if self.device.stroke_inks is not None:
+            self.device.stroke_color = (s_space, s_comp)
 
     def do_q(self):
         super().do_q()
-        self.color_stack.append(self.color)
+        self.paint_stack.append((self.color, self.text_alpha))
 
     def do_Q(self):
         super().do_Q()
-        if self.color_stack:
-            self.color = self.color_stack.pop()
+        if self.paint_stack:
+            self.color, self.text_alpha = self.paint_stack.pop()
+
+    def do_gs(self, name):
+        if (self.copy_audit is None and self.schedule_audit is None) or not isinstance(name, PSLiteral):
+            return
+        states = resolve1(self.resources.get("ExtGState"))
+        state = resolve1(states.get(literal_name(name))) if isinstance(states, dict) else None
+        if not isinstance(state, dict):
+            return
+        fill, stroke = self.text_alpha
+        fill = _num(resolve1(state.get("ca", fill)))
+        stroke = _num(resolve1(state.get("CA", stroke)))
+        if not (0 <= fill <= 1 and 0 <= stroke <= 1):
+            raise SolarEdgePdfError("BAD_OPERAND", "text opacity outside [0, 1]")
+        self.text_alpha = (fill, stroke)
 
     def do_RG(self, r, g, b):
         rgb = (_num(r), _num(g), _num(b))
         self.color = ("DeviceRGB", rgb, self.color[2], self.color[3])
-        if self.depth == 0:
+        if self.records_raw:
             self.raw_stroke = rgb
 
     def do_rg(self, r, g, b):
@@ -544,6 +894,15 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         key = literal_name(name) if isinstance(name, PSLiteral) else None
         if key in _DEVICE_SPACES:
             return key
+        if key is not None and self.device.stroke_inks is not None:
+            spaces = resolve1(self.resources.get("ColorSpace"))
+            definition = resolve1(spaces.get(key)) if isinstance(spaces, dict) else None
+            if (isinstance(definition, list) and definition
+                    and resolve1(definition[0]) is LIT("Separation")):
+                colorant = resolve1(definition[1]) if len(definition) == 4 else None
+                if not isinstance(colorant, PSLiteral):
+                    raise SolarEdgePdfError("BAD_COLORSPACE", str(key))
+                return _Separation(literal_name(colorant))
         space = self.csmap.get(key) if key is not None else None
         if space is None or space.name not in _DEVICE_SPACES:
             raise SolarEdgePdfError("COLORSPACE_UNSUPPORTED", str(key))
@@ -551,13 +910,22 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
 
     def do_CS(self, name):
         space = self._space(name)
-        self.color = (space, _INITIAL[space], self.color[2], self.color[3])
+        components = (1.0,) if isinstance(space, _Separation) else _INITIAL[space]
+        self.color = (space, components, self.color[2], self.color[3])
 
     def do_cs(self, name):
         space = self._space(name)
-        self.color = (self.color[0], self.color[1], space, _INITIAL[space])
+        components = (1.0,) if isinstance(space, _Separation) else _INITIAL[space]
+        self.color = (self.color[0], self.color[1], space, components)
 
     def _components(self, space):
+        if isinstance(space, _Separation):
+            if len(self.argstack) != 1:
+                raise SolarEdgePdfError("BAD_OPERAND", "Separation requires one tint")
+            tint = _num(self.argstack[0])
+            if not 0 <= tint <= 1:
+                raise SolarEdgePdfError("BAD_OPERAND", "Separation tint outside [0, 1]")
+            return (tint,)
         n = _DEVICE_SPACES[space]
         if len(self.argstack) < n:
             raise SolarEdgePdfError("MISSING_OPERANDS", "SC")
@@ -578,53 +946,68 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         self.do_sc()
 
     # ---- path construction: pdfminer path (feed B) plus the raw feed A ----
-    def _flip(self, y):
-        return self.out.page_height - y
+    def _record_raw(self, feed, record):
+        target = self.out.lines if feed == 0 else self.out.curves
+        if self.raw_pending is not None:
+            target = self.raw_pending[feed]
+            if len(target) >= MAX_SEGMENTS:
+                raise SolarEdgePdfError("PDF_RESOURCE_LIMIT", "unpainted layer geometry")
+        target.append(record)
+
+    def _finish_raw_path(self, paint):
+        lines, curves = self.raw_pending
+        if paint != "n" and self.visible:
+            self.out.lines.extend(lines)
+            self.out.curves.extend(curves)
+        lines.clear()
+        curves.clear()
+        self.raw_point = None
+
+    def _raw_xy(self, x, y):
+        # Layered layouts may paint wiring inside translated forms. Place it
+        # on the page so the visible wire and its panel share coordinates.
+        if self.appearance or self.raw_pending is not None:
+            x, y = apply_matrix_pt(self.ctm, (x, y))
+        return x, self.out.page_height - y
 
     def do_m(self, x, y):
         xf, yf = _num(x), _num(y)
         self.curpath.append(("m", xf, yf))
-        if self.depth == 0:
-            self.raw_point = (xf, self._flip(yf))
+        if self.records_raw:
+            self.raw_point = self._raw_xy(xf, yf)
 
     def do_l(self, x, y):
         xf, yf = _num(x), _num(y)
         self.curpath.append(("l", xf, yf))
-        if self.depth == 0 and self.raw_point is not None:
-            end = (xf, self._flip(yf))
-            self.out.lines.append((self.raw_point[0], self.raw_point[1], end[0], end[1],
-                                   self.raw_stroke))
+        if self.raw_point is not None:
+            end = self._raw_xy(xf, yf)
+            self._record_raw(0, (*self.raw_point, *end, self.raw_stroke))
             self.raw_point = end
 
     def do_c(self, x1, y1, x2, y2, x3, y3):
         v = (_num(x1), _num(y1), _num(x2), _num(y2), _num(x3), _num(y3))
         self.curpath.append(("c",) + v)
-        if self.depth == 0 and self.raw_point is not None:
-            flip = self._flip
-            end = (v[4], flip(v[5]))
-            self.out.curves.append((self.raw_point[0], self.raw_point[1], v[0], flip(v[1]),
-                                    v[2], flip(v[3]), end[0], end[1], self.raw_stroke))
+        if self.raw_point is not None:
+            end = self._raw_xy(*v[4:6])
+            self._record_raw(1, (*self.raw_point, *self._raw_xy(*v[0:2]),
+                                 *self._raw_xy(*v[2:4]), *end, self.raw_stroke))
             self.raw_point = end
 
     def do_v(self, x2, y2, x3, y3):
         v = (_num(x2), _num(y2), _num(x3), _num(y3))
         self.curpath.append(("v",) + v)
-        if self.depth == 0 and self.raw_point is not None:
-            flip = self._flip
+        if self.raw_point is not None:
             start = self.raw_point
-            end = (v[2], flip(v[3]))
-            self.out.curves.append((start[0], start[1], start[0], start[1], v[0], flip(v[1]),
-                                    end[0], end[1], self.raw_stroke))
+            end = self._raw_xy(*v[2:4])
+            self._record_raw(1, (*start, *start, *self._raw_xy(*v[0:2]), *end, self.raw_stroke))
             self.raw_point = end
 
     def do_y(self, x1, y1, x3, y3):
         v = (_num(x1), _num(y1), _num(x3), _num(y3))
         self.curpath.append(("y",) + v)
-        if self.depth == 0 and self.raw_point is not None:
-            flip = self._flip
-            end = (v[2], flip(v[3]))
-            self.out.curves.append((self.raw_point[0], self.raw_point[1], v[0], flip(v[1]),
-                                    end[0], end[1], end[0], end[1], self.raw_stroke))
+        if self.raw_point is not None:
+            end = self._raw_xy(*v[2:4])
+            self._record_raw(1, (*self.raw_point, *self._raw_xy(*v[0:2]), *end, *end, self.raw_stroke))
             self.raw_point = end
 
     def do_re(self, x, y, w, h):
@@ -651,20 +1034,210 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
                 isinstance(o, bytes) or (isinstance(o, (int, float)) and not isinstance(o, bool))
                 for o in seq):
             raise SolarEdgePdfError("BAD_TEXT_OPERAND")
-        super().do_TJ(seq)
+        self.device.visible = self.visible
+        first_letter = len(self.out.letters)
+        mode = self.textstate.render
+        fill, stroke = self.text_alpha
+        paints = ((mode in (0, 2, 4, 6) and fill > 0)
+                  or (mode in (1, 2, 5, 6) and stroke > 0))
+        if self.schedule_audit is not None and paints and self.visible:
+            self.device.schedule_geometry = (None, None)
+        try:
+            super().do_TJ(seq)
+            geometry = self.device.schedule_geometry
+        finally:
+            self.device.schedule_geometry = None
+        if not paints and self.replacement_span is not None and len(self.out.letters) > first_letter:
+            self.replacement_span.nonpainting = True
+        if self.schedule_audit is not None:
+            if not paints or not self.visible:
+                self.schedule_audit.break_run()
+            elif len(self.out.letters) > first_letter:
+                self.schedule_audit.observe(self.out.letters, first_letter, geometry)
 
     def do_Do(self, xobjid):
+        if self.schedule_audit is not None:
+            self.schedule_audit.break_run()
+        if not self.visible:
+            return
+        reference = self.xobjmap.get(literal_name(xobjid))
+        if reference is not None:
+            xobj = stream_value(reference)
+            if "OC" in xobj.attrs and not self.layers.visible(xobj.get("OC")):
+                return
         saved = self.device.ctm
-        super().do_Do(xobjid)
-        self.device.set_ctm(saved)
+        try:
+            super().do_Do(xobjid)
+        finally:
+            self.device.set_ctm(saved)
+            if self.schedule_audit is not None:
+                self.schedule_audit.break_run()
 
 
 def _count_pages(doc):
     return sum(1 for _ in itertools.islice(PDFPage.create_pages(doc), MAX_PAGES + 1))
 
 
+def _appearance_numbers(value, size):
+    values = resolve1(value)
+    if not isinstance(values, (list, tuple)) or len(values) != size:
+        raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "invalid rectangle or matrix")
+    return tuple(_num(resolve1(item)) for item in values)
+
+
+def _stamp_placement(annot, appearance):
+    left, bottom, right, top = _appearance_numbers(annot.get("Rect"), 4)
+    left, right = _ordered(left, right)
+    bottom, top = _ordered(bottom, top)
+    x0, y0, x1, y1 = _appearance_numbers(appearance.get("BBox"), 4)
+    matrix = _appearance_numbers(appearance.get("Matrix", MATRIX_IDENTITY), 6)
+    a, b, c, d, _, _ = matrix
+    if x0 == x1 or y0 == y1 or not ((a and d and not (b or c)) or (b and c and not (a or d))):
+        raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "unsupported form bounds or orientation")
+    corners = [apply_matrix_pt(matrix, (x, y)) for x in (x0, x1) for y in (y0, y1)]
+    xs, ys = zip(*corners)
+    width, height = max(xs) - min(xs), max(ys) - min(ys)
+    if not (0 < width < math.inf and 0 < height < math.inf and right > left and top > bottom):
+        raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "empty rectangle or bounds")
+    sx, sy = (right - left) / width, (top - bottom) / height
+    fit = (sx, 0, 0, sy, left - min(xs) * sx, bottom - min(ys) * sy)
+    placement = mult_matrix(matrix, fit)
+    if not all(math.isfinite(value) for value in placement):
+        raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "nonfinite placement")
+    return placement, (left, bottom, right, top)
+
+
+def _check_stamp_bounds(out, bounds, starts):
+    left, bottom, right, top = bounds
+    left, bottom = max(0, left), max(0, bottom)
+    right, top = min(out.page_width, right), min(out.page_height, top)
+
+    def inside(x, y):
+        return left <= x <= right and bottom <= y <= top
+
+    paths, letters, lines, curves = starts
+    for i in range(paths, len(out.paths)):
+        bbox = out.paths[i][2]
+        if bbox is not None and not (inside(*bbox[:2]) and inside(*bbox[2:])):
+            raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "clipped path")
+    for i in range(letters, len(out.letters)):
+        _, x, y, _ = out.letters[i]
+        if not inside(x, y):
+            raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "clipped text origin")
+    for records, start in ((out.lines, lines), (out.curves, curves)):
+        for i in range(start, len(records)):
+            points = records[i][:-1]
+            if any(not inside(points[j], out.page_height - points[j + 1])
+                   for j in range(0, len(points), 2)):
+                raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "clipped wire")
+
+
+def _render_printable_stamps(page, resources, interpreter):
+    annotations = resolve1(page.annots)
+    if not isinstance(annotations, list):
+        return
+    interpreter.counter[2] += len(annotations)
+    if interpreter.counter[2] > MAX_ANNOTATIONS:
+        raise SolarEdgePdfError("RESOURCE_LIMIT", "annotation count")
+    for reference in annotations:
+        annot = resolve1(reference)
+        if not isinstance(annot, dict) or resolve1(annot.get("Subtype")) is not LIT("Stamp"):
+            continue
+        flags = resolve1(annot.get("F", 0))
+        if type(flags) is not int or not flags & 4 or flags & 2:  # Print, Hidden
+            continue
+        if "OC" in annot and not interpreter.layers.visible(annot["OC"]):
+            continue
+        appearances = resolve1(annot.get("AP"))
+        if not isinstance(appearances, dict):
+            continue
+        normal = resolve1(appearances.get("N"))
+        if isinstance(normal, dict):
+            state = resolve1(annot.get("AS"))
+            normal = resolve1(normal.get(literal_name(state))) if isinstance(state, PSLiteral) else None
+        if normal is None:
+            continue
+        if not isinstance(normal, PDFStream) or resolve1(normal.get("Subtype")) is not LIT("Form"):
+            raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "normal appearance is not a form")
+        if "OC" in normal.attrs and not interpreter.layers.visible(normal.get("OC")):
+            continue
+        form_resources = resolve1(normal.get("Resources", resources))
+        if not isinstance(form_resources, dict):
+            raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "invalid resources")
+        # Annotation graphics state starts independently of the page and other stamps.
+        out = interpreter.out
+        starts = (len(out.paths), len(out.letters), len(out.lines), len(out.curves))
+        placement, bounds = _stamp_placement(annot, normal)
+        stamp = _PrimitiveInterpreter(interpreter.rsrcmgr, interpreter.device, out,
+                                      interpreter.counter, interpreter.layers, depth=1, appearance=True)
+        stamp.render_contents(form_resources, [normal], ctm=placement)
+        _check_stamp_bounds(out, bounds, starts)
+
+
 def extract_primitives(pdf_bytes):
-    """Read page one of ``pdf_bytes`` into :class:`PagePrimitives`. Fails closed."""
+    """Read page one of the report for callers using the original extractor."""
+    return next(_iter_primitives(pdf_bytes, first_only=True))
+
+
+def iter_page_primitives(pdf_bytes):
+    """Read each physical page independently with shared report limits."""
+    return _iter_primitives(pdf_bytes, first_only=False)
+
+
+def audit_copy_text(pdf_bytes, approved_ids):
+    """Find exact approved glyph IDs with differing PDF ActualText in page content.
+
+    Coordinates are the first glyph's baseline in PDF user space. This follows the
+    default optional-content layers and includes form invocations. Each span must
+    contain one complete ID. Annotation appearances and OCR are outside the audit.
+    """
+    audit = _CopyTextAudit(approved_ids)
+    for _ in _iter_primitives(pdf_bytes, first_only=False, copy_audit=audit):
+        pass
+    return audit.findings
+
+
+def iter_page_placements(pdf_bytes, approved_pages):
+    """Return approved painted tag origins per page, in PDF content order and PDF points."""
+    audit = _PageScheduleAudit(approved_pages)
+    for _ in _iter_primitives(pdf_bytes, first_only=False, schedule_audit=audit):
+        yield audit.finish_page()
+
+
+def audit_page_schedule(pdf_bytes, approved_pages):
+    """Compare exact scheduled glyph IDs on each physical PDF page.
+
+    An ID may span adjacent painting text shows on the same directed baseline.
+    Order follows the first glyph baseline, descending Y then ascending X in PDF
+    user space. The audit
+    follows default layers and includes forms in page content. Annotation
+    appearances, clipping and OCR are outside its scope. A missing page or
+    schedule entry is None, while a present empty sequence is ().
+    """
+    expected = tuple(tuple(page) for page in approved_pages)
+    observed = [
+        tuple(item.tag for item in sorted(page, key=lambda item: (-item.y, item.x)))
+        for page in iter_page_placements(pdf_bytes, expected)
+    ]
+    return [
+        PageScheduleMatch(page, approved, painted)
+        for page, (approved, painted) in enumerate(itertools.zip_longest(expected, observed), start=1)
+    ]
+
+
+def audit_stroke_inks(pdf_bytes):
+    """Return source colorants and path bounds for strokes on each physical page.
+
+    Bounds are in PDF user space. The diagnostic follows the default layers and
+    does not render color, apply clipping, or infer detail IDs from geometry.
+    """
+    inks: list[StrokeInk] = []
+    for _ in _iter_primitives(pdf_bytes, first_only=False, stroke_inks=inks):
+        pass
+    return inks
+
+
+def _iter_primitives(pdf_bytes, *, first_only, copy_audit=None, stroke_inks=None, schedule_audit=None):
     if not isinstance(pdf_bytes, (bytes, bytearray)):
         raise SolarEdgePdfError("NOT_BYTES")
     if len(pdf_bytes) > MAX_PDF_BYTES:
@@ -678,30 +1251,47 @@ def extract_primitives(pdf_bytes):
             raise SolarEdgePdfError("NO_PAGES")
         if pages > MAX_PAGES:
             raise SolarEdgePdfError("TOO_MANY_PAGES", str(MAX_PAGES))
-        page = next(PDFPage.create_pages(doc))
-        # Raw-coordinate parity is proven only for default units. Never silently scale labels.
-        unit = page.attrs.get("UserUnit", 1)
-        if type(unit) not in (int, float) or unit != 1:
-            raise SolarEdgePdfError("PAGE_UNIT_UNSUPPORTED")
-        x0, y0, x1, y1 = (_num(v) for v in page.mediabox)
-        crop = tuple(_num(v) for v in page.cropbox)
-        if (x0, y0) != (0.0, 0.0) or crop != (x0, y0, x1, y1):
-            raise SolarEdgePdfError("PAGE_BOX_UNSUPPORTED", f"{page.mediabox} {page.cropbox}")
-        if page.rotate % 360 != 0:
-            raise SolarEdgePdfError("PAGE_ROTATION_UNSUPPORTED", str(page.rotate))
-        out = PagePrimitives(page_width=x1 - x0, page_height=y1 - y0)
+        layers = _DefaultLayers(doc.catalog.get("OCProperties"))
+        page_objects = PDFPage.create_pages(doc)
+        if first_only:
+            page_objects = itertools.islice(page_objects, 1)
         rsrcmgr = _ResourceManager(caching=True)
-        device = _PrimitiveDevice(rsrcmgr, out)
-        interpreter = _PrimitiveInterpreter(rsrcmgr, device, out, [0])
-        interpreter.render_contents(resolve1(page.resources) or {}, page.contents,
-                                    ctm=(1, 0, 0, 1, 0, 0))
+        counter = [0, 0, 0]  # operators, decoded content bytes, annotation entries
+        paths = segments = letters = text_characters = 0
+        for page_number, page in enumerate(page_objects, start=1):
+            # Raw-coordinate parity is proven only for default units. Never silently scale labels.
+            unit = page.attrs.get("UserUnit", 1)
+            if type(unit) not in (int, float) or unit != 1:
+                raise SolarEdgePdfError("PAGE_UNIT_UNSUPPORTED")
+            x0, y0, x1, y1 = (_num(v) for v in page.mediabox)
+            crop = tuple(_num(v) for v in page.cropbox)
+            if (x0, y0) != (0.0, 0.0) or crop != (x0, y0, x1, y1):
+                raise SolarEdgePdfError("PAGE_BOX_UNSUPPORTED", f"{page.mediabox} {page.cropbox}")
+            if page.rotate % 360 != 0:
+                raise SolarEdgePdfError("PAGE_ROTATION_UNSUPPORTED", str(page.rotate))
+            out = PagePrimitives(page_width=x1 - x0, page_height=y1 - y0)
+            device = _PrimitiveDevice(rsrcmgr, out, page=page_number, stroke_inks=stroke_inks)
+            if copy_audit is not None:
+                copy_audit.page = page_number
+            interpreter = _PrimitiveInterpreter(rsrcmgr, device, out, counter, layers,
+                                                copy_audit=copy_audit, schedule_audit=schedule_audit)
+            resources = resolve1(page.resources) or {}
+            interpreter.render_contents(resources, page.contents, ctm=MATRIX_IDENTITY)
+            _render_printable_stamps(page, resources, interpreter)
+            paths += len(out.paths)
+            segments += device.segments
+            letters += len(out.letters)
+            text_characters += device.text_characters
+            if (paths > MAX_PATHS or segments > MAX_SEGMENTS or letters > MAX_LETTERS
+                    or text_characters > MAX_TEXT_CHARACTERS):
+                raise SolarEdgePdfError("PDF_RESOURCE_LIMIT", "report primitives")
+            yield out
     except SolarEdgePdfError:
         raise
     except (RecursionError, MemoryError) as exc:
         raise SolarEdgePdfError("PDF_RESOURCE_LIMIT", type(exc).__name__) from exc
     except Exception as exc:  # pdfminer raises many unrelated types on malformed input
         raise SolarEdgePdfError("MALFORMED_PDF", f"{type(exc).__name__}: {exc}"[:200]) from exc
-    return out
 
 
 def extract_primitives_from_file(path):

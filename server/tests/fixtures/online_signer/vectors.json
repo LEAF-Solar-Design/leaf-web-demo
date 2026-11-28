@@ -1,0 +1,12 @@
+[
+  {"name":"nested-order","input":{"z":{"b":2,"a":1},"a":[{"y":false,"x":null}]},"expected":"{\"a\":[{\"x\":null,\"y\":false}],\"z\":{\"a\":1,\"b\":2}}"},
+  {"name":"unicode","input":{"é":"雪😀"},"expected":"{\"é\":\"雪😀\"}"},
+  {"name":"codepoint-order","input":{"😀":1,"":2,"a":3},"expected":"{\"a\":3,\"\":2,\"😀\":1}"},
+  {"name":"short-escapes","input":"\"\\\b\f\n\r\t/","expected":"\"\\\"\\\\\\b\\f\\n\\r\\t/\""},
+  {"name":"control-escapes","input":"\u0000\u0001\u001f","expected":"\"\\u0000\\u0001\\u001f\""},
+  {"name":"integers","input":[0,-1,9223372036854775808,-9223372036854775809],"expected":"[0,-1,9223372036854775808,-9223372036854775809]"},
+  {"name":"empty-containers","input":{"b":[],"a":{}},"expected":"{\"a\":{},\"b\":[]}"},
+  {"name":"literal-html-and-separators","input":"<>&'\u2028\u2029","expected":"\"<>&'\u2028\u2029\""},
+  {"name":"scalar-values","input":[true,false,null,"",1],"expected":"[true,false,null,\"\",1]"},
+  {"name":"prefix-order","input":{"aa":2,"a":1,"":0},"expected":"{\"\":0,\"a\":1,\"aa\":2}"}
+]

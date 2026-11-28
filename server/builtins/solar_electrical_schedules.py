@@ -35,24 +35,26 @@ Host inputs (none of which the graph carries) are fixed and stated in the summar
   - StringSizerStandard: the standard result of the drawing's verified global sizing evidence, else none.
     Zone sizing is not ported (the kernel reads the global response): SCHEDULES_ZONE_SIZING_UNSUPPORTED.
   - UseL2Collectors: the graph settings.use_l2_collectors value.
-  - UseOptimizers false; a SolarEdge inverter refuses SCHEDULES_OPTIMIZERS_UNSUPPORTED (optimizer section not
-    ported).
+  - UseOptimizers false for the legacy calculation tables. Designs with SolarEdge equipment export a
+    saved string assignment table instead. It includes every saved string and reports physical inputs
+    directly from the validated graph, without inferring equipment ratings or optimizer sizing.
   - SessionCableIndexHasFeeders: true exactly when the graph holds a feeder route. The plugin lists feeders from
     its in-memory cable index; the graph's routes are Studio's persisted index, so a reopened design keeps its
     feeder schedule. The feeder schedule still needs UseL2Collectors and a non-empty L1ToL2Assignments.
 
-Fails closed: every check runs before the kernel; a stale design refuses SOLAR_OUTPUT_NOT_CURRENT. Linear in
-strings, inverters, routes and route points (one dict per lookup); feeders are bounded by the validator (one per
-L1) and every table by the kernel's MAX_SCHEDULE_ROWS. Pure: no I/O, no clock, no network; inputs never mutated.
+Fails closed: a stale design refuses SOLAR_OUTPUT_NOT_CURRENT. The legacy projection uses indexed lookups,
+and saved assignment rows sort by string ID. Feeders are bounded by the validator (one per L1) and tables by
+the kernel's MAX_SCHEDULE_ROWS. Pure: no I/O, no clock, no network; inputs never mutated.
 """
 import json
+import math
 import re
 
 import solar_artifacts
 import solar_electrical_state_bridge as bridge
 import solar_sizing_client
 from solar_design_graph import GraphValidationError, _bounded_json
-from solar_solve_results import require_current_export
+from solar_solve_results import _slot_tables, require_current_export
 from solar_sizing_client import units_resolved
 
 kernel = bridge._load_sibling("solar_inverter_outputs")
@@ -125,6 +127,24 @@ def label_mismatches(graph):
 
 def schedule_state(graph, source):
     """The bridge's state plus panel counts, homerun and feeder cable rows (see the module docstring)."""
+    state, _ = _schedule_inputs(graph, source)
+    return state
+
+
+def _panel_power_watts(graph):
+    rated_frames = {frame["id"]: frame["module_power_watts"]
+                    for frame in graph["frames"] if frame["module_power_watts"] > 0}
+    if not rated_frames:
+        return {}
+    powers = {panel["id"]: rated_frames[panel["frame_ref"]]
+              for panel in graph["panels"] if panel["frame_ref"] in rated_frames}
+    for frame_id, slots in _slot_tables(graph).items():
+        if frame_id in rated_frames:
+            powers.update(dict.fromkeys(slots.ids, rated_frames[frame_id]))
+    return powers
+
+
+def _schedule_inputs(graph, source):
     try:
         state, binding = bridge.state_from_graph(graph)
     except bridge.ElectricalBridgeError as error:
@@ -142,11 +162,16 @@ def schedule_state(graph, source):
     handles = {bound["id"]: handle for handle, bound in binding["strings"].items()}
     numbers = {inverter["id"]: inverter["number"] for inverter in graph["inverters"]}
     circuits = {}
+    string_power_watts = {}
+    panel_power_watts = _panel_power_watts(graph) if source == "topology" else {}
     for row in state["rows"]["string-assignment"]:
         string = strings[binding["strings"][row["string"]]["id"]]
         row["_detail"]["panel_count"] = str(string["module_count"])
         if source == "labels":
             row["_detail"]["circuit"] = string["circuit_tag"]
+        panels = string["ordered_panel_refs"]
+        if string["inverter_ref"] is not None and panels and all(ref in panel_power_watts for ref in panels):
+            string_power_watts[row["string"]] = math.fsum(panel_power_watts[ref] for ref in panels)
         circuits[row["string"]] = row["_detail"]["circuit"]
     cables = []
     for k, route in enumerate(graph["routes"], 1):
@@ -174,7 +199,7 @@ def schedule_state(graph, source):
                        "_pair": f"cable:schedules-{k}"})
     state["rows"]["cable"] = cables
     try:
-        return st.validate_state(state)
+        return st.validate_state(state), string_power_watts
     except (st.InverterStateError, ValueError):
         raise GraphValidationError("SCHEDULES_MAPPING_FAILED") from None
 
@@ -185,17 +210,56 @@ def render(document):
                       allow_nan=False).encode("utf-8")
 
 
+def _saved_string_schedule(graph, source, record):
+    strings = graph["strings"]
+    if len(strings) > kernel.MAX_SCHEDULE_ROWS:
+        raise GraphValidationError("SCHEDULES_KERNEL_REFUSED")
+    inverters = {item["id"]: item for item in graph["inverters"]}
+    inputs = {item["string_ref"]: item for inverter in inverters.values()
+              for item in inverter["input_assignments"]}
+    rows = []
+    for string in sorted(strings, key=lambda item: item["id"]):
+        collector = inverters.get(string["inverter_ref"])
+        upstream = inverters.get(collector.get("l2_ref")) if collector else None
+        slot = inputs.get(string["id"])
+        rows.append([
+            string["id"], string["circuit_tag"], str(string["module_count"]),
+            "Assigned" if slot is not None else "Unassigned",
+            collector["id"] if collector else "", str(collector["number"]) if collector else "",
+            slot["mppt_letter"] if slot is not None else "", str(slot["input_number"]) if slot is not None else "",
+            upstream["id"] if upstream else "", str(upstream["number"]) if upstream else "",
+        ])
+    title = "STRING SCHEDULE"
+    headers = ["String ID", "Saved circuit label", "Modules", "Assignment", "Collector ID", "Collector number",
+               "MPPT", "Input index (0-based)", "Upstream inverter ID", "Upstream inverter number"]
+    try:
+        cells = kernel.table_cells({"title": title, "headers": headers, "rows": rows})
+    except kernel.InverterOutputError:
+        raise GraphValidationError("SCHEDULES_KERNEL_REFUSED") from None
+    summary = {
+        "circuit_source": source, "strings": len(rows), "modules": sum(item["module_count"] for item in strings),
+        "label_mismatches": label_mismatches(graph), "inverter_record": "unused" if record is not None else "absent",
+        "sizing": "not-applicable", "module_catalog": "unresolved",
+    }
+    if not rows:
+        return {"status": "no-schedules", "reason": "no-schedule-data", **summary}
+    content = render({"schema": SCHEMA, "circuit_source": source, "tables": [{"title": title, "cells": cells}]})
+    return solar_artifacts.ArtifactOutput({"status": "written", "tables": [title], **summary},
+                                         MEDIA_TYPE, FILENAME, content)
+
+
 def run(graph, params):
     source, record = _request(params)
     if not units_resolved(graph):
         raise GraphValidationError("UNRESOLVED_UNITS")
     graph = require_current_export(graph)
     if any(inverter["is_solaredge"] for inverter in graph["inverters"]):
-        raise GraphValidationError("SCHEDULES_OPTIMIZERS_UNSUPPORTED")
+        return _saved_string_schedule(graph, source, record)
     sizer = _sizer(graph)
-    state = schedule_state(graph, source)
+    state, string_power_watts = _schedule_inputs(graph, source)
     host = {"UseL2Collectors": graph["settings"]["use_l2_collectors"], "UseOptimizers": False,
             "InverterCatalogRecord": record, "ModuleCatalogRecord": None, "StringSizerStandard": sizer,
+            "StringPowerWattsByHandle": string_power_watts,
             "SessionCableIndexHasFeeders": any(row["cable_kind"] == FEEDER_KIND for row in state["rows"]["cable"])}
     try:
         records = kernel.string_records(state, host)

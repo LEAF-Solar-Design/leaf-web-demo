@@ -8,6 +8,8 @@ import { actionRunMatches, canonicalRecordsPointer, recordsAtOriginal, createInt
 import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
 import { IntegrationSetupPanel } from './IntegrationSetupPanel.jsx'
 import { DatasetDerivationPanel, DatasetDerivationEvidence, isImportedMaterialDataset } from './DatasetDerivationPanel.jsx'
+import { SavedDatasetViewExport } from './SavedDatasetViewExport.jsx'
+import { SavedDatasetViewComparison } from './SavedDatasetViewComparison.jsx'
 import { ManualWorkflowRunPanel } from './ManualWorkflowRunPanel.jsx'
 import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
@@ -27,7 +29,7 @@ import { DuplicateOriginalMember, parseProjectOriginalJson } from './projectOrig
 const STUDIO_CHROME_OCCLUDERS = Object.freeze(STUDIO_DRAWING_OCCLUDERS.filter(([selector]) =>
   ['header.top', '#drafting-ribbon', '.bar.bar-command-line', 'footer.foot-bar'].includes(selector)))
 
-const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, readIdentity: null, previousRead: false, action: null, historical: false, pending: '', error: '', errorOperation: null, notice: '' })
+const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, readIdentity: null, previousRead: false, action: null, historical: false, comparison: null, pending: '', error: '', errorOperation: null, notice: '' })
 const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null, window: '', query: null, grouping: false, pairKey: '', providerField: '', firstProvider: '', secondProvider: '' })
 const xKinds = ['date', 'instant', 'number', 'count']
 const yKinds = ['number', 'count', 'money', 'ratio', 'duration']
@@ -300,7 +302,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       setState({ ...empty(), identity, error: 'You do not have permission to view these integrations.' })
       setForm(blankForm())
       setRevision('')
-    } else setState((old) => ({ ...old, ...(error?.status === 401 ? { read: null, readIdentity: null, previousRead: false } : {}),
+    } else setState((old) => ({ ...old, ...(error?.status === 401 ? { read: null, readIdentity: null, previousRead: false, comparison: null } : {}),
       pending: '', error: humanizeError(error), errorOperation, retryable: error?.retryable !== false && ![401, 403, 404, 409, 422].includes(error?.status) }))
   }
   useLayoutEffect(() => {
@@ -428,7 +430,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     const retain = state.readIdentity === readIdentity && state.read && ['ready', 'empty', 'partial', 'stale'].includes(state.read.status)
     ctx.action?.controller.abort()
     ctx.action = null
-    setState((old) => ({ ...old, selected: record, historical, read: retain ? old.read : null, readIdentity, previousRead: Boolean(retain), action: null }))
+    setState((old) => ({ ...old, selected: record, historical, read: retain ? old.read : null, readIdentity, previousRead: Boolean(retain), action: null, comparison: null }))
     if (record.element.kind === 'integration.action') {
       if (historical || !['owner', 'editor'].includes(state.scope?.projectRole)) return
       const binding = { record, ctx, request, controller: new AbortController(), grantRevision: null, availability: 'unavailable' }
@@ -457,12 +459,32 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   }
   function loadHistoricalRevision(selected, requestedRevision) {
     operation('Loading historical recipe…', async (ctx) => {
-      setState((old) => ({ ...old, ...(requestedRevision !== selected.revision
+      setState((old) => ({ ...old, comparison: null, ...(requestedRevision !== selected.revision
         ? { read: null, readIdentity: null, previousRead: false }
         : { previousRead: Boolean(old.read && ['ready', 'empty', 'partial', 'stale'].includes(old.read.status)) }) }))
       const record = await client.getElement(projectId, selected.element.id, { revision: requestedRevision, signal: ctx.controller.signal })
       if (current(ctx)) { setForm(blankForm()); await readView(record, true, ctx) }
     }, false, 'view')
+  }
+  function compareWithCurrent(historical) {
+    operation('Comparing recipe revisions…', async (ctx) => {
+      setState((old) => ({ ...old, comparison: null }))
+      const options = { signal: ctx.controller.signal }
+      const latest = await client.getElement(projectId, historical.element.id, options)
+      if (!current(ctx)) return
+      if (!latest.element.kind.startsWith('dataset.') || latest.revision < historical.revision) {
+        throw new Error('A current dataset recipe is unavailable for this comparison.')
+      }
+      // Start both queries at the first page regardless of the displayed page.
+      const [earlierRead, latestRead] = await Promise.all([historical, latest].map(({ element }) =>
+        client.queryDataset(projectId, element.dataset_ref, DatasetQueryV1.parse(element.query), options)))
+      if (!current(ctx)) return
+      if ([earlierRead, latestRead].some(read => read.status === 'forbidden')) {
+        fail({ status: 403 }, ctx)
+        return
+      }
+      setState((old) => ({ ...old, comparison: { historical, latest, earlierRead, latestRead } }))
+    }, false, 'comparison')
   }
   const currentAction = (binding) => current(binding.ctx) && binding.ctx.action === binding &&
     viewGeneration.current === binding.request && !binding.controller.signal.aborted
@@ -797,7 +819,15 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
                 {state.action.availability !== 'ready' && <button disabled={pending} onClick={() => refreshAction(state.action.binding)}>Retry action authority</button>}
               </>}
             </> : <>
+            {state.historical && <button type="button" disabled={pending} onClick={() => compareWithCurrent(state.selected)}>
+              Compare with current recipe
+            </button>}
+            {state.comparison && <SavedDatasetViewComparison {...state.comparison} />}
             {state.read && state.previousRead && <p role="status">Previous result. {pending ? 'Refreshing view…' : 'The latest read failed; showing the last successful result.'}</p>}
+            <SavedDatasetViewExport projectId={projectId} record={state.selected} read={state.read}
+              dataset={state.datasets.find(item => referenceKey(item.reference) === referenceKey(state.selected.element.dataset_ref))}
+              readIdentity={state.readIdentity} scopeKey={context.current?.cacheIdentity} preferences={preferences}
+              unavailable={pending || state.previousRead || Boolean(viewError)} guard={guardSchedulePreview} />
             {viewError && <div role="alert" ref={viewFeedback} tabIndex={-1}><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={retryView}>Retry view</button>}</div>}
             {(state.read || pending) && <DatasetElement element={state.selected.element} read={state.read} preferences={preferences} isLoading={pending}
               onRetry={retryView}

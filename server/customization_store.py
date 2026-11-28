@@ -13,9 +13,10 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, Optional, Sequence
 from uuid import uuid4
 
 from customization_audit import audit_payload, event_from_row
@@ -35,6 +36,7 @@ from customization_models import (
     EffectiveCatalog,
     IdempotencyReplayError,
     InvalidTransitionError,
+    RetryTargetInvalidError,
     TERMINAL_STATES,
     require_bounded,
     require_nonempty,
@@ -60,6 +62,10 @@ CREATE TABLE IF NOT EXISTS customization_change_sets (
   approver_subject TEXT,
   change_kind TEXT NOT NULL DEFAULT 'create' CHECK (change_kind IN ('create', 'revise')),
   target_tool_name TEXT,
+  plan_json TEXT,
+  plan_digest TEXT,
+  plan_confirmation_id TEXT,
+  compile_summary_json TEXT,
   request_description TEXT,
   request_fingerprint TEXT,
   authority_session_id TEXT,
@@ -67,6 +73,7 @@ CREATE TABLE IF NOT EXISTS customization_change_sets (
   request_graph_input TEXT,
   base_catalog_change_set_id TEXT,
   catalog_record_fields_json TEXT,
+  tool_target TEXT,
   stage_attempt INTEGER NOT NULL DEFAULT 0,
   stage_lease_owner TEXT,
   stage_lease_expires_at INTEGER,
@@ -135,6 +142,23 @@ CREATE TABLE IF NOT EXISTS customization_stage_attempt_history (
   PRIMARY KEY (tenant_id, change_set_id, failed_version, attempt)
 );
 
+CREATE TABLE IF NOT EXISTS customization_stage_grants (
+  change_set_id TEXT PRIMARY KEY REFERENCES customization_change_sets(change_set_id),
+  tenant_id TEXT NOT NULL,
+  author_subject TEXT NOT NULL,
+  tier TEXT NOT NULL,
+  binding_digest TEXT NOT NULL,
+  authority_session_id TEXT NOT NULL,
+  authority_turn_id TEXT NOT NULL,
+  issued_ms BIGINT NOT NULL,
+  expires_ms BIGINT NOT NULL,
+  dispatches INTEGER NOT NULL DEFAULT 0 CHECK (dispatches BETWEEN 0 AND 2),
+  last_attempt INTEGER NOT NULL DEFAULT 0,
+  revoked_ms BIGINT,
+  revoked_reason TEXT,
+  CHECK (expires_ms > issued_ms)
+);
+
 CREATE TABLE IF NOT EXISTS customization_confirmations (
   confirmation_id TEXT PRIMARY KEY,
   tenant_id TEXT,
@@ -151,12 +175,36 @@ CREATE TABLE IF NOT EXISTS customization_publication_requests (
   confirmation_id TEXT,
   status TEXT NOT NULL DEFAULT 'awaiting_approval',
   reason_code TEXT,
+  review_details_json TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   PRIMARY KEY (tenant_id, change_set_id),
   FOREIGN KEY (change_set_id) REFERENCES customization_change_sets(change_set_id),
   FOREIGN KEY (confirmation_id) REFERENCES customization_confirmations(confirmation_id)
 );
+
+CREATE TABLE IF NOT EXISTS customization_review_decisions (
+  tenant_id TEXT NOT NULL,
+  change_set_id TEXT NOT NULL,
+  staged_commit TEXT NOT NULL CHECK (length(staged_commit) = 40),
+  catalog_digest TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK (decision IN ('approve', 'request_changes')),
+  approval_kind TEXT NOT NULL CHECK (approval_kind IN ('self', 'independent')),
+  approver_subject TEXT NOT NULL,
+  approver_role TEXT NOT NULL CHECK (approver_role IN ('owner', 'reviewer')),
+  comment TEXT CHECK (length(comment) <= 500),
+  confirmation_id TEXT,
+  decided_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (tenant_id, change_set_id, staged_commit)
+);
+CREATE TRIGGER IF NOT EXISTS customization_review_no_update
+  BEFORE UPDATE ON customization_review_decisions BEGIN
+    SELECT RAISE(ABORT, 'Customization review decisions are immutable');
+  END;
+CREATE TRIGGER IF NOT EXISTS customization_review_no_delete
+  BEFORE DELETE ON customization_review_decisions BEGIN
+    SELECT RAISE(ABORT, 'Customization review decisions are immutable');
+  END;
 
 CREATE TABLE IF NOT EXISTS customization_removal_requests (
   tenant_id TEXT NOT NULL,
@@ -217,6 +265,14 @@ class CustomizationRepository:
         raise NotImplementedError
 
     def publish(self, **kwargs: object) -> EffectiveCatalog:
+        raise NotImplementedError
+
+    def publish_branch(self, **kwargs: object) -> ChangeSet:
+        raise NotImplementedError
+
+    def list_published_branch_change_sets(
+        self, *, tenant_id: str, tool_name: Optional[str] = None, limit: int = 200,
+    ) -> list[ChangeSet]:
         raise NotImplementedError
 
 
@@ -308,6 +364,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "ALTER TABLE customization_publication_requests "
                 "ADD COLUMN reason_code TEXT"
             )
+        if "review_details_json" not in columns:
+            conn.execute("ALTER TABLE customization_publication_requests ADD COLUMN review_details_json TEXT")
 
     @staticmethod
     def _migrate_change_bindings(conn: sqlite3.Connection) -> None:
@@ -324,6 +382,10 @@ class SQLiteCustomizationStore(CustomizationRepository):
             conn.execute(
                 "ALTER TABLE customization_change_sets ADD COLUMN target_tool_name TEXT"
             )
+        if "tool_target" not in columns:
+            conn.execute(
+                "ALTER TABLE customization_change_sets ADD COLUMN tool_target TEXT"
+            )
 
     @staticmethod
     def _migrate_stage_jobs(conn: sqlite3.Connection) -> None:
@@ -333,6 +395,10 @@ class SQLiteCustomizationStore(CustomizationRepository):
         }
         definitions = {
             "request_description": "TEXT",
+            "plan_json": "TEXT",
+            "plan_digest": "TEXT",
+            "plan_confirmation_id": "TEXT",
+            "compile_summary_json": "TEXT",
             "request_fingerprint": "TEXT",
             "authority_session_id": "TEXT",
             "authority_turn_id": "TEXT",
@@ -353,6 +419,11 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 conn.execute(
                     f"ALTER TABLE customization_change_sets ADD COLUMN {name} {definition}"
                 )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS customization_change_sets_plan_idx "
+            "ON customization_change_sets (tenant_id, plan_confirmation_id) "
+            "WHERE plan_confirmation_id IS NOT NULL"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS customization_stage_claim_idx "
             "ON customization_change_sets "
@@ -412,6 +483,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
         change_set_id: Optional[str] = None,
         change_kind: str = "create",
         target_tool_name: Optional[str] = None,
+        tool_target: Optional[str] = None,
         authority_session_id: Optional[str] = None,
         authority_turn_id: Optional[str] = None,
         request_graph_input: Optional[str] = None,
@@ -424,6 +496,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
             workspace_contract_digest=workspace_contract_digest,
             author_subject=author_subject, change_set_id=change_set_id,
             change_kind=change_kind, target_tool_name=target_tool_name,
+            tool_target=tool_target,
             request_description=None, request_fingerprint=None,
             authority_session_id=authority_session_id,
             authority_turn_id=authority_turn_id,
@@ -438,9 +511,12 @@ class SQLiteCustomizationStore(CustomizationRepository):
         base_catalog_change_set_id: Optional[str] = None,
         **kwargs: object,
     ) -> tuple[ChangeSet, bool]:
-        request_description = require_bounded(
-            request_description, "request_description", 8000
-        )
+        if kwargs.get("plan_json") is not None:
+            require_nonempty(request_description, "request_description")
+            if len(request_description.encode("utf-8")) > 32768:
+                raise ValueError("plan description exceeds 32768 bytes")
+        else:
+            require_bounded(request_description, "request_description", 8000)
         request_fingerprint = require_sha(
             request_fingerprint, 64, "request_fingerprint"
         )
@@ -464,8 +540,13 @@ class SQLiteCustomizationStore(CustomizationRepository):
         change_set_id: Optional[str] = None,
         change_kind: str = "create",
         target_tool_name: Optional[str] = None,
+        tool_target: Optional[str] = None,
         request_description: Optional[str],
         request_fingerprint: Optional[str],
+        plan_json: Optional[str] = None,
+        plan_digest: Optional[str] = None,
+        plan_confirmation_id: Optional[str] = None,
+        retry_of_change_set_id: Optional[str] = None,
         authority_session_id: Optional[str] = None,
         authority_turn_id: Optional[str] = None,
         request_graph_input: Optional[str] = None,
@@ -492,6 +573,14 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 target_tool_name or "", "target_tool_name", 64
             )
         with self._transaction() as conn:
+            if retry_of_change_set_id is not None:
+                failed = conn.execute(
+                    "SELECT 1 FROM customization_change_sets WHERE tenant_id = ? "
+                    "AND change_set_id = ? AND state = ? AND plan_digest = ?",
+                    (tenant_id, retry_of_change_set_id, ChangeState.FAILED.value, plan_digest),
+                ).fetchone()
+                if not failed:
+                    raise RetryTargetInvalidError("retry_target_invalid")
             existing = conn.execute(
                 "SELECT * FROM customization_change_sets WHERE tenant_id = ? AND idempotency_key = ?",
                 (tenant_id, idempotency_key),
@@ -505,8 +594,12 @@ class SQLiteCustomizationStore(CustomizationRepository):
                     and row.author_subject == author_subject
                     and row.change_kind == change_kind
                     and row.target_tool_name == target_tool_name
+                    and row.tool_target == tool_target
                     and row.request_fingerprint == request_fingerprint
                     and row.request_description == request_description
+                    and row.plan_confirmation_id == plan_confirmation_id
+                    and row.plan_digest == plan_digest
+                    and row.plan_json == plan_json
                     and row.authority_session_id == authority_session_id
                     and row.authority_turn_id == authority_turn_id
                     and row.request_graph_input == request_graph_input
@@ -515,6 +608,13 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 if not same_request:
                     raise IdempotencyReplayError("idempotency key belongs to a different change-set request")
                 return row, False
+            if plan_confirmation_id is not None:
+                spent = conn.execute(
+                    "SELECT 1 FROM customization_change_sets WHERE tenant_id = ? "
+                    "AND plan_confirmation_id = ?", (tenant_id, plan_confirmation_id),
+                ).fetchone()
+                if spent:
+                    raise IdempotencyReplayError("plan already reserved a change set")
             if request_graph_input is not None:
                 validate_graph_input(request_graph_input)
             if base_catalog_change_set_id is not None:
@@ -530,19 +630,20 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "INSERT INTO customization_change_sets "
                 "(change_set_id, tenant_id, idempotency_key, state, version, base_commit, "
                 "desired_platform_release, workspace_contract_digest, author_subject, "
-                "request_description, request_fingerprint, authority_session_id, authority_turn_id) "
-                "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "request_description, request_fingerprint, authority_session_id, authority_turn_id, tool_target) "
+                "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (change_set_id, tenant_id, idempotency_key, ChangeState.CREATED.value,
                  base_commit, desired_platform_release, workspace_contract_digest,
                  author_subject, request_description, request_fingerprint,
-                 authority_session_id, authority_turn_id),
+                 authority_session_id, authority_turn_id, tool_target),
             )
             conn.execute(
                 "UPDATE customization_change_sets SET change_kind = ?, target_tool_name = ?, "
-                "request_graph_input = ?, base_catalog_change_set_id = ? "
+                "request_graph_input = ?, base_catalog_change_set_id = ?, "
+                "plan_json = ?, plan_digest = ?, plan_confirmation_id = ? "
                 "WHERE change_set_id = ?",
                 (change_kind, target_tool_name, request_graph_input,
-                 base_catalog_change_set_id, change_set_id),
+                 base_catalog_change_set_id, plan_json, plan_digest, plan_confirmation_id, change_set_id),
             )
             row = self._find_change_set(conn, tenant_id, change_set_id)
             self._append_audit(conn, row, None, ChangeState.CREATED, idempotency_key)
@@ -552,6 +653,27 @@ class SQLiteCustomizationStore(CustomizationRepository):
         self.initialize()
         with self._connection() as conn:
             return self._find_change_set(conn, tenant_id, change_set_id)
+
+    def list_published_branch_change_sets(
+        self, *, tenant_id: str, tool_name: Optional[str] = None, limit: int = 200,
+    ) -> list[ChangeSet]:
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError("limit must be an integer from 1 to 500")
+        query = (
+            "SELECT * FROM customization_change_sets "
+            "WHERE tenant_id = ? AND tool_target = 'branch' AND state = ?"
+        )
+        params = [tenant_id, ChangeState.PUBLISHED.value]
+        if tool_name is not None:
+            query += " AND (target_tool_name = ? OR target_tool_name IS NULL)"
+            params.append(tool_name)
+        self.initialize()
+        with self._connection() as conn:
+            rows = conn.execute(
+                query + " ORDER BY updated_at DESC, change_set_id DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+            return [self._change_set(row) for row in rows]
 
     def get_change_set_by_idempotency(
         self, *, tenant_id: str, idempotency_key: str
@@ -567,8 +689,165 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 raise ChangeSetNotFoundError("change set was not found")
             return self._change_set(row)
 
+    def insert_stage_grant(
+        self, *, tenant_id: str, change_set_id: str, author_subject: str,
+        tier: str, binding_digest: str, authority_session_id: str,
+        authority_turn_id: str, issued_ms: int, expires_ms: int,
+    ) -> bool:
+        with self._transaction() as conn:
+            result = conn.execute(
+                "INSERT OR IGNORE INTO customization_stage_grants "
+                "(change_set_id, tenant_id, author_subject, tier, binding_digest, "
+                "authority_session_id, authority_turn_id, issued_ms, expires_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (change_set_id, tenant_id, author_subject, tier, binding_digest,
+                 authority_session_id, authority_turn_id, issued_ms, expires_ms),
+            )
+            if result.rowcount != 1:
+                return False
+            row = self._find_change_set(conn, tenant_id, change_set_id)
+            self._append_audit(conn, row, row.state, row.state,
+                               f"stage-grant-issued:{change_set_id}", "stage_grant_issued")
+            return True
+
+    def get_stage_grant(self, tenant_id: str, change_set_id: str) -> dict | None:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM customization_stage_grants "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (tenant_id, change_set_id),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def revoke_stage_grants_for_turn(
+        self, *, tenant_id: str, authority_session_id: str,
+        authority_turn_id: str, reason: str, now_ms: int,
+    ) -> int:
+        with self._transaction() as conn:
+            rows = conn.execute(
+                "UPDATE customization_stage_grants SET revoked_ms = ?, revoked_reason = ? "
+                "WHERE tenant_id = ? AND authority_session_id = ? "
+                "AND authority_turn_id = ? AND revoked_ms IS NULL RETURNING change_set_id",
+                (now_ms, reason, tenant_id, authority_session_id, authority_turn_id),
+            ).fetchall()
+            for grant in rows:
+                row = self._find_change_set(conn, tenant_id, grant["change_set_id"])
+                self._append_audit(conn, row, row.state, row.state,
+                                   f"stage-grant-cancelled:{row.change_set_id}",
+                                   "stage_grant_cancelled")
+            return len(rows)
+
+    def consume_stage_grant(
+        self, *, tenant_id: str, change_set_id: str, owner: str,
+        attempt: int, binding_digest: str, now_ms: int,
+    ) -> bool:
+        with self._transaction() as conn:
+            result = conn.execute(
+                "UPDATE customization_stage_grants SET dispatches = dispatches + 1, "
+                "last_attempt = ? WHERE tenant_id = ? AND change_set_id = ? "
+                "AND binding_digest = ? AND revoked_ms IS NULL AND expires_ms > ? "
+                "AND dispatches < 2 AND last_attempt < ? AND EXISTS "
+                "(SELECT 1 FROM customization_change_sets c WHERE c.tenant_id = ? "
+                "AND c.change_set_id = ? AND c.state = 'staging' "
+                "AND c.stage_lease_owner = ? AND c.stage_lease_expires_at > ? "
+                "AND c.stage_attempt = ?)",
+                (attempt, tenant_id, change_set_id, binding_digest, now_ms, attempt,
+                 tenant_id, change_set_id, owner, now_ms, attempt),
+            )
+            if result.rowcount != 1:
+                return False
+            row = self._find_change_set(conn, tenant_id, change_set_id)
+            self._append_audit(conn, row, row.state, row.state,
+                               f"stage-grant-consumed:{change_set_id}:{attempt}",
+                               "stage_grant_consumed")
+            return True
+
+    def withdraw_stage(
+        self, *, tenant_id: str, change_set_id: str, author_subject: str, now_ms: int,
+    ) -> dict[str, bool]:
+        with self._transaction() as conn:
+            row = self._find_change_set(conn, tenant_id, change_set_id)
+            if row.author_subject != author_subject:
+                return {"withdrawn": False, "revoked": False}
+            grant = conn.execute(
+                "SELECT dispatches, revoked_ms FROM customization_stage_grants "
+                "WHERE tenant_id = ? AND change_set_id = ? AND author_subject = ?",
+                (tenant_id, change_set_id, author_subject),
+            ).fetchone()
+            if grant is None:
+                return {"withdrawn": False, "revoked": False}
+            if grant["revoked_ms"] is not None:
+                return {"withdrawn": False, "revoked": True}
+            if row.state is not ChangeState.STAGING:
+                return {"withdrawn": False, "revoked": False}
+            result = conn.execute(
+                "UPDATE customization_stage_grants SET revoked_ms = ?, revoked_reason = 'withdrawn' "
+                "WHERE tenant_id = ? AND change_set_id = ? AND author_subject = ? "
+                "AND revoked_ms IS NULL",
+                (now_ms, tenant_id, change_set_id, author_subject),
+            )
+            if result.rowcount != 1:
+                return {"withdrawn": False, "revoked": False}
+            if (row.stage_attempt != 0 or grant["dispatches"] != 0
+                    or (row.stage_lease_owner and row.stage_lease_expires_at is not None
+                        and row.stage_lease_expires_at > now_ms)):
+                self._append_audit(conn, row, row.state, row.state,
+                                   f"stage-grant-withdrawn:{change_set_id}:{row.stage_attempt}",
+                                   "stage_grant_withdrawn")
+                return {"withdrawn": False, "revoked": True}
+            self._transition_row(
+                conn, row, ChangeState.FAILED, row.version,
+                f"stage-grant-withdrawn:{change_set_id}:{row.stage_attempt}",
+                expected_state=ChangeState.STAGING, reason_code="stage_grant_withdrawn",
+            )
+            conn.execute(
+                "UPDATE customization_change_sets SET stage_lease_owner = NULL, "
+                "stage_lease_expires_at = NULL, stage_error_code = 'stage_grant_withdrawn', "
+                "stage_error_message = NULL, stage_error_retryable = ?, stage_phase = 'failed', "
+                "stage_finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (False, tenant_id, change_set_id),
+            )
+            return {"withdrawn": True, "revoked": True}
+
+    def stage_queue_depth(self) -> int:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS depth FROM customization_change_sets "
+                "WHERE state = ? AND NOT EXISTS "
+                "(SELECT 1 FROM customization_removal_requests "
+                "WHERE customization_removal_requests.tenant_id = "
+                "customization_change_sets.tenant_id AND "
+                "customization_removal_requests.change_set_id = "
+                "customization_change_sets.change_set_id)",
+                (ChangeState.STAGING.value,),
+            ).fetchone()
+            return int(row["depth"])
+
+    def stage_queue_ahead(self, change: ChangeSet) -> int:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS ahead FROM customization_change_sets "
+                "WHERE state = ? AND NOT (tenant_id = ? AND change_set_id = ?) "
+                "AND NOT EXISTS (SELECT 1 FROM customization_removal_requests "
+                "WHERE customization_removal_requests.tenant_id = "
+                "customization_change_sets.tenant_id AND "
+                "customization_removal_requests.change_set_id = "
+                "customization_change_sets.change_set_id) "
+                "AND ((stage_lease_owner IS NOT NULL AND stage_lease_expires_at > ?) "
+                "OR created_at < ? OR (created_at = ? AND change_set_id < ?))",
+                (ChangeState.STAGING.value, change.tenant_id, change.change_set_id,
+                 int(time.time() * 1000), change.created_at, change.created_at,
+                 change.change_set_id),
+            ).fetchone()
+            return int(row["ahead"])
+
     def claim_stage(
-        self, *, owner: str, lease_seconds: float = 30.0
+        self, *, owner: str, lease_seconds: float = 30.0,
+        fair: bool = False, exclude_tenants: Sequence[str] = (),
     ) -> ChangeSet | None:
         owner = require_bounded(owner, "owner", 300)
         if lease_seconds <= 0:
@@ -576,6 +855,32 @@ class SQLiteCustomizationStore(CustomizationRepository):
         now_ms = int(time.time() * 1000)
         expires_ms = now_ms + int(lease_seconds * 1000)
         with self._transaction() as conn:
+            fair_sql = ""
+            fair_params = ()
+            order_sql = "created_at, change_set_id"
+            if fair:
+                fair_sql = (
+                    "AND NOT EXISTS (SELECT 1 FROM customization_change_sets AS live "
+                    "WHERE live.tenant_id = customization_change_sets.tenant_id "
+                    "AND live.change_set_id <> customization_change_sets.change_set_id "
+                    "AND live.state = ? AND live.stage_lease_owner IS NOT NULL "
+                    "AND live.stage_lease_expires_at > ?) "
+                )
+                fair_params = (ChangeState.STAGING.value, now_ms)
+                if exclude_tenants:
+                    fair_sql += "AND tenant_id NOT IN (" + ", ".join("?" for _ in exclude_tenants) + ") "
+                    fair_params += tuple(exclude_tenants)
+                last_service = (
+                    "COALESCE((SELECT MAX(served.stage_started_at) "
+                    "FROM customization_change_sets AS served "
+                    "WHERE served.tenant_id = customization_change_sets.tenant_id), '')"
+                )
+                # Virtual FIFO moves a tenant's next job behind every arrival
+                # before its last service, while new arrivals cannot starve it.
+                order_sql = (
+                    f"CASE WHEN created_at > {last_service} THEN created_at "
+                    f"ELSE {last_service} END, created_at, change_set_id"
+                )
             candidate = conn.execute(
                 "SELECT tenant_id, change_set_id FROM customization_change_sets "
                 "WHERE state = ? AND stage_next_attempt_at <= ? "
@@ -585,8 +890,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "customization_change_sets.tenant_id AND "
                 "customization_removal_requests.change_set_id = "
                 "customization_change_sets.change_set_id) "
-                "ORDER BY created_at, change_set_id LIMIT 1",
-                (ChangeState.STAGING.value, now_ms, now_ms),
+                + fair_sql + "ORDER BY " + order_sql + " LIMIT 1",
+                (ChangeState.STAGING.value, now_ms, now_ms) + fair_params,
             ).fetchone()
             if candidate is None:
                 return None
@@ -594,6 +899,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "UPDATE customization_change_sets SET stage_lease_owner = ?, "
                 "stage_lease_expires_at = ?, stage_heartbeat_at = ?, "
                 "stage_attempt = stage_attempt + 1, stage_phase = 'authoring', "
+                "compile_summary_json = NULL, "
                 "stage_error_code = NULL, stage_error_message = NULL, "
                 "stage_error_retryable = ?, "
                 "stage_started_at = COALESCE(stage_started_at, "
@@ -614,6 +920,32 @@ class SQLiteCustomizationStore(CustomizationRepository):
             return self._find_change_set(
                 conn, candidate["tenant_id"], candidate["change_set_id"]
             )
+
+    def stage_queue_stats(self) -> dict[str, int]:
+        self.initialize()
+        now = time.time()
+        now_ms = int(now * 1000)
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(CASE WHEN stage_lease_owner IS NOT NULL "
+                "AND stage_lease_expires_at > ? THEN 1 ELSE 0 END), 0) AS running, "
+                "COALESCE(SUM(CASE WHEN stage_lease_owner IS NOT NULL "
+                "AND stage_lease_expires_at > ? THEN 0 ELSE 1 END), 0) AS depth, "
+                "MIN(CASE WHEN stage_lease_owner IS NOT NULL "
+                "AND stage_lease_expires_at > ? THEN NULL ELSE created_at END) AS oldest "
+                "FROM customization_change_sets WHERE state = ? "
+                "AND NOT EXISTS (SELECT 1 FROM customization_removal_requests "
+                "WHERE customization_removal_requests.tenant_id = "
+                "customization_change_sets.tenant_id AND "
+                "customization_removal_requests.change_set_id = "
+                "customization_change_sets.change_set_id)",
+                (now_ms, now_ms, now_ms, ChangeState.STAGING.value),
+            ).fetchone()
+        oldest_wait_s = 0
+        if row["oldest"] is not None:
+            oldest = datetime.fromisoformat(row["oldest"].replace("Z", "+00:00"))
+            oldest_wait_s = max(0, int(now - oldest.replace(tzinfo=timezone.utc).timestamp()))
+        return {"running": int(row["running"]), "depth": int(row["depth"]), "oldest_wait_s": oldest_wait_s}
 
     def stage_failure_history(self, *, tenant_id: str, change_set_id: str) -> list[StageAttemptFailure]:
         with self._connection() as conn:
@@ -667,6 +999,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
             updated = conn.execute(
                 "UPDATE customization_change_sets SET state = ?, version = version + 1, "
                 "authority_session_id = ?, authority_turn_id = ?, stage_phase = 'queued', "
+                "compile_summary_json = NULL, "
                 "stage_next_attempt_at = 0, stage_error_code = NULL, stage_error_message = NULL, "
                 "stage_error_retryable = ?, stage_finished_at = NULL, "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
@@ -698,6 +1031,21 @@ class SQLiteCustomizationStore(CustomizationRepository):
                  ChangeState.STAGING.value, owner, now_ms),
             )
             return result.rowcount == 1
+
+    def record_compile_summary(
+        self, change: ChangeSet, summary_json: str, *, staged_commit: str | None,
+    ) -> None:
+        # The successful harness callback may have already staged this commit
+        # and released the lease before the HTTP response carries its history.
+        with self._transaction() as conn:
+            conn.execute(
+                "UPDATE customization_change_sets SET compile_summary_json = ? "
+                "WHERE tenant_id = ? AND change_set_id = ? AND tool_target = 'branch' "
+                "AND stage_attempt = ? AND compile_summary_json IS NULL "
+                "AND ((state = 'staging' AND version = ?) OR staged_commit = ?)",
+                (summary_json, change.tenant_id, change.change_set_id,
+                 change.stage_attempt, change.version, staged_commit),
+            )
 
     def complete_stage_claim(
         self, *, tenant_id: str, change_set_id: str, owner: str,
@@ -807,6 +1155,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
         stage_lease_owner: Optional[str] = None,
         stage_attempt: Optional[int] = None,
         catalog_record_fields_json: Optional[str] = None,
+        compile_summary_json: Optional[str] = None,
     ) -> ChangeSet:
         validation_failure = None
         try:
@@ -906,9 +1255,10 @@ class SQLiteCustomizationStore(CustomizationRepository):
             conn.execute(
                 "UPDATE customization_change_sets SET stage_lease_owner = NULL, "
                 "stage_lease_expires_at = NULL, stage_phase = 'staged', "
-                "stage_finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "stage_finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+                "compile_summary_json = COALESCE(compile_summary_json, ?) "
                 "WHERE tenant_id = ? AND change_set_id = ?",
-                (tenant_id, change_set_id),
+                (compile_summary_json, tenant_id, change_set_id),
             )
             return self._find_change_set(conn, tenant_id, change_set_id)
 
@@ -969,6 +1319,23 @@ class SQLiteCustomizationStore(CustomizationRepository):
                  published.workspace_contract_digest),
             )
             return self._effective_catalog(conn, tenant_id)
+
+    def publish_branch(
+        self, *, tenant_id: str, change_set_id: str, expected_version: int,
+        idempotency_key: str, approver_subject: str,
+    ) -> ChangeSet:
+        """Finish a dev publication without changing the effective catalog."""
+        with self._transaction() as conn:
+            row = self._find_change_set(conn, tenant_id, change_set_id)
+            if row.tool_target != "branch":
+                raise ChangeSetConflictError("branch publication requires a branch change set")
+            if (not row.staged_commit or not row.catalog_digest
+                    or not approver_subject or row.approver_subject != approver_subject):
+                raise ChangeSetConflictError("branch publication requires its prepared approval")
+            return self._transition_row(
+                conn, row, ChangeState.PUBLISHED, expected_version, idempotency_key,
+                expected_state=ChangeState.PUBLISHING, approver_subject=approver_subject,
+            )
 
     def get_effective_catalog(self, *, tenant_id: str) -> EffectiveCatalog:
         self.initialize()
@@ -1120,6 +1487,11 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 payload = json.loads(row["payload_json"])
             except (TypeError, json.JSONDecodeError):
                 continue
+            # Inline receipts belong to the review that records their decision.
+            # An interrupted review's receipt must expire without being picked
+            # up by a legacy publication continuation.
+            if "approval_kind" in payload:
+                continue
             expires_at = None
             if "expires_at" in payload:
                 try:
@@ -1145,6 +1517,77 @@ class SQLiteCustomizationStore(CustomizationRepository):
             }
         return None
 
+    def get_publication_request(self, *, tenant_id: str, change_set_id: str) -> dict | None:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM customization_publication_requests WHERE tenant_id = ? AND change_set_id = ?",
+                (tenant_id, change_set_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_review_decision(self, *, tenant_id: str, change_set_id: str, staged_commit: str) -> dict | None:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM customization_review_decisions "
+                "WHERE tenant_id = ? AND change_set_id = ? AND staged_commit = ?",
+                (tenant_id, change_set_id, staged_commit),
+            ).fetchone()
+        if row is None:
+            return None
+        decision = dict(row)
+        decision["change_set_id"] = str(decision["change_set_id"])
+        if decision["confirmation_id"] is not None:
+            decision["confirmation_id"] = str(decision["confirmation_id"])
+        if isinstance(decision["decided_at"], datetime):
+            decision["decided_at"] = decision["decided_at"].isoformat()
+        return decision
+
+    def record_review_decision(
+        self, *, tenant_id: str, change_set_id: str, staged_commit: str, catalog_digest: str,
+        decision: str, approval_kind: str, approver_subject: str, approver_role: str,
+        comment: str | None, confirmation_id: str | None,
+    ) -> str:
+        with self._transaction() as conn:
+            change = self._find_change_set(conn, tenant_id, change_set_id)
+            expected = ChangeState.PUBLISHED if decision == "approve" else ChangeState.STAGED
+            if (change.state, change.staged_commit, change.catalog_digest) != (expected, staged_commit, catalog_digest):
+                raise ChangeSetConflictError("review target changed")
+            if decision == "approve":
+                published_receipt = conn.execute(
+                    "SELECT 1 FROM customization_publication_requests p JOIN customization_confirmations c "
+                    "ON p.confirmation_id = c.confirmation_id WHERE p.tenant_id = ? AND p.change_set_id = ? "
+                    "AND p.confirmation_id = ? AND c.consumed = 1 AND p.status != 'denied'",
+                    (tenant_id, change_set_id, confirmation_id),
+                ).fetchone()
+                if published_receipt is None or change.approver_subject != approver_subject:
+                    raise ChangeSetConflictError("review confirmation did not publish this change")
+            row = conn.execute(
+                "INSERT INTO customization_review_decisions "
+                "(tenant_id, change_set_id, staged_commit, catalog_digest, decision, approval_kind, "
+                "approver_subject, approver_role, comment, confirmation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (tenant_id, change_set_id, staged_commit) DO NOTHING "
+                "RETURNING decided_at",
+                (tenant_id, change_set_id, staged_commit, catalog_digest, decision, approval_kind,
+                 approver_subject, approver_role, comment, confirmation_id),
+            ).fetchone()
+            if row is None:
+                raise IdempotencyReplayError("review already decided")
+            conn.execute(
+                "UPDATE customization_publication_requests SET review_details_json = NULL "
+                "WHERE tenant_id = ? AND change_set_id = ? AND review_details_json IS NOT NULL",
+                (tenant_id, change_set_id),
+            )
+            self._append_audit(
+                conn, replace(change, approver_subject=approver_subject), change.state, change.state,
+                f"review:{change_set_id}:{staged_commit}", "review_decided",
+                review_fields={"event": "review_decided", "decision": decision, "approval_kind": approval_kind,
+                               "approver_role": approver_role, "comment_len": len(comment or "")},
+            )
+            timestamp = row["decided_at"]
+            return timestamp.isoformat() if isinstance(timestamp, datetime) else timestamp
+
     def get_or_create_publication_request(
         self, *, tenant_id: str, change_set_id: str
     ) -> dict:
@@ -1168,7 +1611,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
             return dict(row)
 
     def bind_publication_confirmation(
-        self, *, tenant_id: str, change_set_id: str, confirmation_id: str
+        self, *, tenant_id: str, change_set_id: str, confirmation_id: str,
+        review_comment: str | None = None,
     ) -> dict:
         """Bind an already-issued exact approval to the durable continuation."""
         tenant_id = require_bounded(tenant_id, "tenant_id", 200)
@@ -1180,14 +1624,18 @@ class SQLiteCustomizationStore(CustomizationRepository):
         with self._transaction() as conn:
             change = self._find_change_set(conn, tenant_id, change_set_id)
             request = conn.execute(
-                "SELECT confirmation_id FROM customization_publication_requests "
+                "SELECT * FROM customization_publication_requests "
                 "WHERE tenant_id = ? AND change_set_id = ?",
                 (tenant_id, change_set_id),
             ).fetchone()
             if request is None:
                 raise ChangeSetNotFoundError("publication request was not found")
+            # A review may have denied the continuation since the publisher
+            # first read it. Never replace that denial with a fresh receipt.
+            if request["status"] == "denied":
+                return dict(request)
             if (
-                request["confirmation_id"] not in (None, confirmation_id)
+                request["confirmation_id"] != confirmation_id
                 and change.state is not ChangeState.STAGED
             ):
                 raise ChangeSetConflictError(
@@ -1204,10 +1652,11 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 )
             conn.execute(
                 "UPDATE customization_publication_requests "
-                "SET confirmation_id = ?, status = 'awaiting_approval', reason_code = NULL, "
+                "SET confirmation_id = ?, status = 'awaiting_approval', reason_code = NULL, review_details_json = ?, "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                 "WHERE tenant_id = ? AND change_set_id = ?",
-                (confirmation_id, tenant_id, change_set_id),
+                (confirmation_id, json.dumps({"comment": review_comment}) if review_comment is not None else None,
+                 tenant_id, change_set_id),
             )
             row = conn.execute(
                 "SELECT tenant_id, change_set_id, confirmation_id, status, reason_code, "
@@ -1219,14 +1668,22 @@ class SQLiteCustomizationStore(CustomizationRepository):
             return dict(row)
 
     def deny_publication_request(
-        self, *, tenant_id: str, change_set_id: str, reason_code: str
+        self, *, tenant_id: str, change_set_id: str, reason_code: str, review_details: dict | None = None,
     ) -> dict:
         """Deny one continuation while leaving its staged change reusable."""
         tenant_id = require_bounded(tenant_id, "tenant_id", 200)
         change_set_id = require_uuid(change_set_id)
         reason_code = require_bounded(reason_code, "reason_code", 200)
         with self._transaction() as conn:
-            self._find_change_set(conn, tenant_id, change_set_id)
+            change = self._find_change_set(conn, tenant_id, change_set_id)
+            if change.state is not ChangeState.STAGED:
+                raise ChangeSetConflictError("change set is no longer staged for denial")
+            request = conn.execute(
+                "SELECT * FROM customization_publication_requests WHERE tenant_id = ? AND change_set_id = ?",
+                (tenant_id, change_set_id),
+            ).fetchone()
+            if request is not None and request["status"] == "denied":
+                return dict(request)
             conn.execute(
                 "UPDATE customization_confirmations SET consumed = 1 "
                 "WHERE tenant_id = ? AND change_set_id = ? AND consumed = 0",
@@ -1234,16 +1691,15 @@ class SQLiteCustomizationStore(CustomizationRepository):
             )
             result = conn.execute(
                 "UPDATE customization_publication_requests "
-                "SET status = 'denied', reason_code = ?, "
+                "SET status = 'denied', reason_code = ?, review_details_json = ?, "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                 "WHERE tenant_id = ? AND change_set_id = ?",
-                (reason_code, tenant_id, change_set_id),
+                (reason_code, json.dumps(review_details) if review_details is not None else None, tenant_id, change_set_id),
             )
             if result.rowcount != 1:
                 raise ChangeSetNotFoundError("publication request was not found")
             row = conn.execute(
-                "SELECT tenant_id, change_set_id, confirmation_id, status, reason_code, "
-                "created_at, updated_at FROM customization_publication_requests "
+                "SELECT * FROM customization_publication_requests "
                 "WHERE tenant_id = ? AND change_set_id = ?",
                 (tenant_id, change_set_id),
             ).fetchone()
@@ -1258,6 +1714,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
         confirmation_signature: str,
         approver_subject: str,
         idempotency_key: str,
+        require_bound_confirmation: bool = False,
     ) -> ChangeSet:
         """Consume approval and advance to ``publishing`` in one transaction."""
         with self._transaction() as conn:
@@ -1294,11 +1751,31 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 )
             consumed = conn.execute(
                 "UPDATE customization_confirmations SET consumed = 1 "
-                "WHERE confirmation_id = ? AND signature = ? AND consumed = 0",
+                "WHERE confirmation_id = ? AND signature = ? AND consumed = 0 RETURNING payload_json",
                 (confirmation_id, confirmation_signature),
-            )
-            if consumed.rowcount != 1:
+            ).fetchone()
+            if consumed is None:
                 raise IdempotencyReplayError("confirmation was already consumed")
+            payload = json.loads(consumed["payload_json"])
+            if require_bound_confirmation or "approval_kind" in payload:
+                bound = conn.execute(
+                    "SELECT 1 FROM customization_publication_requests WHERE tenant_id = ? AND change_set_id = ? "
+                    "AND confirmation_id = ? AND status != 'denied'",
+                    (tenant_id, change_set_id, confirmation_id),
+                ).fetchone()
+                if bound is None:
+                    raise ChangeSetConflictError("publication confirmation no longer bound")
+            allow_self_approval = False
+            if approver_subject == row.author_subject:
+                # Read the exact receipt consumed by this CAS. A caller cannot
+                # opt the state machine out of independent approval with a flag.
+                allow_self_approval = (
+                    payload.get("approval_kind") == "self"
+                    and payload.get("approver_role") in ("owner", "reviewer")
+                    and payload.get("tenant_id") == tenant_id
+                    and payload.get("change_set_id") == change_set_id
+                    and payload.get("approver_subject") == payload.get("author_subject") == approver_subject
+                )
             awaiting = self._transition_row(
                 conn, row, ChangeState.AWAITING_APPROVAL, row.version,
                 f"awaiting:{idempotency_key}", expected_state=ChangeState.STAGED,
@@ -1308,6 +1785,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 f"approved:{idempotency_key}",
                 expected_state=ChangeState.AWAITING_APPROVAL,
                 approver_subject=approver_subject,
+                allow_self_approval=allow_self_approval,
             )
             return self._transition_row(
                 conn, approved, ChangeState.PUBLISHING, approved.version,
@@ -1565,6 +2043,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
         approver_subject: Optional[str] = None,
         reason_code: Optional[str] = None, staged_commit: Optional[str] = None,
         catalog_digest: Optional[str] = None,
+        allow_self_approval: bool = False,
     ) -> ChangeSet:
         idempotency_key = require_bounded(idempotency_key, "idempotency_key", 200)
         if reason_code is not None:
@@ -1590,7 +2069,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
             raise ValueError("approver_subject is required for approval")
         if approver_subject is not None:
             approver_subject = require_bounded(approver_subject, "approver_subject", 300)
-        if next_state == ChangeState.APPROVED and approver_subject == row.author_subject:
+        if next_state == ChangeState.APPROVED and approver_subject == row.author_subject and not allow_self_approval:
             raise ChangeSetConflictError("author and approver subjects must differ")
         updated = conn.execute(
             "UPDATE customization_change_sets SET state = ?, version = version + 1, "
@@ -1610,6 +2089,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
     def _append_audit(
         self, conn: sqlite3.Connection, row: ChangeSet, prior_state: Optional[ChangeState],
         next_state: ChangeState, idempotency_key: str, reason_code: Optional[str] = None,
+        *, review_fields: dict | None = None,
     ) -> None:
         event_id = str(uuid4())
         audit_result = (
@@ -1654,6 +2134,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
             idempotency_key=event.idempotency_key, result=event.result,
             reason_code=event.reason_code,
         ))
+        if review_fields:
+            payload.update(review_fields)
         conn.execute(
             "UPDATE customization_audit_events SET payload_json = ? WHERE event_id = ?",
             (json.dumps(payload, sort_keys=True), event_id),
@@ -1680,6 +2162,10 @@ class SQLiteCustomizationStore(CustomizationRepository):
             author_subject=row["author_subject"], approver_subject=row["approver_subject"],
             created_at=row["created_at"], updated_at=row["updated_at"],
             change_kind=row["change_kind"], target_tool_name=row["target_tool_name"],
+            tool_target=row["tool_target"] if "tool_target" in row.keys() else None,
+            plan_json=row["plan_json"], plan_digest=row["plan_digest"],
+            plan_confirmation_id=row["plan_confirmation_id"],
+            compile_summary_json=row["compile_summary_json"],
             request_description=row["request_description"],
             request_fingerprint=row["request_fingerprint"],
             authority_session_id=row["authority_session_id"],

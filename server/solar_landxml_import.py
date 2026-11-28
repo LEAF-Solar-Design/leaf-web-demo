@@ -266,7 +266,7 @@ def import_landxml_terrain(backend, tenant_id, drawing_id, data, *, drawing_unit
         raise LandXmlImportError("LANDXML_WRITES_DRAINED")
     if project_id is not None:
         _project_id(project_id)
-    if type(drawing_units) is not str or drawing_units not in ps.UNITS:
+    if type(drawing_units) is not str or drawing_units not in ("m", "ft"):
         raise LandXmlImportError("LANDXML_DRAWING_UNITS_INVALID")
     if type(crs) is not str or not (crs == "none" or _EPSG.fullmatch(crs)):
         raise LandXmlImportError("LANDXML_CRS_INVALID")

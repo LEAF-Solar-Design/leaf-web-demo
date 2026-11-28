@@ -343,6 +343,37 @@ def test_rollout_flags_are_strict_and_r6_depends_on_r5(monkeypatch):
     assert enabled(7, "tenant-a") is False
 
 
+def test_stage_worker_runtime_starts_once_and_joins_with_total_budget(monkeypatch):
+    import threading
+
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "all")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_WORKER_DISABLED", "0")
+    monkeypatch.setattr(app.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(CustomizationService, "configured", lambda: object())
+    monkeypatch.setattr(app, "_customization_worker_threads", [])
+    monkeypatch.setattr(app, "_customization_worker_stop", None)
+    starts = []
+    joins = []
+    threads = [SimpleNamespace(is_alive=lambda: True, join=lambda timeout: joins.append(timeout)) for _ in range(3)]
+
+    def start(stop):
+        assert isinstance(stop, threading.Event)
+        starts.append(stop)
+        return threads
+
+    monkeypatch.setattr(app.customization_stage_worker, "start_workers", start)
+    app.initialize_customization_store()
+    app.initialize_customization_store()
+    assert len(starts) == 1
+    ticks = iter((100.0, 100.0, 101.5, 102.5))
+    monkeypatch.setattr(app, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+    app.stop_customization_stage_worker()
+    assert starts[0].is_set()
+    assert joins == [2.0, 0.5, 0.0]
+    assert app._customization_worker_threads == []
+    assert app._customization_worker_stop is None
+
+
 def test_off_rollout_flags_do_not_initialize_customization_sqlite(tmp_path, monkeypatch):
     database = tmp_path / "customization.db"
     monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", str(database))

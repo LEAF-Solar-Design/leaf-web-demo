@@ -43,16 +43,19 @@ LAB_CASES = [
                  id="restore"),
     pytest.param("POST", "publish", {"expected_head": 2}, 404, id="publish"),
 ]
-RUN_CASES = [
+TENANT_RUN_CASES = [
     ("POST", "", {"doc_id": DOC, "graph_revision": 2}),
     ("GET", "/private-run", None),
     ("GET", "/private-run/events", None),
     ("POST", "/private-run/cancel", None),
     pytest.param("GET", f"?doc_id={DOC}", None, id="recent-runs"),
+    pytest.param("GET", "/private-run/recovery-plan", None, id="recovery-plan"),
+    pytest.param("GET", "/private-run/corpus-jobs", None, id="corpus-jobs"),
+]
+RUN_CASES = TENANT_RUN_CASES + [
     ("POST", "/worker/pause", {"reason": "maintenance"}),
     ("POST", "/worker/resume", None),
     pytest.param("GET", "/corpus-options", None, id="corpus-options"),
-    pytest.param("GET", "/private-run/recovery-plan", None, id="recovery-plan"),
 ]
 ACTIVATION_CASES = [
     ("POST", "", {"doc_id": DOC, "interval_s": 60}),
@@ -223,6 +226,7 @@ def test_route_inventory_is_complete():
         ("GET", "/api/lab/runs/corpus-options"),
         ("GET", "/api/lab/runs/{run_id}"),
         ("GET", "/api/lab/runs/{run_id}/recovery-plan"),
+        ("GET", "/api/lab/runs/{run_id}/corpus-jobs"),
         ("GET", "/api/lab/runs/{run_id}/events"),
         ("POST", "/api/lab/runs/{run_id}/cancel"),
         ("POST", "/api/lab/runs/worker/pause"),
@@ -317,7 +321,7 @@ def test_runs_admission_precedes_storage(client, monkeypatch, method, suffix, bo
     assert MARKER not in response.text
 
 
-@pytest.mark.parametrize("method,suffix,body", RUN_CASES[:5] + [RUN_CASES[-1]])
+@pytest.mark.parametrize("method,suffix,body", TENANT_RUN_CASES)
 def test_runs_foreign_tenant_is_not_found(client, owner, method, suffix, body):
     row = run_store.create("tenant-a", DOC, "private-run", 2, "a" * 64, "lab-ops.v1",
                            "b" * 64, "lab-worker.v1", "abc1234")
@@ -673,6 +677,20 @@ def test_b03_build_status_missing_or_invalid_auth_cannot_dispatch(monkeypatch, m
             assert client.request(method,B03_PREVIEW_ASSET.removesuffix('/asset'),headers=headers,json={} if method=='POST' else None).status_code in (401,403)
 
 
+def test_b03_candidate_readback_requires_auth_before_lookup(monkeypatch):
+    from routers import browser_project
+    import browser_static_build
+    for name, value in _ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(browser_static_build, 'readback', lambda *a, **kw: pytest.fail('unauthenticated candidate lookup'))
+    app = FastAPI()
+    app.include_router(browser_project.router)
+    path = B03_PREVIEW_ASSET.removesuffix('/asset') + '/candidate'
+    with TestClient(app) as client:
+        for headers in ({}, {'Authorization': 'Bearer invalid'}):
+            assert client.get(path, headers=headers).status_code in (401, 403)
+
+
 @pytest.mark.parametrize("method", ["GET", "PUT"])
 def test_b03_chart_state_missing_or_invalid_auth_cannot_dispatch(monkeypatch, method):
     from routers import browser_project
@@ -684,3 +702,54 @@ def test_b03_chart_state_missing_or_invalid_auth_cannot_dispatch(monkeypatch, me
     with TestClient(app) as client:
         for headers in ({},{'Authorization':'Bearer invalid'}):
             assert client.request(method,path,headers=headers,json={} if method=='PUT' else None).status_code in (401,403)
+
+
+@pytest.mark.parametrize(("case", "status"), [
+    ("owner", 200), ("anonymous", 401), ("read_only", 403),
+    ("foreign_project", 404), ("foreign_org", 404), ("other_family", 409), ("invalid_id", 422),
+])
+def test_retained_arlo_activation_http(monkeypatch, case, status):
+    from copy import deepcopy
+    from test_arlo_lab_inputs import (
+        BINDING, ORG, PROJECT, MemoryTransactions, activate, api, arlo_lab,
+        headers as arlo_headers, reference_input, revise,
+    )
+    from fastapi import HTTPException
+
+    store = MemoryTransactions()
+    monkeypatch.setattr(arlo_lab, "run_transaction", store.transaction)
+    original = reference_input(store)
+    child = revise(original, "child")
+    activate(original, original)
+    target = child["input_version_id"]
+    project = PROJECT
+    if case == "read_only":
+        store.role = "reviewer"
+    elif case == "foreign_project":
+        project = uuid.uuid4()
+    elif case == "other_family":
+        target = reference_input(store, key="other")["input_version_id"]
+    elif case == "invalid_id":
+        target = "invalid"
+    before = deepcopy(store.files)
+
+    def verified(authorization):
+        if not authorization:
+            raise HTTPException(401, "authentication required")
+        return SimpleNamespace(platform_tenant_id=uuid.uuid4() if case == "foreign_org" else ORG, binding_id=BINDING)
+    monkeypatch.setattr(api.platform_deps, "auth_live", lambda: True)
+    monkeypatch.setattr(api.platform_deps, "_verified_identity", verified)
+    app = FastAPI()
+    app.include_router(api.router)
+    headers = {} if case == "anonymous" else arlo_headers()
+    response = TestClient(app).post(
+        f"/api/projects/{project}/arlo-inputs/{original['input_version_id']}/activate",
+        headers=headers, json={"input_version_id": target})
+    assert response.status_code == status
+    if case == "owner":
+        assert response.headers["Cache-Control"] == "private, no-store"
+        assert response.json() == child
+        active = arlo_lab.read_input(ORG, PROJECT, BINDING, uuid.UUID(original["input_version_id"]))
+        assert active["input_version_id"] == target
+    else:
+        assert store.files == before

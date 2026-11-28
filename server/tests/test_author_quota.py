@@ -40,12 +40,16 @@ Run:  cd server && python -m pytest tests/test_author_quota.py -q
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -71,6 +75,7 @@ def _load_usage():
 def clean_counter_state(monkeypatch):
     monkeypatch.delenv("LEAF_DAILY_AUTHOR_QUOTA", raising=False)
     monkeypatch.delenv("LEAF_AUTHOR_QUOTA_EXEMPT_TENANTS", raising=False)
+    monkeypatch.delenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", raising=False)
     monkeypatch.delenv("LEAF_AUTHOR_QUOTA_STORE", raising=False)
     monkeypatch.delenv("LEAF_RUNTIME_ENV", raising=False)
     author_quota.reset_memory_state()
@@ -273,6 +278,283 @@ def test_memory_attempt_identity_is_tenant_scoped_and_policy_immutable():
     assert author_quota.charge(
         "tenant-a", "2026-07-30", 1, idempotency_key="change-b"
     ) == (False, 1)
+
+
+@pytest.mark.parametrize("raw, enabled", [
+    (None, False), ("", False), ("0", False), ("true", False),
+    ("01", False), ("1", True), (" 1 ", True),
+])
+def test_refund_switch_is_explicit(monkeypatch, raw, enabled):
+    if raw is not None:
+        monkeypatch.setenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", raw)
+    assert author_quota.refund_enabled() is enabled
+
+
+def test_memory_refund_is_once_tenant_scoped_and_frees_a_slot():
+    day = "2026-07-30"
+    for tenant, key in (("tenant-a", "one"), ("tenant-a", "two"),
+                        ("tenant-b", "one")):
+        assert author_quota.charge(tenant, day, 2, idempotency_key=key)[0]
+    assert author_quota.charge("tenant-a", day, 2, idempotency_key="refused") == (False, 2)
+    other = author_quota.lookup_attempt("tenant-a", "two")
+    refused = author_quota.lookup_attempt("tenant-a", "refused")
+    assert author_quota.refund_unstarted("tenant-a", "refused") is False
+    assert author_quota.refund_unstarted("tenant-a", "missing") is False
+    assert author_quota.refund_unstarted("tenant-a", "one") is True
+    assert author_quota.refund_unstarted("tenant-a", "one") is False
+    assert author_quota._MEMORY_STATE == {f"{day}:tenant-a": 1, f"{day}:tenant-b": 1}
+    assert author_quota.lookup_attempt("tenant-a", "two") == other
+    assert author_quota.lookup_attempt("tenant-a", "refused") == refused
+    assert author_quota.lookup_attempt("tenant-b", "one") is not None
+    original = author_quota.lookup_attempt("tenant-a", "one")
+    assert original is not None and original.accepted
+    assert author_quota.charge("tenant-a", day, 2, idempotency_key="one",
+                               return_decision=True) == original
+    assert author_quota._MEMORY_STATE[f"{day}:tenant-a"] == 1
+    assert author_quota.charge("tenant-a", day, 2, idempotency_key="new") == (True, 2)
+
+
+def test_memory_refund_clamps_at_zero_and_uses_original_day():
+    author_quota.charge("tenant-a", "2026-07-30", 1, idempotency_key="old")
+    author_quota.charge("tenant-a", "2026-07-31", 1, idempotency_key="new")
+    author_quota._MEMORY_STATE["2026-07-30:tenant-a"] = 0
+    assert author_quota.refund_unstarted("tenant-a", "old") is True
+    assert author_quota.refund_unstarted("tenant-a", "old") is False
+    assert author_quota._MEMORY_STATE == {
+        "2026-07-30:tenant-a": 0, "2026-07-31:tenant-a": 1,
+    }
+
+
+def test_concurrent_memory_refunds_return_exactly_one_slot():
+    author_quota.charge("tenant-a", "2026-07-30", 1, idempotency_key="one")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(
+            lambda _: author_quota.refund_unstarted("tenant-a", "one"), range(32)
+        ))
+    assert results.count(True) == 1
+    assert author_quota._MEMORY_STATE == {"2026-07-30:tenant-a": 0}
+    assert author_quota.charge("tenant-a", "2026-07-30", 1, idempotency_key="new") == (True, 1)
+
+
+def test_memory_missing_aggregate_does_not_consume_refund():
+    author_quota.charge("tenant-a", "2026-07-30", 1, idempotency_key="one")
+    author_quota._MEMORY_STATE.clear()
+    assert author_quota.refund_unstarted("tenant-a", "one") is False
+    assert author_quota._MEMORY_REFUNDED == set()
+    assert author_quota._MEMORY_REFUNDS == {}
+    assert author_quota.lookup_attempt("tenant-a", "one").accepted
+
+
+def test_counter_retention_preserves_refund_once_markers():
+    calls = []
+    connection = SimpleNamespace(execute=lambda sql, params: calls.append((sql, params)))
+    author_quota._cleanup_old_counters(connection)
+    assert len(calls) == 1
+    sql, params = calls[0]
+    assert "namespace != %(refund_once)s" in sql
+    assert params["refund_once"] == "author_refund_once"
+    assert "author_quota_attempts" not in sql
+
+
+def test_memory_refund_limit_preserves_charge_and_is_tenant_and_day_scoped():
+    day = "2026-07-30"
+    for index in range(4):
+        key = f"attempt-{index}"
+        assert author_quota.charge("tenant-a", day, 1, idempotency_key=key) == (True, 1)
+        assert author_quota.refund_unstarted("tenant-a", key) is (index < 3)
+    fourth = author_quota.lookup_attempt("tenant-a", "attempt-3")
+    assert fourth is not None and fourth.accepted
+    assert author_quota.refund_unstarted("tenant-a", "attempt-3") is False
+    assert author_quota.lookup_attempt("tenant-a", "attempt-3") == fourth
+    assert author_quota.charge("tenant-a", day, 1, idempotency_key="refused") == (False, 1)
+    assert author_quota.refund_unstarted("tenant-a", "refused") is False
+    assert author_quota._MEMORY_REFUNDS == {f"{day}:tenant-a": 3}
+    for tenant, quota_day in (("tenant-b", day), ("tenant-a", "2026-07-31")):
+        assert author_quota.charge(tenant, quota_day, 1, idempotency_key="fresh") == (True, 1)
+        assert author_quota.refund_unstarted(tenant, "fresh") is True
+        assert author_quota._MEMORY_STATE[f"{quota_day}:{tenant}"] == 0
+    assert author_quota._MEMORY_STATE[f"{day}:tenant-a"] == 1
+    author_quota.reset_memory_state()
+    assert author_quota._MEMORY_REFUNDS == {}
+    assert author_quota._MEMORY_REFUNDED == set()
+    author_quota.charge("tenant-a", day, 1, idempotency_key="after-reset")
+    assert author_quota.refund_unstarted("tenant-a", "after-reset") is True
+
+
+def test_concurrent_memory_refunds_of_different_attempts_respect_daily_limit():
+    for index in range(8):
+        author_quota.charge("tenant-a", "2026-07-30", 8, idempotency_key=str(index))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(
+            lambda index: author_quota.refund_unstarted("tenant-a", str(index)), range(8)
+        ))
+    assert results.count(True) == 3
+    assert author_quota._MEMORY_STATE == {"2026-07-30:tenant-a": 5}
+    assert len(author_quota._MEMORY_ATTEMPTS) == 8
+    assert len(author_quota._MEMORY_REFUNDED) == 3
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_postgres_refund_locks_reads_then_marks_and_decrements(monkeypatch, accepted):
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_STORE", "postgres")
+    calls = []
+    transactions = []
+
+    class Connection:
+        def execute(self, sql, params):
+            calls.append((" ".join(sql.split()), params))
+            return SimpleNamespace(rowcount=1, fetchone=lambda: (
+                {"counter_key": "2026-07-30:tenant-a"} if accepted else None
+            ))
+
+    class Database:
+        @staticmethod
+        def run_transaction(operation, **kwargs):
+            transactions.append(kwargs)
+            return operation(Connection())
+
+    def consume(conn, **kwargs):
+        assert isinstance(conn, Connection)
+        calls.append(("consume", kwargs))
+        return SimpleNamespace(accepted=True)
+
+    monkeypatch.setattr(author_quota, "_postgres_counter", lambda: SimpleNamespace(
+        consume_in_transaction=consume,
+    ))
+    monkeypatch.setattr(author_quota, "_load_platform_counters", lambda: (Database(), object))
+    assert author_quota.refund_unstarted("tenant-a", "one") is accepted
+    assert transactions == [{"isolation": "serializable", "max_attempts": 3}]
+    assert calls[0] == (
+        "SELECT pg_advisory_xact_lock(hashtextextended(%(key)s, 0))",
+        {"key": "8:tenant-aone"},
+    )
+    assert calls[1] == (
+        "SELECT counter_key FROM author_quota_attempts WHERE tenant_id = %(tenant_id)s "
+        "AND attempt_key = %(attempt_key)s AND accepted",
+        {"tenant_id": "tenant-a", "attempt_key": "one"},
+    )
+    if accepted:
+        assert calls[2] == (
+            "consume", {"namespace": "author_refund_once", "key": hashlib.sha256(
+                b'["tenant-a","one"]').hexdigest(), "limit": 1},
+        )
+        assert calls[3] == (
+            "consume", {"namespace": "author_refund_day", "key": "2026-07-30:tenant-a", "limit": 3},
+        )
+        assert calls[4] == (
+            "UPDATE author_quota_counters SET value = GREATEST(value - 1, 0), "
+            "updated_at = NOW() WHERE namespace = %(namespace)s AND counter_key = %(counter_key)s",
+            {"namespace": "author_daily", "counter_key": "2026-07-30:tenant-a"},
+        )
+    assert len(calls) == (5 if accepted else 2)
+
+
+@pytest.mark.parametrize("failure_point", ["load", "select", "consume", "update"])
+def test_postgres_refund_errors_expose_only_type(monkeypatch, failure_point):
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_STORE", "postgres")
+
+    def fail():
+        raise RuntimeError("postgres://user:secret@host/db")
+
+    class Connection:
+        def execute(self, sql, params):
+            if sql.startswith(failure_point.upper()):
+                fail()
+            return SimpleNamespace(fetchone=lambda: {"counter_key": "original-day:tenant-a"})
+
+    class Database:
+        @staticmethod
+        def run_transaction(operation, **kwargs):
+            return operation(Connection())
+
+    def load():
+        if failure_point == "load":
+            fail()
+        return Database(), object
+
+    def consume(*_args, **_kwargs):
+        if failure_point == "consume":
+            fail()
+        return SimpleNamespace(accepted=True)
+
+    monkeypatch.setattr(author_quota, "_postgres_counter", lambda: SimpleNamespace(
+        consume_in_transaction=consume,
+    ))
+    monkeypatch.setattr(author_quota, "_load_platform_counters", load)
+    with pytest.raises(author_quota.AuthorQuotaStoreError) as caught:
+        author_quota.refund_unstarted("tenant-a", "one")
+    assert str(caught.value) == "RuntimeError"
+
+
+@pytest.mark.parametrize("aggregate_exists", [True, False])
+def test_postgres_refund_cap_rolls_back_markers_and_preserves_ledger(monkeypatch, aggregate_exists):
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_STORE", "postgres")
+    attempts = {str(index): {"counter_key": "2026-07-30:tenant-a"} for index in range(4)}
+    counters = {("author_daily", "2026-07-30:tenant-a"): 4}
+    rollbacks = []
+
+    class Connection:
+        def execute(self, sql, params):
+            assert not sql.startswith(("DELETE", "UPDATE author_quota_attempts"))
+            if sql.startswith("SELECT counter_key"):
+                assert params["tenant_id"] == "tenant-a"
+                row = attempts.get(params["attempt_key"])
+                return SimpleNamespace(fetchone=lambda: row)
+            if sql.startswith("UPDATE"):
+                if not aggregate_exists:
+                    return SimpleNamespace(rowcount=0)
+                identity = (params["namespace"], params["counter_key"])
+                counters[identity] = max(counters[identity] - 1, 0)
+            return SimpleNamespace(rowcount=1, fetchone=lambda: None)
+
+    class Database:
+        @staticmethod
+        def run_transaction(operation, **kwargs):
+            assert kwargs == {"isolation": "serializable", "max_attempts": 3}
+            saved_attempts, saved_counters = dict(attempts), dict(counters)
+            try:
+                return operation(Connection())
+            except Exception:
+                attempts.clear()
+                attempts.update(saved_attempts)
+                counters.clear()
+                counters.update(saved_counters)
+                rollbacks.append(True)
+                raise
+
+    def consume(conn, *, namespace, key, limit):
+        assert isinstance(conn, Connection)
+        assert (namespace, limit) in {("author_refund_once", 1), ("author_refund_day", 3)}
+        identity = (namespace, key)
+        value = counters.get(identity, 0)
+        if value >= limit:
+            return SimpleNamespace(accepted=False)
+        counters[identity] = value + 1
+        return SimpleNamespace(accepted=True)
+
+    monkeypatch.setattr(author_quota, "_load_platform_counters", lambda: (Database(), object))
+    monkeypatch.setattr(author_quota, "_postgres_counter", lambda: SimpleNamespace(
+        consume_in_transaction=consume,
+    ))
+    assert author_quota.refund_unstarted("tenant-a", "missing") is False
+    for index in range(4):
+        assert author_quota.refund_unstarted("tenant-a", str(index)) is (aggregate_exists and index < 3)
+    assert len(attempts) == 4
+    if not aggregate_exists:
+        assert rollbacks == [True] * 4
+        assert counters == {("author_daily", "2026-07-30:tenant-a"): 4}
+        return
+    assert rollbacks == [True]
+    assert author_quota.refund_unstarted("tenant-a", "0") is False
+    assert counters == {
+        ("author_daily", "2026-07-30:tenant-a"): 1,
+        ("author_refund_day", "2026-07-30:tenant-a"): 3,
+        **{("author_refund_once", hashlib.sha256(json.dumps(
+            ["tenant-a", str(index)], separators=(",", ":"),
+        ).encode()).hexdigest()): 1 for index in range(3)},
+    }
+    assert author_quota.refund_unstarted("tenant-a", "3") is False
+    assert "3" in attempts
 
 
 def test_counter_key_carries_day_and_tenant():
@@ -857,3 +1139,42 @@ def test_exemption_absent_keeps_prior_behavior(monkeypatch, allow_memory):
     assert author_quota.enforce("t-exempt", "hosted_starter") is None
     with pytest.raises(author_quota.AuthorQuotaExceeded):
         author_quota.enforce("t-exempt", "hosted_starter")
+
+
+@pytest.mark.parametrize("plan_mode", [True, False])
+def test_plan_bound_author_request_needs_no_description(monkeypatch, plan_mode):
+    """The harness posts a plan-bound build as {plan_confirmation_id, mode}
+    only; the description comes from the approved plan (staging walk
+    2026-11-21). Without plan mode a description is still required."""
+    staged = []
+
+    def fake_enqueue(**kwargs):
+        staged.append(kwargs)
+        return {"status": "staged"}
+
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(author_router.customization_flags, "plan_mode_enabled",
+                        lambda _tenant: plan_mode)
+    monkeypatch.setattr(author_router.deps, "stage_author_identity",
+                        lambda tenant, *_: tenant)
+    monkeypatch.setattr(author_router, "_customization_gate", lambda *_: None)
+    monkeypatch.setattr(
+        author_router.CustomizationService, "configured",
+        classmethod(lambda cls: SimpleNamespace(enqueue_stage=fake_enqueue, stage=fake_enqueue)),
+    )
+
+    req = author_router.AuthorRequest.model_validate(
+        {"plan_confirmation_id": "plan-1", "mode": "build"})
+    result = author_router.author(
+        req, tenant="tenant-a", idempotency_key="author:k",
+        authority_session_id="app-session", authority_turn_id="app-turn",
+    )
+    if plan_mode:
+        assert result == {"status": "staged"}
+        assert staged[0]["plan_confirmation_id"] == "plan-1"
+        assert staged[0]["description"] == ""
+    else:
+        assert result.status_code == 422
+        assert b"description_required" in result.body
+        assert staged == []

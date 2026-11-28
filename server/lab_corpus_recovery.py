@@ -19,6 +19,8 @@ from lab_evaluate import GraphRefused, admit_graph
 from lab_doc_validators import validate_graph
 
 SCHEMA = 'leaf.lab-corpus-recovery-plan.v1'
+CLEANUP_SCHEMA = 'leaf.lab-corpus-cleanup-evidence.v1'
+SCHEMA_V2 = 'leaf.lab-corpus-recovery-plan.v2'
 
 
 def lookup_job(tenant, project, intent):
@@ -89,7 +91,109 @@ def _disposition(job, receipt, source):
     return 'unresolved', 'unknown_failure'
 
 
-def prepare(tenant, run_id, *, authorize):
+def _cleanup_evidence(job, receipt, run_id, block_id, *, stable):
+    evidence = {'schema': CLEANUP_SCHEMA, 'job_id': job['job_id'] if job else None,
+                'attempt': None, 'state': 'unconfirmed', 'cancel': None, 'receipt': None}
+    if not job or not stable:
+        return evidence
+    attempt = job.get('attempt')
+    if type(attempt) is not int or attempt < 0:
+        return evidence
+    evidence['attempt'] = attempt
+    tag = receipt.get('cancel')
+    if (not isinstance(tag, dict)
+            or set(tag) != {'run_id', 'block_id', 'attempt', 'fence', 'reason'}
+            or tag['run_id'] != run_id or tag['block_id'] != block_id
+            or type(tag['attempt']) is not int or tag['attempt'] != attempt
+            or type(tag['fence']) is not int or tag['fence'] <= 0
+            or tag['reason'] not in ('deadline', 'cancel')):
+        return evidence
+    evidence['cancel'] = dict(tag)
+    cleanup = receipt.get('cleanup')
+    # The native reap producer includes worker_id. It is never public evidence.
+    if (not isinstance(cleanup, dict)
+            or not {'attempt', 'cancel'} <= set(cleanup)
+            or set(cleanup) - {'attempt', 'cancel', 'reaped', 'not_started', 'worker_id'}
+            or type(cleanup['attempt']) is not int or cleanup['attempt'] != attempt
+            or not isinstance(cleanup['cancel'], dict)
+            or graph_digest(cleanup['cancel']) != graph_digest(tag)
+            or any(type(cleanup[key]) is not bool for key in ('reaped', 'not_started') if key in cleanup)):
+        return evidence
+    reaped, not_started = cleanup.get('reaped', False), cleanup.get('not_started', False)
+    if reaped == not_started:
+        return evidence
+    evidence['receipt'] = {'attempt': attempt, 'cancel': dict(tag),
+                           'reaped': reaped, 'not_started': not_started}
+    evidence['state'] = 'confirmed_reaped' if reaped else 'confirmed_not_started'
+    return evidence
+
+
+def _pinned_graph(tenant, source):
+    artifact = ledger.get(tenant, source['doc_id'], source['graph_revision'])
+    graph = artifact['graph']
+    if (artifact['tenant_id'] != tenant or artifact['doc_id'] != source['doc_id']
+            or artifact['revision'] != source['graph_revision']
+            or artifact['sha256'] != source['graph_sha256']
+            or graph_digest(graph) != source['graph_sha256']):
+        raise GraphRefused('lab_recovery_digest_mismatch')
+    validate_graph(graph)
+    return graph
+
+
+def _matches_intent(job, tenant, project, intent):
+    return (str(job.get('tenant_id')) == tenant and str(job.get('org_id')) == tenant
+            and str(job.get('project_id')) == project and job.get('idempotency_key') == intent
+            and job.get('tool') == corpus.OPERATION)
+
+
+def inspect_jobs(tenant, run_id, *, authorize):
+    """Read status and pinned input lineage for each corpus block on this exact run."""
+    source = store.get(tenant, run_id)
+    if source['tenant_id'] != tenant or source['run_id'] != run_id:
+        raise GraphRefused('lab_recovery_source_mismatch')
+    authority = store.corpus_authority(source)
+    if authority is None:
+        return {'corpus': False}
+    authorize(source)
+    graph = _pinned_graph(tenant, source)
+    blocks = [block for block in graph['blocks'] if block['registry']['id'] == 'corpus-evaluator']
+    project = authority['project_id']
+    if not blocks or any(block['settings']['project_id'] != project for block in blocks):
+        raise GraphRefused('lab_recovery_project_mismatch')
+    statuses = {'submitted': 'queued', 'queued': 'queued', 'running': 'running',
+                'failed': 'failed', 'complete': 'completed'}
+    intents = {f'lab:{run_id}:{block["id"]}:corpus:v1': block for block in blocks}
+    # One snapshot of just the exact intents. The project idempotency index
+    # makes each intent unique; treat a duplicate as unavailable if encountered.
+    with platform_link.platform_db().cursor() as cur:
+        cur.execute('SELECT job_id, tenant_id, org_id, project_id, tool, idempotency_key, status, attempt '
+                    'FROM async_jobs WHERE tenant_id=%s AND org_id=%s AND project_id=%s '
+                    'AND idempotency_key = ANY(%s)', (tenant, tenant, project, list(intents)))
+        jobs_by_intent = {}
+        for job in cur.fetchall():
+            intent = job['idempotency_key']
+            jobs_by_intent[intent] = job if intent not in jobs_by_intent else None
+    items = []
+    for intent, block in intents.items():
+        settings = block['settings']
+        job = jobs_by_intent.get(intent)
+        status, job_id, attempt = 'unavailable', None, None
+        if intent not in jobs_by_intent and source['state'] in {'queued', 'running'}:
+            status = 'not submitted'
+        if job is not None and _matches_intent(job, tenant, project, intent):
+            job_status, job_attempt = statuses.get(job.get('status')), job.get('attempt')
+            if job_status is not None and type(job_attempt) is int and job_attempt >= 0:
+                status, job_id, attempt = job_status, job['job_id'], job_attempt
+        items.append({'block_id': block['id'], 'status': status, 'job_id': job_id, 'attempt': attempt,
+                      'inputs': {'corpus_sha256': settings['corpus']['sha256'],
+                                 'suite_sha256': settings['suite']['sha256'],
+                                 'settings_sha256': graph_digest(settings)}})
+    authorize(source)
+    return {'corpus': True, 'source': {key: source[key] for key in
+            ('run_id', 'graph_revision', 'graph_sha256', 'input_digest')}, 'blocks': items}
+
+
+def prepare(tenant, run_id, *, authorize, include_cleanup=False):
     """Resolve immutable source and authoritative jobs, then recheck live access."""
     source = store.get(tenant, run_id)
     if source['tenant_id'] != tenant or source['run_id'] != run_id:
@@ -102,14 +206,7 @@ def prepare(tenant, run_id, *, authorize):
         raise GraphRefused('lab_corpus_unavailable')
     if source['state'] not in {'finished', 'failed', 'cancelled'}:
         raise GraphRefused('lab_recovery_terminal_required')
-    artifact = ledger.get(tenant, source['doc_id'], source['graph_revision'])
-    graph = artifact['graph']
-    if (artifact['tenant_id'] != tenant or artifact['doc_id'] != source['doc_id']
-            or artifact['revision'] != source['graph_revision']
-            or artifact['sha256'] != source['graph_sha256']
-            or graph_digest(graph) != source['graph_sha256']):
-        raise GraphRefused('lab_recovery_digest_mismatch')
-    validate_graph(graph)
+    graph = _pinned_graph(tenant, source)
     if (not graph['blocks'] or graph['pipes']
             or any(block['registry']['id'] != 'corpus-evaluator' for block in graph['blocks'])):
         raise GraphRefused('lab_recovery_independent_corpus_required')
@@ -121,15 +218,13 @@ def prepare(tenant, run_id, *, authorize):
     blocks, selected, retained, unresolved = [], [], [], []
     for block in graph['blocks']:
         intent = f'lab:{run_id}:{block["id"]}:corpus:v1'
-        receipt = lookup_job(tenant, authority['project_id'], intent)
+        receipt = copy.deepcopy(lookup_job(tenant, authority['project_id'], intent))
         job = receipt.get('job')
         item = {'block_id': block['id'], 'idempotency_key': intent,
                 'job_id': None, 'status': None, 'receipt_sha256': None}
         if job is None:
             disposition, reason = 'unresolved', receipt['reason_category']
-        elif (str(job.get('tenant_id')) != tenant or str(job.get('org_id')) != tenant
-                or str(job.get('project_id')) != authority['project_id']
-                or job.get('idempotency_key') != intent or job.get('tool') != corpus.OPERATION):
+        elif not _matches_intent(job, tenant, authority['project_id'], intent):
             # Never project any identifier, status or receipt from foreign jobs.
             disposition, reason = 'unresolved', 'job_binding_mismatch'
         else:
@@ -142,6 +237,17 @@ def prepare(tenant, run_id, *, authorize):
                         'lab_corpus', 'authority_mode')},
                     'cancel': receipt.get('cancel'), 'cleanup': receipt.get('cleanup')}))
         item.update(disposition=disposition, reason_category=reason)
+        if include_cleanup:
+            bound_job = job if item['job_id'] is not None else None
+            stable = False
+            if bound_job is not None:
+                readback = lookup_job(tenant, authority['project_id'], intent)
+                stable = (readback == receipt
+                    and type(readback['job'].get('attempt')) is type(job.get('attempt'))
+                    and graph_digest({key: readback.get(key) for key in ('cancel', 'cleanup')})
+                        == graph_digest({key: receipt.get(key) for key in ('cancel', 'cleanup')}))
+            item['cleanup_evidence'] = _cleanup_evidence(
+                bound_job, receipt, run_id, block['id'], stable=stable)
         blocks.append(item)
         {'selected': selected, 'retained': retained, 'unresolved': unresolved}[disposition].append(block['id'])
 
@@ -151,7 +257,7 @@ def prepare(tenant, run_id, *, authorize):
             blocks=[block for block in graph['blocks'] if block['id'] in selected],
             outputs={name: endpoint for name, endpoint in graph['outputs'].items()
                      if endpoint['node'] in selected}))
-    plan = {'schema': SCHEMA, 'source': {key: source[key] for key in (
+    plan = {'schema': SCHEMA_V2 if include_cleanup else SCHEMA, 'source': {key: source[key] for key in (
                 'run_id', 'doc_id', 'graph_revision', 'graph_sha256', 'state')},
             'blocks': blocks, 'selected_failed_block_ids': selected,
             'retained_completed_block_ids': retained, 'unresolved_block_ids': unresolved,

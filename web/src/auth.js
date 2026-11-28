@@ -15,8 +15,9 @@
 
 import { track, flushNow } from './telemetry.js'
 import { clearComposerDrafts } from './lib/composerDraft.js'
+import { clearAccountIdentity, setAccountEmail } from './auth/accountIdentity.js'
 import { clearInvestorWorkspace, INVESTOR_ORG_KEY, isInvestorSession } from './investorDemo.js'
-import { serviceSession, serviceState, serviceHeaders, authorityStorage } from './lib/serviceAuthSession.js'
+import { serviceSession, serviceState, serviceScope, serviceHeaders, authorityStorage } from './lib/serviceAuthSession.js'
 import {
   stageCheckoutAuthReturn,
   clearCheckoutAuthReturn,
@@ -30,6 +31,7 @@ const API_BASE = import.meta.env?.VITE_API_BASE ?? ''
 const JWT_KEY = 'leaf.jwt'
 const INFLIGHT_AUTHOR_KEY = 'leaf.inflightAuthor.v1'
 const AUTH_SEEN_KEY = 'leaf.auth.completed_before'
+const SERVICE_REAUTH_RETURN_KEY = 'leaf.service.reauth_return'
 
 // P2 wave C-2: both outcomes of the redirect callback. The failure branch was
 // invisible before (silently swallowed into the signed-out gate); this makes
@@ -92,7 +94,38 @@ export async function bootstrapServiceAuth() {
     url.searchParams.delete('demo')
     window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`)
   }
-  return serviceSession().probe({ apiBase: API_BASE, origin: window.location.origin })
+  const result = await serviceSession().probe({ apiBase: API_BASE, origin: window.location.origin })
+  if (!result) return result
+  let record = null
+  try {
+    const raw = sessionStorage.getItem(SERVICE_REAUTH_RETURN_KEY)
+    sessionStorage.removeItem(SERVICE_REAUTH_RETURN_KEY)
+    record = JSON.parse(raw)
+  } catch { /* missing, malformed, or unavailable storage */ }
+  const age = typeof record?.created_at_ms === 'number' ? Date.now() - record.created_at_ms : NaN
+  if (record?.v === 1 && Number.isFinite(age) && age >= 0 && age <= 15 * 60 * 1000 &&
+      typeof record.scope === 'string' && record.scope === serviceScope()) {
+    completeCheckoutAuthReturn()
+    window.history.replaceState({}, document.title, safeLocalReturnTo(record.return_to, '/'))
+  } else {
+    clearCheckoutAuthReturn()
+  }
+  return result
+}
+
+export function serviceReauth({ isCurrent = () => true } = {}) {
+  if (!serviceState().mode || !isCurrent()) return false
+  try {
+    sessionStorage.setItem(SERVICE_REAUTH_RETURN_KEY, JSON.stringify({
+      v: 1,
+      created_at_ms: Date.now(),
+      return_to: `${window.location.pathname}${window.location.search}${window.location.hash}`,
+      scope: serviceScope(),
+    }))
+  } catch { /* storage unavailable; protected login can still proceed */ }
+  stageCheckoutAuthReturn()
+  window.location.assign('/api/auth/agent/login')
+  return true
 }
 
 export function subscribeBeforeLogout(listener) {
@@ -255,6 +288,12 @@ export async function handleRedirectCallback() {
     if (token) completeCheckoutAuthReturn()
     clean()
     trackAuthCompleted(!!token)
+    if (token) {
+      try {
+        const user = await c.getUser()
+        if (isCurrent()) setAccountEmail(user?.email)
+      } catch { /* account display must not prevent authentication */ }
+    }
     return !!token
   } catch (error) {
     if (!isCurrent()) return false
@@ -289,10 +328,24 @@ export async function logout(hint) {
   }
   const jointHeaders = service.mode ? serviceHeaders(API_BASE) : null
   const serviceStorage = service.mode ? authorityStorage() : null
+  const pendingLogout = []
   for (const listener of beforeLogoutListeners) {
-    try { listener() } catch { /* an observer cannot prevent sign-out */ }
+    try {
+      const result = listener()
+      if (result && typeof result.then === 'function') pendingLogout.push(result)
+    } catch { /* an observer cannot prevent sign-out */ }
+  }
+  if (pendingLogout.length) {
+    let timer
+    try {
+      await Promise.race([
+        Promise.allSettled(pendingLogout),
+        new Promise(resolve => { timer = setTimeout(resolve, 1500) }),
+      ])
+    } finally { clearTimeout(timer) }
   }
   if (service.mode) {
+    clearAccountIdentity()
     serviceSession().logout()
     try { serviceStorage?.removeItem(INFLIGHT_AUTHOR_KEY) } catch { /* storage unavailable */ }
     clearComposerDrafts(serviceStorage)
@@ -305,6 +358,7 @@ export async function logout(hint) {
     return
   }
   try {
+    clearAccountIdentity()
     localStorage.removeItem(JWT_KEY)
     localStorage.removeItem(INFLIGHT_AUTHOR_KEY)
     if (investor) clearInvestorWorkspace(localStorage)

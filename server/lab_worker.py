@@ -1,5 +1,5 @@
 """In-process Lab executor: 2 runs per process, 4 active per tenant, queue 16
-per tenant, 600 s per run, per-block budgets from lab_evaluate; host graphs are
+per tenant, 600 s per worker attempt, per-block budgets from lab_evaluate; host graphs are
 refused, and tool nodes require explicit admission; claims only on the adopted revision unless idle
 claims are explicitly enabled and labelled.
 """
@@ -27,6 +27,7 @@ from lab_evaluate import (Budget, GraphRefused, RunBudgetExceeded, RunCancelled,
 from routers.lab_surface import lab_surface_enabled
 
 OPS_REVISION = "lab-ops.v1"
+ATTEMPT_WALL_CAP_SECONDS = 600
 _LOG = logging.getLogger(__name__)
 
 
@@ -220,7 +221,7 @@ class LabWorker:
                 _LOG.warning("lab_worker_heartbeat_failed class=%s", type(exc).__name__)
                 return
 
-    def _terminal(self, run, state, reason=None):
+    def _terminal(self, run, state, reason=None, *, cleanup_confirmed=True):
         with run.lock:
             off = self._off_reason()
             if off:
@@ -228,9 +229,11 @@ class LabWorker:
             if run.lost or run.suspended or run.terminal:
                 return
             if state != "finished" and not self._append(run, [{
-                    "kind": state, "payload": {"reason": reason} if reason else {}}]):
+                    "kind": state, "payload": dict(
+                        {"reason": reason} if reason else {},
+                        **({"cleanup_confirmed": False} if not cleanup_confirmed else {}))}]):
                 return
-            if self.store.finish(*self._args(run), state):
+            if self.store.finish(*self._args(run), state, attempt_wall_cap_seconds=ATTEMPT_WALL_CAP_SECONDS):
                 run.terminal = True
                 self.emit.emit_lab_run_terminal(state)
             else:
@@ -239,6 +242,21 @@ class LabWorker:
     def _execute(self, run):
         started = self.clock()
         renewer = threading.Thread(target=self._renew, args=(run,), daemon=True, name="lab-lease")
+        adapter = None
+        corpus_adapter = None
+
+        def finish(state, reason=None):
+            confirmed = True
+            if corpus_adapter is not None:
+                try:
+                    # Failure must close even intents the evaluator never observed.
+                    confirmed = corpus_adapter.cleanup_corpus(deadline=state != 'cancelled')
+                except Exception:
+                    confirmed = False
+            if not confirmed and state == 'finished':
+                state, reason = 'failed', 'lab_corpus_cleanup_unconfirmed'
+            self._terminal(run, state, reason, cleanup_confirmed=confirmed)
+
         try:
             renewer.start()
             row = run.row
@@ -246,7 +264,7 @@ class LabWorker:
                 self._terminal(run, "cancelled", "activation_inactive")
                 return
             artifact = self.artifacts.get(row["tenant_id"], row["doc_id"], row["graph_revision"])
-            if self.clock() - started >= 600:
+            if self.clock() - started >= ATTEMPT_WALL_CAP_SECONDS:
                 raise RunBudgetExceeded()
             if artifact["sha256"] != row["graph_sha256"]:
                 self._terminal(run, "failed", "graph_pin_mismatch")
@@ -266,7 +284,7 @@ class LabWorker:
                     cursor = batch[-1]["seq"]
 
             elapsed = max(0, self.clock() - started)
-            if elapsed >= 600:
+            if elapsed >= ATTEMPT_WALL_CAP_SECONDS:
                 raise RunBudgetExceeded()
             if self._activation_inactive(run):
                 self._terminal(run, "cancelled", "activation_inactive")
@@ -276,7 +294,7 @@ class LabWorker:
                 with run.lock:
                     if self._cancelled(run):
                         raise RunCancelled()
-                    if self.clock() - started > 600:
+                    if self.clock() - started > ATTEMPT_WALL_CAP_SECONDS:
                         raise RunBudgetExceeded()
                     if block_id not in committed:
                         if not self._append(run, [{"kind": "value", "block_id": block_id,
@@ -290,18 +308,33 @@ class LabWorker:
                            if row["adapter_revision"] == "lab-activation.v1" else {})
                 corpus_options = {}
                 if row.get('corpus_authority_json') is not None:
+                    def corpus_requested():
+                        # Admission must not use the observer's cached cancel read.
+                        with run.lock:
+                            run.checked_at = float('-inf')
+                            return self._cancelled(run) and run.cancel
+
                     corpus_options = {
+                        'monotonic': self.clock,
                         'corpus_authority': self.store.corpus_authority(row),
                         'corpus_owned': lambda: (not run.lost and not run.suspended and not self._stop.is_set()
                             and self.store.owns_corpus_run(*self._args(run))),
-                        'corpus_requested': lambda: (self._cancelled(run) and run.cancel),
+                        'corpus_requested': corpus_requested,
                         'corpus_cancel': lambda block, job, deadline: self.store.cancel_corpus_job(
                             *self._args(run), block, job, deadline=deadline),
                     }
-                tool_options["tool_adapter"] = lab_tool_nodes.ToolNodeAdapter(
+                adapter = lab_tool_nodes.ToolNodeAdapter(
                     row["tenant_id"], row["run_id"], cancelled=lambda: self._cancelled(run),
                     **effects, **corpus_options)
-            evaluate_graph(artifact["graph"], lab_tool_manifests.registry_for(str(row["tenant_id"])), budget=Budget(run_wall_s=600 - elapsed),
+                tool_options['tool_adapter'] = adapter
+            registry = lab_tool_manifests.registry_for(str(row['tenant_id']))
+            if adapter is not None and corpus_options:
+                corpus_adapter = adapter
+                adapter.prime_corpus(artifact['graph'], registry, deadline=started + ATTEMPT_WALL_CAP_SECONDS)
+            elapsed = max(0, self.clock() - started)
+            if elapsed >= ATTEMPT_WALL_CAP_SECONDS:
+                raise RunBudgetExceeded()
+            evaluate_graph(artifact["graph"], registry, budget=Budget(run_wall_s=ATTEMPT_WALL_CAP_SECONDS - elapsed),
                            clock=self.clock, cancelled=lambda: self._cancelled(run), on_block=on_block,
                            trusted_lookup=functools.partial(lab_tool_manifests.trusted_for, str(row["tenant_id"])),
                            **tool_options)
@@ -310,23 +343,28 @@ class LabWorker:
                 run.checked_at = float("-inf")
                 if self._cancelled(run):
                     raise RunCancelled()
-            if self.clock() - started > 600:
+            if self.clock() - started > ATTEMPT_WALL_CAP_SECONDS:
                 raise RunBudgetExceeded()
-            self._terminal(run, "finished")
+            finish("finished")
         except RunCancelled:
             if run.cancel:
-                self._terminal(run, "cancelled", run.cancel_reason)
+                finish("cancelled", run.cancel_reason)
             elif self._stop.is_set():
                 self._suspend(run, "worker_disabled")
         except RunBudgetExceeded:
-            self._terminal(run, "failed", "run_wall_cap")
+            finish("failed", "run_wall_cap")
         except GraphRefused as exc:
-            self._terminal(run, "failed", exc.code)
+            finish("failed", exc.code)
         except Exception as exc:
             _LOG.warning("lab_worker_run_failed class=%s", type(exc).__name__)
             try:
-                self._terminal(run, "failed", "worker_error")
+                finish("failed", "worker_error")
             except Exception as terminal_exc:
                 _LOG.warning("lab_worker_terminal_failed class=%s", type(terminal_exc).__name__)
         finally:
+            if corpus_adapter is not None and not run.terminal:
+                try:
+                    corpus_adapter.cleanup_corpus(deadline=True)
+                except Exception:
+                    _LOG.warning('lab_corpus_cleanup_unconfirmed')
             run.done.set()

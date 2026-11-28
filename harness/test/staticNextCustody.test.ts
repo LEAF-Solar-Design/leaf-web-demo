@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { DiskStaticNextCustodyStore } from "../src/projectBuild/diskStaticNextCustodyStore.js";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StaticNextObjectStore } from "../src/projectBuild/codebuildStaticNextExecutor.js";
 import type { StaticNextJobResult } from "../src/projectBuild/managedNextRuntime.js";
@@ -28,24 +29,10 @@ const base = `static-next/${bundleSha256}/${executionId}`;
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 
-/** A fresh instance shares only persisted objects, never an in-process job map. */
-class DiskObjects implements StaticNextObjectStore {
-  constructor(readonly root: string) {}
-  async get(key: string): Promise<Buffer | null> {
-    try { return await readFile(join(this.root, key)); }
-    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
-  }
-  async putIfAbsent(key: string, body: Buffer): Promise<"created" | "exists"> {
-    await mkdir(dirname(join(this.root, key)), { recursive: true });
-    try { await writeFile(join(this.root, key), body, { flag: "wx" }); return "created"; }
-    catch (e) { if ((e as NodeJS.ErrnoException).code === "EEXIST") return "exists"; throw e; }
-  }
-}
-
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "nx3c-custody-"));
   directories.push(root);
-  const store = new DiskObjects(join(root, "custody"));
+  const store = new DiskStaticNextCustodyStore(root);
   const artifactOptions = { root: join(root, "artifacts"), bindingId: artifactBindingId, isCurrent: async () => true };
   const artifacts = new DiskPrivateStaticArtifacts(artifactOptions);
   // Deliberately unsorted: custody must preserve the producer's manifest order.
@@ -63,6 +50,32 @@ async function fixture() {
 }
 
 describe("static Next durable custody writer and READY loader", () => {
+  it.each([
+    ["chart with a data download", "/series.json", "application/json", "[1,2]"],
+    ["captioned photo gallery", "/caption.txt", "text/plain", "North roof"],
+    ["schedule with a CSV export", "/schedule.csv", "text/csv", "box,input"],
+  ])("reopens the private output of a %s", async (_ask, path, contentType, text) => {
+    const f = await fixture();
+    const file = { path, contentType, body: Buffer.from(text) };
+    const result = { ...f.result, files: [f.files[0], file] };
+    await publishStaticNextCustody({ ...f.publish, result });
+    const artifacts = new DiskPrivateStaticArtifacts(f.artifactOptions);
+    const view = await loadPrivateStaticView({ ...f.load, artifacts, store: new DiskStaticNextCustodyStore(f.root) });
+    expect(view).not.toBeNull();
+    const asset = await artifacts.read(scope, view!.preview.artifactId, path, file.body.length);
+    expect(asset.body).toEqual(file.body);
+  });
+
+  it("keeps the first complete receipt when independent writers race", async () => {
+    const f = await fixture();
+    const key = base + "/receipt.json";
+    const bodies = ["chart", "gallery", "schedule"].map(value => Buffer.from(value.repeat(1000)));
+    const outcomes = await Promise.all(bodies.map(body => new DiskStaticNextCustodyStore(f.root).putIfAbsent(key, body)));
+    expect(outcomes.filter(result => result === "created")).toHaveLength(1);
+    expect(await f.store.get(key)).toEqual(bodies[outcomes.indexOf("created")]);
+    await expect(f.store.get("../receipt.json")).rejects.toThrow();
+  });
+
   it("publishes the raw receipt and reopens the exact normalized view and bytes through fresh readers", async () => {
     const f = await fixture();
     const receipt = await publishStaticNextCustody(f.publish);
@@ -79,7 +92,7 @@ describe("static Next durable custody writer and READY loader", () => {
       terminalState: "READY", sandboxCleanupConfirmed: true, artifactBindingId,
       artifactId: published.artifactId, manifestSha256: staticManifestDigest(manifest), manifest,
       createdAt: "2026-11-01T00:00:00.000Z", cleanupAt: "2026-11-01T00:01:00.000Z" });
-    const store = new DiskObjects(f.store.root);
+    const store = new DiskStaticNextCustodyStore(f.root);
     const artifacts = new DiskPrivateStaticArtifacts(f.artifactOptions);
     expect(JSON.parse((await store.get(`${base}/receipt.json`))!.toString())).toEqual(receipt);
     const record = await loadPrivateStaticView({ ...f.load, store, artifacts });
@@ -111,6 +124,52 @@ describe("static Next durable custody writer and READY loader", () => {
       files: [{ ...f.files[0], body: Buffer.from("different content") }] } }))
       .rejects.toMatchObject({ code: "job_conflict" });
     expect(JSON.parse((await f.store.get(`${base}/receipt.json`))!.toString())).toEqual(first);
+  });
+
+  it("recovers a receipt after losing the write acknowledgement without extending retention", async () => {
+    const f = await fixture();
+    const store: StaticNextObjectStore = {
+      get: key => f.store.get(key),
+      putIfAbsent: async (key, value) => {
+        await f.store.putIfAbsent(key, value);
+        throw new Error("acknowledgement lost");
+      },
+    };
+    await expect(publishStaticNextCustody({ ...f.publish, store })).rejects.toThrow("acknowledgement lost");
+    const key = `${base}/receipt.json`;
+    const original = await f.store.get(key);
+    const recovered = await publishStaticNextCustody({ ...f.publish,
+      now: () => new Date(instant.getTime() + 1000) });
+    expect(recovered.createdAt).toBe(instant.toISOString());
+    expect(recovered.cleanupAt).toBe(new Date(instant.getTime() + 60_000).toISOString());
+    expect(await f.store.get(key)).toEqual(original);
+  });
+
+  it("returns the winning receipt when another publisher writes during artifact storage", async () => {
+    const f = await fixture();
+    const store: StaticNextObjectStore = {
+      get: key => f.store.get(key),
+      putIfAbsent: async (key, value) => {
+        await publishStaticNextCustody({ ...f.publish, now: () => new Date(instant.getTime() + 1000) });
+        return f.store.putIfAbsent(key, value);
+      },
+    };
+    const recovered = await publishStaticNextCustody({ ...f.publish, store });
+    expect(recovered.createdAt).toBe(new Date(instant.getTime() + 1000).toISOString());
+    expect(await f.store.get(`${base}/receipt.json`)).toEqual(Buffer.from(JSON.stringify(recovered)));
+  });
+
+  it.each(["expired", "cleaned"])("refuses to republish %s custody", async state => {
+    const f = await fixture();
+    await publishStaticNextCustody(f.publish);
+    if (state === "cleaned") {
+      await markStaticNextCleaned({ store: f.store, bundleSha256, executionId, filesRemoved: false, now });
+    }
+    const put = vi.spyOn(f.artifacts, "put");
+    await expect(publishStaticNextCustody({ ...f.publish,
+      now: () => new Date(instant.getTime() + (state === "expired" ? 60_000 : 1000)) }))
+      .rejects.toMatchObject({ code: "job_conflict" });
+    expect(put).not.toHaveBeenCalled();
   });
 
   it.each(["sourceRequestId", "version", "receiptDigest"] as const)(

@@ -33,6 +33,7 @@ import tempfile
 import time
 from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from types import CodeType
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from envelopes import ErrorCode, err_envelope, error_obj, ok_envelope
@@ -92,7 +93,7 @@ def _platform_builtin_package_ids() -> frozenset[Tuple[str, str, str]]:
 
 
 def _load_module(path: Path):
-    """Import a tool file by path (reloaded when its mtime OR size changes)."""
+    """Import a tool once per source revision, retaining the built-in Count digest."""
     st = path.stat()
     key = f"{path}:{st.st_mtime_ns}:{st.st_size}"
     cached = _MOD_CACHE.get(key)
@@ -103,9 +104,27 @@ def _load_module(path: Path):
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load spec for {path}")
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    if path.name == "count_modules.py" and path.is_relative_to(BUILTIN_DIR.resolve()):
+        # Hash the bytes we execute on a cache miss. A warm saved replay only
+        # needs metadata and shares the same module as every other caller.
+        source = path.read_bytes()
+        exec(compile(source, str(path), "exec", dont_inherit=True), mod.__dict__)
+        mod._leaf_count_entry_sha256 = hashlib.sha256(source).hexdigest()
+    else:
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
     _MOD_CACHE[key] = mod
     return mod
+
+
+@lru_cache(maxsize=1)
+def _count_geometry_sha256(loaded: CodeType) -> str:
+    """Identify the image source for the OCS transform used by region counts."""
+    source = (SERVER_DIR / "dxf_intake.py").read_bytes()
+    module = compile(source, loaded.co_filename, "exec", dont_inherit=True)
+    if not any(isinstance(code, CodeType) and code.co_name == "_ocs_to_wcs"
+               and code == loaded for code in module.co_consts):
+        raise ImportError("count geometry does not match the image source")
+    return hashlib.sha256(source).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
@@ -1073,14 +1092,25 @@ def resolve_local_file(tool: Dict[str, Any], tenant_id: Optional[str] = None) ->
 
 def _is_trusted_builtin_path(tool: Dict[str, Any], local: Path) -> bool:
     try:
-        local.resolve().relative_to(BUILTIN_DIR.resolve())
+        builtin_path = local.resolve().relative_to(BUILTIN_DIR.resolve())
     except (OSError, ValueError):
         return False
     name = tool.get("name")
     engine_op = tool.get("engine_op")
     if not isinstance(name, str) or not isinstance(engine_op, str):
         return False
-    return (name, engine_op, local.name) in _platform_builtin_package_ids()
+    platform_ids = _platform_builtin_package_ids()
+    if (name, engine_op, local.name) in platform_ids:
+        return True
+    # This catalog registration is a read-only alias of the shipped String
+    # Panels package. Require its exact entry and resolved platform file.
+    return (
+        (name, engine_op) == ("autofill-string-targets", "autofill_string_targets")
+        and tool.get("entry") == "builtins/string_panels.py"
+        and "drawing.write" not in (tool.get("capabilities") or [])
+        and builtin_path == Path("string_panels.py")
+        and ("string-panels", "string_panels", "string_panels.py") in platform_ids
+    )
 
 
 def is_trusted_builtin_tool(tool: Dict[str, Any],
@@ -1090,7 +1120,8 @@ def is_trusted_builtin_tool(tool: Dict[str, Any],
     A tool with no local Python implementation uses APS or fails normally, so it
     does not execute a file in this process. A local implementation is trusted only
     when resolution lands inside ``server/builtins`` AND its execution identity is
-    declared by the platform-owned engine registry. Path location alone is not
+    declared by the platform-owned engine registry or is its authorized
+    read-only catalog alias. Path location alone is not
     package provenance: agent-authored or seed packages can point at that directory
     without becoming platform builtins. Resolution checks the requesting tenant
     first, so a tenant file that shadows a builtin-looking path remains untrusted.
@@ -1264,8 +1295,31 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         return err_envelope(ErrorCode.BAD_PARAMS, "params schema: " + "; ".join(perrs),
                             retryable=False, tool=name, version=version, timing_ms=_ms())
 
+    # Instant artifacts with no batch fallback must never resolve onto a
+    # same-named compatibility body in this batch executor.
+    instant = tool.get("execution_class") == "instant"
+    if instant and (tool.get("batch_fallback") is not True or test_source is not None):
+        return err_envelope(
+            ErrorCode.BAD_PARAMS,
+            "tool requires the instant executor (batch_fallback=false); batch execution is unavailable",
+            retryable=False, tool=name, version=version, timing_ms=_ms())
+
+    artifact = None
     test_filename = None
-    if test_source is not None:
+    if instant:
+        import deps
+        from instant_execution import ARTIFACT_REGISTRY
+        seed = deps.load_seed_catalog_tools()
+        definition = next((row for row in seed if row.get("name") == name), None)
+        try:
+            if not definition or deps.catalog_tool_digest(definition) != deps.catalog_tool_digest(tool):
+                raise ValueError("instant fallback differs from published platform definition")
+            artifact = ARTIFACT_REGISTRY.resolve(definition, catalog_commit=deps.base_catalog_pin(seed)["catalog_commit"])
+        except (ValueError, OSError):
+            return err_envelope(ErrorCode.BAD_PARAMS, "unverified instant fallback artifact",
+                                retryable=False, tool=name, version=version, timing_ms=_ms())
+        local = None
+    elif test_source is not None:
         if aps_live:
             return err_envelope(
                 ErrorCode.BAD_PARAMS,
@@ -1287,7 +1341,7 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         local = resolve_local_file(tool, tenant_id)
 
     # 2) APS path (kind:appbundle OR kind:script with only .lsp/engine_script)
-    if aps_live and da is not None and hasattr(da, "run_tool") and local is None:
+    if artifact is None and aps_live and da is not None and hasattr(da, "run_tool") and local is None:
         try:
             if hasattr(da, "ensure_tool_activity"):
                 da.ensure_tool_activity(tool)
@@ -1305,7 +1359,7 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
     # local_only: its implementation IS the local file by design (a preflight that
     # must cost nothing), so running it here is the contract, not a fallback.
     degraded = bool(aps_live) and not bool(tool.get("local_only"))
-    if local is None and test_source is None:
+    if artifact is None and local is None and test_source is None:
         return err_envelope(
             ErrorCode.BAD_PARAMS,
             f"no local implementation resolvable for tool {name!r} "
@@ -1338,8 +1392,15 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
     # stay sandboxed because a protected live write requires microvm provenance.
     use_sandbox = tier != "off" and not trusted_read_builtin
     execution_provenance = None
-    if use_sandbox:
-        if test_source is not None:
+    rule_reference = None
+    if use_sandbox or artifact is not None:
+        if artifact is not None:
+            source = artifact.source.decode("utf-8")
+            if tier == "microvm":
+                kind, payload = _run_source_in_sandbox_e2b(source, definition["entry"], intake, params, tenant_id=tenant_id)
+            else:
+                kind, payload = _run_source_in_sandbox(source, definition["entry"], intake, params)
+        elif test_source is not None:
             assert test_filename is not None
             if tier == "microvm":
                 kind, payload = _run_source_in_sandbox_e2b(
@@ -1372,6 +1433,14 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         assert local is not None
         try:
             mod = _load_module(local)
+            if trusted_read_builtin and local.name == "count_modules.py":
+                from dxf_intake import _ocs_to_wcs
+
+                rule_reference = {
+                    "schema": "leaf.count-rule.v1",
+                    "entry_sha256": mod._leaf_count_entry_sha256,
+                    "geometry_sha256": _count_geometry_sha256(_ocs_to_wcs.__code__),
+                }
         except Exception as exc:  # noqa: BLE001
             return err_envelope(ErrorCode.INTERNAL,
                                 f"failed to load tool file {local.name}: {type(exc).__name__}: {exc}",
@@ -1385,8 +1454,12 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         except Exception as exc:  # noqa: BLE001
             # Only a platform-owned reader may declare a user-facing validation error.
             if trusted_read_builtin and isinstance(exc, getattr(mod, "InputValidationError", ())):
-                return err_envelope(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
-                                    tool=name, version=version, timing_ms=_ms())
+                envelope = err_envelope(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                                        tool=name, version=version, timing_ms=_ms())
+                action = getattr(exc, "next_action", None)
+                if isinstance(action, str) and action.strip():
+                    envelope["error"]["next_action"] = action
+                return envelope
             return err_envelope(ErrorCode.INTERNAL,
                                 f"tool {name!r} raised {type(exc).__name__}: {exc}",
                                 retryable=False, tool=name, version=version, timing_ms=_ms())
@@ -1402,6 +1475,10 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         # passing `leaf.tool-execution.v1` microvm receipt over any 64-hex
         # digest) and every downstream reader would take it as verified.
         # Dropped at the seam it enters; only a `_MicrovmSuccess` sets it.
+        env.pop("rule_reference", None)
+        env.pop("executed_code_digest", None)
+        if artifact is not None:
+            env["executed_code_digest"] = artifact.code_digest
         env.pop("execution_provenance", None)
         if execution_provenance is not None:
             env["execution_provenance"] = execution_provenance
@@ -1409,8 +1486,12 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
     result, overlay = coerced
     env = ok_envelope(name, version, result, overlay, timing_ms=_ms(), cost=None,
                       degraded_mode=degraded)
+    if artifact is not None:
+        env["executed_code_digest"] = artifact.code_digest
     if execution_provenance is not None:
         env["execution_provenance"] = execution_provenance
+    if rule_reference is not None:
+        env["rule_reference"] = rule_reference
 
     # 4) POST-VALIDATE the §3 envelope — a broken tool surfaces as INTERNAL
     everrs = validate_envelope(env)

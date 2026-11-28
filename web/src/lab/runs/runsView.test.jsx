@@ -26,7 +26,7 @@ const seed = () => {
   store.apply('r', { seq: 0, kind: 'value', block_id: 'count', payload: { result: { data: 3, as_of: Date.now() - 120000 } } })
   return store
 }
-const evidenceRun = (confirmation = true) => {
+const evidenceRun = (confirmation = true, confirmationOverrides = {}) => {
   const store = createValueStore()
   const digest = 'a'.repeat(64), parent = 'b'.repeat(64), rows = 'c'.repeat(64)
   const report = { schema: 'leafhft.block-suite-result.v1', suite_sha256: 'd'.repeat(64), rows_sha256: rows,
@@ -40,7 +40,8 @@ const evidenceRun = (confirmation = true) => {
         child: { n: 2, mean_claimed_prob: 0.5000000000000001, win_rate: 0 } },
       confirm_comparison: { paired_ci95_c: [null, null], child_minus_parent_mean_c: -0.0000000000001 },
       confirm_tickets: { parent: [], child: [{ market_id: 'synthetic-final-ticket' }] },
-      protocol: { draws: 10, seed: 7 }, splits: { select: { rows: 30 }, confirm: { rows: 20 } } } : null }
+      protocol: { draws: 10, seed: 7 }, splits: { select: { rows: 30 }, confirm: { rows: 20 } },
+      ...confirmationOverrides } : null }
   const evidence = { policy: { schema: 'leaf.lab-corpus-policy.v1', version: 1, digest,
     parent_suite_sha256: parent, parameters: { min_select_tickets: 0 },
     lineage: { doc_id: 'saved-composition', graph_revision: 2, graph_sha256: 'e'.repeat(64) } },
@@ -114,11 +115,124 @@ const reviewRecovery = () => fireEvent.click(screen.getByRole('button', { name: 
 const expectRecoveryGets = fetchImpl => {
   expect(fetchImpl.mock.calls.length).toBeGreaterThan(0)
   for (const [url, options] of fetchImpl.mock.calls) {
-    expect(url).toMatch(/\/recovery-plan$/)
+    expect(url).toMatch(/\/recovery-plan\?include_cleanup=true$/)
     expect(options.method).toBe('GET')
     expect(options.body).toBeUndefined()
   }
 }
+
+const cleanupFixture = (state = 'confirmed_reaped') => {
+  const plan = recoveryFixture([
+    ['BTC', 'retained', 'completed'], ['ETH', 'unresolved', 'cancelled'],
+  ])
+  plan.schema = 'leaf.lab-corpus-recovery-plan.v2'
+  plan.blocks.forEach(block => {
+    block.cleanup_evidence = { schema: 'leaf.lab-corpus-cleanup-evidence.v1', job_id: block.job_id,
+      attempt: 1, state: 'unconfirmed', cancel: null, receipt: null }
+  })
+  const evidence = plan.blocks[1].cleanup_evidence
+  if (state !== 'unconfirmed') {
+    const tag = { run_id: plan.source.run_id, block_id: 'ETH', attempt: 1, fence: 7, reason: 'deadline' }
+    Object.assign(evidence, { state, cancel: tag, receipt: { attempt: 1, cancel: { ...tag },
+      reaped: state === 'confirmed_reaped', not_started: state === 'confirmed_not_started' } })
+  }
+  return signPlan(plan)
+}
+
+describe('Runs factual cleanup evidence', () => {
+  it.each([
+    ['unconfirmed', 'Unconfirmed'], ['confirmed_reaped', 'Confirmed reaped'],
+    ['confirmed_not_started', 'Confirmed not started'],
+  ])('renders retained BTC and %s ETH from one source without execution calls', async (state, label) => {
+    const plan = freezePlan(cleanupFixture(state))
+    const fetchImpl = vi.fn().mockResolvedValue(recoveryResponse(plan))
+    render(<RunsView store={recoveryStore(plan)} fetchImpl={fetchImpl} mock />)
+    expect(fetchImpl).not.toHaveBeenCalled()
+    reviewRecovery()
+    const preview = within(await screen.findByRole('region', { name: 'Recovery options preview' }))
+    expect(preview.getByText('BTC')).toBeVisible()
+    expect(preview.getByText('ETH')).toBeVisible()
+    const eth = within(preview.getByText('ETH').closest('li'))
+    expect(eth.getByText(`Cleanup: ${label} · attempt: 1`)).toBeVisible()
+    expect(eth.getByText('Job: authoritative-job-1 · status: failed')).toBeVisible()
+    expect(preview.getByText(`Source run: ${plan.source.run_id} · finished`)).toBeVisible()
+    expect(preview.getByText(`Graph digest: ${plan.source.graph_sha256}`)).toBeVisible()
+    expect(preview.getByText('Execution is unavailable in this preview. A later execution stage requires confirmation.')).toBeVisible()
+    expect(screen.getAllByRole('button')).toHaveLength(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expectRecoveryGets(fetchImpl)
+  })
+  it('reads a default v1 plan as having no cleanup proof', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(recoveryResponse(smallRecoveryPlan))
+    render(<RunsView store={recoveryStore(smallRecoveryPlan)} fetchImpl={fetchImpl} mock />)
+    reviewRecovery()
+    const preview = within(await screen.findByRole('region', { name: 'Recovery options preview' }))
+    expect(preview.getAllByText('Cleanup: Unconfirmed · attempt: Unavailable')).toHaveLength(3)
+    expectRecoveryGets(fetchImpl)
+  })
+  it.each([
+    ['extra block field', plan => { plan.blocks[1].safe_to_start = true }],
+    ['missing evidence', plan => { delete plan.blocks[1].cleanup_evidence }],
+    ['extra evidence', (plan, e) => { e.private = 'private-never-display' }],
+    ['wrong schema', (plan, e) => { e.schema = 'unexpected' }],
+    ['foreign job', (plan, e) => { e.job_id = 'private-never-display' }],
+    ['negative attempt', (plan, e) => { e.attempt = -1 }],
+    ['bool attempt', (plan, e) => { e.attempt = true }],
+    ['null attempt', (plan, e) => { e.attempt = null }],
+    ['wrong state', (plan, e) => { e.state = 'safe_to_start' }],
+    ['missing tag', (plan, e) => { e.cancel = null }],
+    ['foreign run', (plan, e) => { e.cancel.run_id = 'private-never-display' }],
+    ['foreign block', (plan, e) => { e.cancel.block_id = 'BTC' }],
+    ['wrong tag attempt', (plan, e) => { e.cancel.attempt = 2 }],
+    ['zero fence', (plan, e) => { e.cancel.fence = 0 }],
+    ['bool fence', (plan, e) => { e.cancel.fence = true }],
+    ['wrong reason', (plan, e) => { e.cancel.reason = 'private-never-display' }],
+    ['extra tag', (plan, e) => { e.cancel.actor = 'private-never-display' }],
+    ['missing receipt', (plan, e) => { e.receipt = null }],
+    ['extra receipt', (plan, e) => { e.receipt.worker_id = 'private-never-display' }],
+    ['wrong receipt attempt', (plan, e) => { e.receipt.attempt = 2 }],
+    ['changed receipt fence', (plan, e) => { e.receipt.cancel.fence = 8 }],
+    ['extra receipt tag', (plan, e) => { e.receipt.cancel.private = 'private-never-display' }],
+    ['both facts true', (plan, e) => { e.receipt.not_started = true }],
+    ['both facts false', (plan, e) => { e.receipt.reaped = false }],
+    ['nonboolean fact', (plan, e) => { e.receipt.reaped = 1 }],
+    ['inconsistent fact state', (plan, e) => { e.state = 'confirmed_not_started' }],
+    ['unconfirmed with receipt', (plan, e) => { e.state = 'unconfirmed' }],
+    ['unbound proof', (plan, e) => {
+      Object.assign(plan.blocks[1], { job_id: null, status: null, receipt_sha256: null })
+      e.job_id = null
+    }],
+    ['wrong source', plan => { plan.source.graph_sha256 = 'd'.repeat(64) }],
+    ['wrong revision', plan => { plan.source.graph_revision = 9 }],
+    ['v1 with proof fields', plan => { plan.schema = 'leaf.lab-corpus-recovery-plan.v1' }],
+    ['execution granted', plan => { plan.execution_allowed = true }],
+  ])('refuses signed v2 tamper: %s', async (unused, change) => {
+    const baseline = cleanupFixture(), mutable = JSON.parse(JSON.stringify(baseline))
+    change(mutable, mutable.blocks[1].cleanup_evidence)
+    const store = recoveryStore(baseline)
+    store.upsertRun(baseline.source.run_id, { doc_id: baseline.source.doc_id,
+      graph_sha256: baseline.source.graph_sha256 })
+    const fetchImpl = vi.fn().mockResolvedValue(recoveryResponse(signPlan(mutable)))
+    render(<RunsView store={store} fetchImpl={fetchImpl} mock />)
+    reviewRecovery()
+    await screen.findByText('Recovery options unavailable. The plan could not be verified.')
+    expect(screen.queryByRole('region', { name: 'Recovery options preview' })).toBeNull()
+    expect(screen.queryByText(/private-never-display/)).toBeNull()
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expectRecoveryGets(fetchImpl)
+  })
+  it('rejects a changed cleanup fact under the previous digest', async () => {
+    const baseline = cleanupFixture(), changed = JSON.parse(JSON.stringify(baseline))
+    changed.blocks[1].cleanup_evidence.cancel.fence = 8
+    changed.blocks[1].cleanup_evidence.receipt.cancel.fence = 8
+    const fetchImpl = vi.fn().mockResolvedValue(recoveryResponse(changed))
+    render(<RunsView store={recoveryStore(baseline)} fetchImpl={fetchImpl} mock />)
+    reviewRecovery()
+    await screen.findByText('Recovery options unavailable. The plan could not be verified.')
+    expect(screen.queryByRole('region', { name: 'Recovery options preview' })).toBeNull()
+    expectRecoveryGets(fetchImpl)
+  })
+})
 
 describe('Runs recovery options preview', () => {
   it('reviews a frozen three-node plan only on explicit clicks and retains completed verdict fail', async () => {
@@ -131,7 +245,7 @@ describe('Runs recovery options preview', () => {
     const preview = within(await screen.findByRole('region', { name: 'Recovery options preview' }))
     expect(fetchImpl).toHaveBeenCalledTimes(1)
     const [url, options] = fetchImpl.mock.calls[0]
-    expect(url).toBe(`${config.apiBase}/api/lab/runs/${encodeURIComponent(smallRecoveryPlan.source.run_id)}/recovery-plan`)
+    expect(url).toBe(`${config.apiBase}/api/lab/runs/${encodeURIComponent(smallRecoveryPlan.source.run_id)}/recovery-plan?include_cleanup=true`)
     expect(options).toMatchObject({ method: 'GET', credentials: 'same-origin', redirect: 'error', cache: 'no-store',
       headers: { Authorization: 'one', 'X-Tenant-Id': config.tenant, accept: 'application/json' } })
     expect(preview.getByText('Source document: original-document · revision 7')).toBeVisible()
@@ -384,6 +498,33 @@ describe('Runs recovery options preview', () => {
 })
 
 describe('Runs view', () => {
+  it.each([
+    ['parent ticket shortfall', 'insufficient', 19, 37, 8, ['Parent needs 1 more qualifying confirmation ticket (19 of 20).']],
+    ['child and group shortfalls', 'insufficient', 26, 17, 1, [
+      'Child needs 3 more qualifying confirmation tickets (17 of 20).',
+      'Confirmation needs 1 more expiry group (1 of 2).',
+    ]],
+    ['interval crossing zero', 'inconclusive', 30, 37, 8, ['The paired 95% interval still crosses or touches zero.']],
+  ])('explains the evidence needed for %s while retaining the saved policy', (_, verdict, parent, child, groups, messages) => {
+    const { store, evidence } = evidenceRun(true, {
+      verdict, parent: { confirm: { n_tickets: parent } }, child: { confirm: { n_tickets: child } },
+      protocol: { min_confirm_tickets: 20, min_confirm_groups: 2 },
+      splits: { confirm: { groups } },
+      confirm_comparison: { paired_ci95_c: [-5, 8], child_minus_parent_mean_c: 1 },
+    })
+    render(<RunsView store={store} mock />)
+    const section = within(screen.getByRole('region', { name: 'Corpus evaluation evidence' }))
+    expect(section.getByRole('heading', { name: 'What would resolve confirmation' })).toBeVisible()
+    for (const message of messages) expect(section.getByText(message)).toBeVisible()
+    expect(section.getByText(/Replaying the pinned inputs adds no new confirmation evidence/)).toBeVisible()
+    expect(section.getByText(/same saved policy/)).toBeVisible()
+    expect(section.getByText(`Policy digest: ${evidence.policy_digest}`)).toBeVisible()
+  })
+  it('leaves conclusive confirmation outcomes without resolution guidance', () => {
+    const { store } = evidenceRun(true, { verdict: 'worse' })
+    render(<RunsView store={store} mock />)
+    expect(screen.queryByRole('heading', { name: 'What would resolve confirmation' })).toBeNull()
+  })
   it('displays complete policy and evaluation evidence without rounding an insufficient outcome into success', () => {
     const { store, evidence } = evidenceRun()
     render(<RunsView store={store} mock />)
@@ -416,6 +557,48 @@ describe('Runs view', () => {
       expect(section.getByRole('heading', { name: label }).nextElementSibling).toHaveTextContent('Unavailable (not evaluated)')
     }
     expect(section.queryByText('Verdict: pass')).toBeNull()
+  })
+  it('compares three retained values, including two block outputs from the same run and a failed run', async () => {
+    const { store, evidence } = evidenceRun()
+    const add = (run, block, runRevision, state, report) => {
+      const result = { ...evidence, run_id: run, evaluation: report }
+      store.upsertRun(run, { graph_revision: runRevision, state })
+      store.apply(run, { seq: store.getRun(run).lastSeq + 1, kind: 'value', block_id: block,
+        payload: { result: { data: JSON.stringify(result) } } })
+    }
+    add('evaluation', 'second-evaluator', 2, 'finished', { ...evidence.evaluation, confirm_report: null })
+    add('other-run', 'corpus', 3, 'failed', {
+      ...evidence.evaluation, verdict: 'pass', confirm_report: { verdict: 'better', reasons: ['positive interval'],
+        confirm_comparison: { paired_ci95_c: [1, 2], child_minus_parent_mean_c: 1.5 } },
+    })
+    const snapshot = store.getRuns()
+    render(<RunsView store={store} mock />)
+    screen.getByText('Compare corpus evaluations').parentElement.open = true
+    const first = await screen.findByLabelText('Report 1')
+    const second = screen.getByLabelText('Report 2')
+    const third = screen.getByLabelText('Report 3 (optional)')
+    const choose = (select, label) => fireEvent.change(select, {
+      target: { value: within(select).getByRole('option', { name: label }).value },
+    })
+    const original = /· corpus · result · revision 2 · evaluation$/
+    choose(first, original)
+    expect(within(second).getByRole('option', { name: original })).toBeDisabled()
+    expect(screen.queryByRole('table')).toBeNull()
+    choose(second, /second-evaluator.*revision 2/)
+    const table = within(screen.getByRole('table', { name: 'Corpus evaluation comparison' }))
+    expect(table.getAllByRole('columnheader')).toHaveLength(3)
+    choose(third, /revision 3 · other-run/)
+    expect(table.getAllByRole('columnheader')).toHaveLength(4)
+    const values = label => within(table.getByRole('rowheader', { name: label }).parentElement)
+      .getAllByRole('cell').map(cell => cell.textContent)
+    expect(values('Run state')).toEqual(['finished', 'finished', 'failed'])
+    expect(values('Confirmation verdict')).toEqual(['insufficient', 'Unavailable', 'better'])
+    expect(values('Paired 95% interval (cents)')).toEqual(['Unavailable', 'Unavailable', '1 to 2'])
+    expect(values('Confirmation reasons')).toEqual(['too few confirmation tickets', 'Unavailable', 'positive interval'])
+    expect(store.getRuns()).toBe(snapshot)
+    act(() => store.resetSnapshot('other-run', { state: 'failed', graph_revision: 3 }))
+    expect(third).toHaveValue('')
+    expect(table.getAllByRole('columnheader')).toHaveLength(3)
   })
   it('rejects invalid composition edits while retaining the last composition and completed evidence', () => {
     const { store, evidence } = evidenceRun()
@@ -527,5 +710,75 @@ describe('Runs view', () => {
     const store = seed(); render(<RunsView store={store} mock />)
     act(() => store.apply('r', { seq: 1, kind: 'value', block_id: 'count', payload: { result: { data: 99, as_of: Date.now() } } }))
     await waitFor(() => expect(screen.getByText(/result:.*99/)).toBeVisible())
+  })
+})
+
+describe('corpus job lineage', () => {
+  const lineage = (first = 'queued', second = 'running') => ({
+    corpus: true,
+    source: { run_id: 'r', graph_revision: 4, graph_sha256: 'a'.repeat(64), input_digest: 'b'.repeat(64) },
+    blocks: [first, second, 'not submitted'].map((status, index) => ({
+      block_id: ['first', 'second', 'third'][index], status,
+      job_id: index === 2 ? null : 'job-' + index, attempt: index === 2 ? null : index + 1,
+      inputs: { corpus_sha256: 'c'.repeat(64), suite_sha256: 'd'.repeat(64), settings_sha256: 'e'.repeat(64) },
+    })),
+  })
+  const respond = value => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } })
+  const show = () => fireEvent.click(screen.getByRole('button', { name: 'Show corpus jobs' }))
+  const panel = () => within(screen.getByRole('region', { name: 'Corpus jobs' }))
+
+  it('reads active jobs on demand and refreshes the same pinned lineage after the run finishes', async () => {
+    const store = seed()
+    const terminal = lineage('failed', 'completed')
+    terminal.blocks[2].status = 'unavailable'
+    surface.current = { worker: { workers: [] } }
+    const fetchImpl = vi.fn().mockResolvedValueOnce(respond(lineage())).mockResolvedValueOnce(respond(terminal))
+    render(<RunsView store={store} fetchImpl={fetchImpl} />)
+    expect(fetchImpl).not.toHaveBeenCalled()
+    show()
+    expect(await panel().findByText('job-0')).toBeTruthy()
+    expect(panel().getByText('first').closest('li').textContent).toContain('Queued')
+    expect(panel().getByText('second').closest('li').textContent).toContain('Running')
+    expect(panel().getByText('third').closest('li').textContent).toContain('Not submitted')
+    expect(panel().getByText('b'.repeat(64))).toBeTruthy()
+    expect(panel().getAllByText('e'.repeat(64))).toHaveLength(3)
+    act(() => store.apply('r', { seq: 1, kind: 'finished', payload: {} }))
+    fireEvent.click(panel().getByRole('button', { name: 'Refresh corpus jobs' }))
+    expect(await panel().findByText('job-1')).toBeTruthy()
+    expect(panel().getByText('first').closest('li').textContent).toContain('Failed')
+    expect(panel().getByText('second').closest('li').textContent).toContain('Completed')
+    expect(panel().getByText('third').closest('li').textContent).toContain('Unavailable')
+    expect(fetchImpl.mock.calls).toHaveLength(2)
+    for (const [url, options] of fetchImpl.mock.calls) {
+      expect(url).toMatch(/\/runs\/r\/corpus-jobs$/)
+      expect(options.method).toBe('GET')
+    }
+  })
+
+  it.each(['wrong revision', 'missing job ID', 'ordinary run'])('withholds lineage for %s', async variant => {
+    const data = lineage()
+    if (variant === 'wrong revision') data.source.graph_revision = 3
+    if (variant === 'missing job ID') data.blocks[0].job_id = null
+    surface.current = { worker: { workers: [] } }
+    const fetchImpl = vi.fn().mockResolvedValue(respond(variant === 'ordinary run' ? { corpus: false } : data))
+    render(<RunsView store={seed()} fetchImpl={fetchImpl} />)
+    show()
+    expect(await panel().findByText(variant === 'ordinary run'
+      ? 'No corpus jobs for this run.' : 'Corpus job status unavailable. Try refreshing.')).toBeTruthy()
+    expect(panel().queryByText('job-1')).toBeNull()
+  })
+
+  it('discards in-flight lineage when account scope changes', async () => {
+    surface.current = { worker: { workers: [] } }
+    let complete
+    const fetchImpl = vi.fn().mockImplementation(() => new Promise(resolve => { complete = resolve }))
+    render(<RunsView store={seed()} fetchImpl={fetchImpl} />)
+    show()
+    const signal = fetchImpl.mock.calls[0][1].signal
+    act(() => { authority.account = 'account-two'; notifyActiveScopeChanged() })
+    expect(signal.aborted).toBe(true)
+    await act(async () => complete(respond(lineage())))
+    expect(panel().queryByText('job-0')).toBeNull()
+    expect(panel().getByRole('button', { name: 'Show corpus jobs' }).disabled).toBe(false)
   })
 })

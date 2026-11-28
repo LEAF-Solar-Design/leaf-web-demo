@@ -44,10 +44,10 @@ CORRUPT = "the version this save replaces does not match its stored record; noth
 TOO_LARGE = "the edited drawing and its solar design together exceed the stored design bound; nothing was saved"
 # Measured: the payload a carried save stores (raw bytes as the route encodes them, and canonical), and the
 # payload a plain drawing's save stores.
-CARRIED_PAYLOAD_SHA = "26da265bb6e955fde3e30dd97639cf27de4437a773952e7e99de8876e2957139"
-CARRIED_CANONICAL_SHA = "3722a655eb03582d5bdd998a1cc229535e2c63fbc52ac8503c459ead6fd9c1f9"
-PLAIN_PAYLOAD_SHA = "07a679d08545007488bc6e3d1815ff093047294f3ad2a677548c91473e7d6db4"
-MERGED_NODES = 185680  # solar_design_graph._bounded_json node count of the carried v3 intake (i4 fixture)
+CARRIED_PAYLOAD_SHA = "3af1fadca194de6534b3b91f87b9d3065f1c7cd820089d62b5e2067505728909"
+CARRIED_CANONICAL_SHA = "69a4b4d028133679c3a9acc71cc5767132b6553e2608548257561e46ed1eb10a"
+PLAIN_PAYLOAD_SHA = "2d6bfcbc4ed6cf34d5940b5aea4822ca710594c56dd48f9082ec37f47fc25a63"
+MERGED_NODES = 185684  # solar_design_graph._bounded_json node count of the carried v3 intake (i4 fixture)
 PLAN_LEGS = [({"mutations": {}}, "the plan names no operation; the DXF carries this save"),
              ({"mutations": {"removed": ["AB"]}}, "the head has no DWG source; the DXF carries this save")]
 
@@ -114,7 +114,9 @@ def stored_intake(backend, version):
 
 
 def parsed():
-    intake = dxf_intake.parse_dxf_bytes(DXF, source_name="edited.dxf")
+    intake = dxf_intake.parse_dxf_bytes(
+        DXF, source_name="edited.dxf", include_model_entity_counts=True
+    )
     intake["polylineWidthCovered"] = True
     return intake
 
@@ -134,6 +136,7 @@ def assert_carried(backend, client, response, parent):
     assert (response.status_code, body["new_version"]) == (201, {"drawing_id": DRAWING, "version": parent + 1,
                                                                  "parent": parent})
     before, after = stored_intake(backend, parent), stored_intake(backend, parent + 1)
+    assert after["model_entity_counts"] == {"Roof": 1}
     assert {name: after[name] for name in CARRIED} == {name: before[name] for name in CARRIED}
     assert {name: value for name, value in after.items() if name not in CARRIED} == parsed()
     raw = stored_bytes(backend, parent + 1)

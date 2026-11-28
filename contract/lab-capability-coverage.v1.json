@@ -116,6 +116,12 @@
       "host": "production"
     },
     {
+      "source": "studio-tool:compare-layer-counts",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
       "source": "studio-tool:count-by-layer",
       "status": "runnable",
       "adapter_owner": "server.lab_tool_manifests",
@@ -207,6 +213,12 @@
     },
     {
       "source": "studio-tool:solar-color-strings",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-combiner-comparison",
       "status": "readable",
       "adapter_owner": "solar_tools",
       "host": "production"

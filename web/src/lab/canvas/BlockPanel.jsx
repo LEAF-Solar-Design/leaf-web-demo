@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { canonicalJSON } from '../contract.js'
 import { manifestFor, registry } from './registry.js'
-import { connectionStatus } from './portCompat.js'
+import { compatibleSources } from './portCompat.js'
 import { pipeId, validateGraph } from './graphDoc.js'
 import CodeTab, { SettingField, SettingsJSON } from '../code/CodeTab.jsx'
 import { placement } from '../runtime/placement.js'
@@ -41,8 +41,7 @@ export default function BlockPanel({ block, document, onSettings, onConnect, onD
     try { applySettings(value); setMessage('Settings saved') }
     catch (error) { setMessage(error.message) }
   }
-  const candidates = document.blocks.flatMap(node => Object.keys(manifestFor(node, entries).outputs).map(port => ({ node: node.id, port })))
-  const options = target ? candidates.filter(from => connectionStatus(document, { from, to: { node: block.id, port: target } }, entries).ok) : []
+  const options = target ? compatibleSources(document, { node: block.id, port: target }, entries) : []
   return <>
     <div role="tablist" aria-label="Block settings">{['Setup', 'Configure', 'Test', 'Code'].map(name =>
       <button type="button" key={name} id={`block-tab-${name}`} role="tab" aria-selected={tab === name}

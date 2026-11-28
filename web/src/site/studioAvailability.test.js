@@ -156,6 +156,12 @@ const LOCAL = Object.freeze({ hostname: 'localhost', walk: false })
 const WALKING = Object.freeze({ hostname: STAGING_HOST, walk: true })
 
 describe('reading the manifest', () => {
+  it('hides drawing sync only on production hosts', () => {
+    expect(studioFeatureAvailable('cad.drawing-sync', PRODUCTION)).toBe(false)
+    expect(studioFeatureAvailable('cad.drawing-sync', STAGING)).toBe(true)
+    expect(studioFeatureAvailable('cad.drawing-sync', LOCAL)).toBe(true)
+  })
+
   it('reports an enabled feature as available with no disclaimer on every host', () => {
     for (const env of [STAGING, PRODUCTION, LOCAL, WALKING]) {
       expect(studioFeatureAvailable('site.sample-rooftop', env)).toBe(true)

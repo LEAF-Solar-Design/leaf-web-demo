@@ -85,7 +85,7 @@ ROLES = {'module': {'block': 'Panel', 'layer': 'PV'}}
 
 class Connection:
     def __init__(self):
-        self.db = sqlite3.connect(':memory:')
+        self.db = sqlite3.connect(':memory:', check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.statements = []
         self.db.executescript('''
@@ -97,6 +97,9 @@ class Connection:
             CREATE TABLE x07_project_applications(project_key TEXT PRIMARY KEY, customer_key TEXT,
                 profile_id TEXT, version INTEGER, FOREIGN KEY(customer_key,profile_id,version)
                 REFERENCES x07_profile_versions(customer_key,profile_id,version));
+            CREATE TABLE x07_confirmation_evidence(
+                project_key TEXT PRIMARY KEY REFERENCES x07_project_applications(project_key),
+                drawing_key TEXT NOT NULL, input_version_id TEXT NOT NULL, design_window_json TEXT NOT NULL);
         ''')
 
     def execute(self, sql, parameters):
@@ -174,7 +177,9 @@ def test_invalid_roles_refuse_before_write(connection, roles):
 def routes(connection, monkeypatch):
     from routers import x07_profiles as routes
     @contextmanager
-    def transaction():
+    def transaction(**options):
+        if options:
+            assert options == {'isolation': 'repeatable read', 'read_only': True}
         with connection.db:
             yield connection
     monkeypatch.setattr(routes.platform_link, 'platform_db', lambda: SimpleNamespace(transaction=transaction))
@@ -199,12 +204,21 @@ def test_routes_confirm_replay_edit_and_old_pin(routes, connection):
     status, confirmed = call_route(routes, 'confirm', request)
     assert status == 200 and confirmed['ok'] is True
     assert confirmed['applied_profile']['roles'] == ROLES
+    assert confirmed['profile']['roles'] == ROLES
+    assert confirmed['profile']['version'] == 1
+    assert confirmed['profile']['profile_id'] == confirmed['applied_profile']['profile_id']
     status, replay = call_route(routes, 'confirm', request)
     assert status == 200 and replay == confirmed
     assert connection.db.execute('SELECT COUNT(*) FROM x07_profile_versions').fetchone()[0] == 1
     status, edited = call_route(routes, 'edit', routes.Edit(
         roles={'module': {'block': 'Edited', 'layer': 'PV'}}, expected_version=1))
     assert status == 200 and edited['profile']['version'] == 2
+    status, after_edit = call_route(routes, 'confirm', request)
+    assert status == 200
+    assert after_edit['applied_profile'] == confirmed['applied_profile']
+    assert after_edit['profile'] == edited['profile']
+    assert connection.db.execute('SELECT COUNT(*) FROM x07_project_applications').fetchone()[0] == 1
+    assert connection.db.execute('SELECT COUNT(*) FROM x07_profile_versions').fetchone()[0] == 2
     status, reopened = call_route(routes, 'read')
     assert status == 200
     assert reopened['profile']['version'] == 2
@@ -251,3 +265,65 @@ def test_migration_uses_canonical_foreign_keys():
     assert 'REFERENCES projects(org_id, project_id)' in ddl
     assert 'BEFORE UPDATE OR DELETE ON x07_profile_versions' in ddl
     assert 'BEFORE UPDATE OR DELETE ON x07_project_applications' in ddl
+
+
+@pytest.mark.parametrize('scenario', ['edited-profile', 'legacy-and-other-revision', 'foreign-project'])
+def test_recovery_report(routes, connection, monkeypatch, scenario):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[routes.deps.require_active_tenant] = lambda: A
+    endpoint = routes.RECOVERY_PATH
+    revision = str(UUID(int=5))
+    scope = {'project_id': P, 'drawing_id': Q, 'input_version_id': revision}
+    scopes = [scope]
+    expected = []
+    if scenario == 'edited-profile':
+        request = routes.Confirmation(block='Panel', layer='PV', design_window=[0, 0, 3, 3], expected_version=0)
+        status, confirmed = call_route(routes, 'confirm', request)
+        assert status == 200
+        assert call_route(routes, 'confirm', request)[0] == 200
+        assert connection.db.execute('SELECT COUNT(*) FROM x07_confirmation_evidence').fetchone()[0] == 1
+        assert call_route(routes, 'edit', routes.Edit(
+            roles={'module': {'block': 'Edited', 'layer': 'PV'}}, expected_version=1))[0] == 200
+        other = {**scope, 'input_version_id': str(UUID(int=6))}
+        scopes.append(other)
+        expected = [{**scope, 'customer_key': A, 'profile_id': confirmed['applied_profile']['profile_id'],
+                     'pinned_version': 1, 'evidence_status': 'confirmed',
+                     'evidence': {'design_window': [0, 0, 3, 3]}}]
+        expected.append({**expected[0], **other, 'evidence_status': 'unavailable', 'evidence': None})
+    elif scenario == 'legacy-and-other-revision':
+        store = PostgresProfileStore(connection, A)
+        profile = store.save_version(A, ROLES, expected_version=0)
+        store.apply_to_project(P, A, expected_version=1)
+        scopes = [scope, {**scope, 'input_version_id': str(UUID(int=6))}]
+        expected = [{**requested, 'customer_key': A, 'profile_id': profile['profile_id'],
+                     'pinned_version': 1, 'evidence_status': 'unavailable', 'evidence': None}
+                    for requested in scopes]
+    else:
+        scopes = [scope, {**scope, 'project_id': B}]
+
+        def authorize(_tenant, project_id, *_headers):
+            if str(project_id) == B:
+                routes.context_service.refuse('CONTEXT_NOT_FOUND')
+
+        monkeypatch.setattr(routes, '_headers', authorize)
+
+    snapshot = list(connection.db.iterdump())
+    connection.statements.clear()
+    with TestClient(app) as client:
+        first = client.post(endpoint, json={'revisions': scopes})
+        second = client.post(endpoint, json={'revisions': scopes})
+    assert first.json() == second.json()
+    assert first.headers['Cache-Control'] == 'no-store'
+    if scenario == 'foreign-project':
+        assert first.status_code == 404
+        assert 'rows' not in first.json()
+        assert connection.statements == []
+    else:
+        assert first.status_code == 200
+        assert first.json()['rows'] == expected
+        assert all(sql.startswith('SELECT ') for sql in connection.statements)
+    assert list(connection.db.iterdump()) == snapshot

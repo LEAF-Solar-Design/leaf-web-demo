@@ -10,10 +10,50 @@ import { readFileSync } from 'node:fs'
 import { act, cleanup, createEvent, fireEvent, render, screen, within } from '@testing-library/react'
 import ProjectSwitcher from './ProjectSwitcher.jsx'
 import { createWorkspaceController } from '../controllers/workspace/createWorkspaceController.js'
+import { createProject } from '../api.js'
 import { deriveWorkspaceProjectState, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 import { readProjectPrincipal, readRecentProjects, writeRecentProjects } from '../lib/recentProjects.js'
 
 afterEach(cleanup)
+
+it.each([undefined, 'bound'])('retains the New project draft and shows collision recovery with bootstrap state %s', async (bootstrapState) => {
+  const openProject = vi.fn()
+  const onProjectCreated = vi.fn()
+  const controller = createWorkspaceController({
+    storage: { getItem: () => 'o1' }, services: { createProject, openProject },
+    callbacks: { onProjectCreated },
+  })
+  const props = () => ({ ...controller.getSnapshot(), bootstrapState,
+    unavailable: controller.getSnapshot().projectsError,
+    onCreateProject: (name) => controller.createProject(name, { requireCreated: true }),
+  })
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+    project: { project_id: 'existing', name: 'Maple' }, created: false,
+  }), { status: 200 })))
+  try {
+    const view = render(<ProjectSwitcher {...props()} />)
+    fireEvent.click(document.querySelector('.proj-chip'))
+    fireEvent.change(screen.getByLabelText('New project'), { target: { value: 'Maple' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Create project' })) })
+    view.rerender(<ProjectSwitcher {...props()} />)
+    expect(screen.getByLabelText('New project').value).toBe('Maple')
+    expect(screen.getByRole('alert').textContent).toMatch(/Choose a different name.*open the existing project/)
+    expect(openProject).not.toHaveBeenCalled()
+    expect(onProjectCreated).not.toHaveBeenCalled()
+  } finally { controller.dispose(); vi.unstubAllGlobals() }
+})
+
+it('App and ToolCast route visible creation through fresh-create handlers', () => {
+  const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+  expect(app).toMatch(/createWorkspaceProjectRequest\(name, \{ requireCreated: true \}\)/)
+  expect(app).toMatch(/createProject: createWorkspaceProject, importUpload:/)
+  expect(app).toMatch(/onCreateProject=\{createWorkspaceProject\}/)
+  expect(app).toMatch(/projectDraftError=\{workspaceController.projectDraftError\}/)
+  const toolCast = readFileSync(`${process.cwd()}/src/site/ToolCast.jsx`, 'utf8')
+  expect(toolCast).toMatch(/workspace\.createProject\(name, \{ requireCreated: true \}\)/)
+  expect(toolCast).toMatch(/if \(project\) setLeftView\('workspace'\)\s+return project/)
+  expect(toolCast).toMatch(/projectDraftError=\{workspace.projectDraftError\}/)
+})
 
 it('B1-d row5: the mounted App props show creation after an unbound list response', async () => {
   const controller = createWorkspaceController({ authLive: true,
@@ -273,6 +313,48 @@ describe('recent and pinned projects', () => {
     expect(names(groups[1])).toEqual(['Birch', 'Maple'])
     expect(names(groups[2])).toEqual(['Maple', 'Oak', 'Birch'])
     expect(within(menu).queryByText('removed')).toBeNull()
+  })
+
+  it.each([
+    ['canonical ID', { project_id: '11111111-1111-4111-8111-111111111111', id: 'legacy' }, '11111111-1111-4111-8111-111111111111'],
+    ['legacy ID', { id: 'legacy' }, 'legacy'],
+  ])('exposes the %s used to open a project', (_type, identity, expectedId) => {
+    const onOpenProject = vi.fn()
+    render(<ProjectSwitcher orgId="o1" projects={[{ ...identity, name: 'Maple' }]} onOpenProject={onOpenProject} />)
+    fireEvent.click(chip())
+
+    const group = screen.getByRole('group', { name: 'All projects', exact: true })
+    const row = within(group).getByRole('menuitem', { name: /Maple/ })
+    expect(row.getAttribute('data-project-id')).toBe(expectedId)
+    fireEvent.click(row)
+    expect(onOpenProject).toHaveBeenCalledExactlyOnceWith(expectedId)
+  })
+
+  it('finds exactly one same-named project by ID even when its history copies are visible', () => {
+    const targetId = '11111111-1111-4111-8111-111111111111'
+    const otherId = '22222222-2222-4222-8222-222222222222'
+    const sameNamedProjects = [
+      { project_id: otherId, name: 'Maple' },
+      { project_id: targetId, name: 'Maple' },
+    ]
+    const storage = storageForTest()
+    const onOpenProject = vi.fn()
+    writeRecentProjects('alice', { pinned: [targetId], recent: [targetId] }, storage)
+    render(<ProjectSwitcher orgId="o1" principalId="alice" storage={storage}
+      projects={sameNamedProjects} onOpenProject={onOpenProject} />)
+    fireEvent.click(chip())
+
+    for (const name of ['Pinned', 'Recent']) {
+      const historyRow = within(screen.getByRole('group', { name })).getByRole('menuitem', { name: /Maple/ })
+      expect(historyRow.hasAttribute('data-project-id')).toBe(false)
+      expect(historyRow).toBeEnabled()
+    }
+    const group = screen.getByRole('group', { name: 'All projects', exact: true })
+    expect(within(group).getAllByRole('menuitem', { name: /Maple/ })).toHaveLength(2)
+    const matches = group.querySelectorAll(`button[data-project-id="${targetId}"]`)
+    expect(matches).toHaveLength(1)
+    fireEvent.click(matches[0])
+    expect(onOpenProject).toHaveBeenCalledExactlyOnceWith(targetId)
   })
 
   it('pins and unpins without opening a project or closing the menu, persisting across mounts', () => {

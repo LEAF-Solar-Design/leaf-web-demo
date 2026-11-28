@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import socket
 import threading
 import uuid
 from typing import Any
 
+import author_quota
 from customization_models import ChangeState
 from customization_service import (
     CustomizationService, CustomizationServiceError, finish_stage_authority_for_change,
+    refund_unstarted_build,
 )
 
 
@@ -18,6 +21,69 @@ _LOG = logging.getLogger(__name__)
 
 
 DEFAULT_LEASE_SECONDS = 30.0
+MAX_STAGE_WORKERS = 4
+_claim_lock = threading.Lock()
+_active_tenants: set[str] = set()
+
+
+def worker_count() -> int:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_WORKERS", "").strip()
+    if not value:
+        return 1
+    if len(value) == 1 and "1" <= value <= str(MAX_STAGE_WORKERS):
+        return int(value)
+    return 1
+
+
+def fair_claims() -> bool:
+    """Fair (one live build per tenant, across processes) unless LEAF_CUSTOMIZATION_STAGE_FAIR is exactly 0 after strip; more than one in-process worker always forces fair."""
+    return os.environ.get("LEAF_CUSTOMIZATION_STAGE_FAIR", "").strip() != "0" or worker_count() > 1
+
+
+def queue_log_interval() -> float | None:
+    try:
+        value = float(os.environ.get("LEAF_CUSTOMIZATION_STAGE_QUEUE_LOG_S", ""))
+    except ValueError:
+        return None
+    return max(10.0, min(value, 3600.0)) if math.isfinite(value) and value > 0 else None
+
+
+def _queue_log_loop(stop_event: threading.Event, interval: float) -> None:
+    while not stop_event.wait(interval):
+        try:
+            stats = CustomizationService.configured().store.stage_queue_stats()
+            # WARNING on purpose: the app sets no root handler and Python's last-resort handler drops INFO; the production metric filters read this exact text (leaf-automation-aws-terraform #3590)
+            _LOG.warning(
+                "customization_stage_queue depth=%d running=%d oldest_wait_s=%d",
+                stats["depth"], stats["running"], stats["oldest_wait_s"],
+            )
+        except Exception as exc:
+            _LOG.warning("customization_stage_queue exception=%s", type(exc).__name__)
+
+
+def start_workers(stop_event: threading.Event) -> list[threading.Thread]:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_WORKERS", "").strip()
+    if value and not (len(value) == 1 and "1" <= value <= str(MAX_STAGE_WORKERS)):
+        _LOG.warning("invalid LEAF_CUSTOMIZATION_STAGE_WORKERS")
+    threads = []
+    for index in range(worker_count()):
+        thread = threading.Thread(
+            target=serve, kwargs={"stop_event": stop_event}, daemon=True,
+            name="customization-stage-worker" + (f"-{index + 1}" if index else ""),
+        )
+        thread.start()
+        threads.append(thread)
+    interval = queue_log_interval()
+    if interval is not None:
+        thread = threading.Thread(
+            target=_queue_log_loop, args=(stop_event, interval), daemon=True,
+            name="customization-stage-queue-log",
+        )
+        thread.start()
+        threads.append(thread)
+    return threads
+
+
 # The harness tenant-repository lease defaults to 120 seconds. An ambiguous
 # transport loss must not create a second author session while that lease can
 # still be live, so every redispatch waits beyond that horizon.
@@ -73,9 +139,28 @@ def run_once(
     lease_seconds: float = DEFAULT_LEASE_SECONDS,
 ) -> bool:
     service = service or CustomizationService.configured()
-    change = service.store.claim_stage(owner=owner, lease_seconds=lease_seconds)
+    if not fair_claims():
+        change = service.store.claim_stage(owner=owner, lease_seconds=lease_seconds)
+        if change is None:
+            return False
+        return _run_claimed(service, change, owner, lease_seconds)
+    with _claim_lock:
+        change = service.store.claim_stage(
+            owner=owner, lease_seconds=lease_seconds, fair=True,
+            exclude_tenants=tuple(sorted(_active_tenants)),
+        )
+        if change is not None:
+            _active_tenants.add(change.tenant_id)
     if change is None:
         return False
+    try:
+        return _run_claimed(service, change, owner, lease_seconds)
+    finally:
+        with _claim_lock:
+            _active_tenants.remove(change.tenant_id)
+
+
+def _run_claimed(service: CustomizationService, change: Any, owner: str, lease_seconds: float) -> bool:
     guard = StageLeaseGuard(service.store, change, owner, lease_seconds)
     guard.start()
     try:
@@ -133,14 +218,24 @@ def run_once(
                 change.tenant_id, change.change_set_id, exc.code,
                 reason_message or "-",
             )
-            service.store.fail_stage_claim(
+            refund_unstarted = (
+                author_quota.refund_enabled()
+                and getattr(exc, "harness_not_called", False)
+                and change.stage_attempt == 1
+                and exc.code != "stage_grant_exhausted"
+            )
+            failed = service.store.fail_stage_claim(
                 tenant_id=change.tenant_id,
                 change_set_id=change.change_set_id,
                 owner=owner,
                 reason_code=exc.code,
-                retryable=exc.status_code >= 500,
+                retryable=(refund_unstarted and exc.code == "stage_authority_invalid")
+                or exc.status_code >= 500
+                or exc.code in {"stage_grant_expired", "stage_grant_exhausted", "stage_grant_unavailable"},
                 reason_message=reason_message,
             )
+            if refund_unstarted and failed is not None:
+                refund_unstarted_build(change.tenant_id, change.change_set_id, log=_LOG)
         return True
     except Exception:
         guard.close()

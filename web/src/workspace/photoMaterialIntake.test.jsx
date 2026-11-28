@@ -101,6 +101,31 @@ describe('project photo intake', () => {
     expect(listProjectPhotos.mock.calls.at(-1)[1].expectedScope).toBe('account-b')
   })
 
+  it.each([
+    [404, 'This saved preview could not be found.'],
+    [403, 'Your account could not open this preview. Check your project access.'],
+    [500, 'The preview could not be loaded. Retry to check again.'],
+  ])('explains preview failure %i and retries the same saved photo', async (status, explanation) => {
+    listProjectPhotos.mockResolvedValueOnce({ materials: [row('roof.jpg', 'roof-1')] })
+    readProjectPhotoPreview.mockRejectedValueOnce(Object.assign(new Error('Preview failed'), { status }))
+    render(<PhotoMaterialIntake projectId="project-a" />)
+
+    await screen.findByText(explanation)
+    expect(screen.queryByRole('img', { name: 'roof.jpg' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry preview for roof.jpg' }))
+
+    const preview = await screen.findByRole('img', { name: 'roof.jpg' })
+    expect(preview.getAttribute('src')).toBe('blob:photo-preview')
+    expect(screen.getByText('Ready')).toBeTruthy()
+    expect(screen.queryByText(explanation)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry preview for roof.jpg' })).toBeNull()
+    expect(readProjectPhotoPreview.mock.calls).toEqual([
+      ['project-a', 'roof-1', expect.objectContaining({ expectedScope: 'account-a' })],
+      ['project-a', 'roof-1', expect.objectContaining({ expectedScope: 'account-a' })],
+    ])
+    expect(uploadProjectPhoto).not.toHaveBeenCalled()
+  })
+
   it('loads the next page without losing earlier photos', async () => {
     listProjectPhotos.mockResolvedValueOnce({ materials: [row('cake.jpg')], next_cursor: 'next-page' })
       .mockResolvedValueOnce({ materials: [row('bread.jpg')] })

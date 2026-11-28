@@ -2,16 +2,20 @@
 import React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getStoredOrgId, listProjects, openProject, requestBindingGrant, getDrawingVersions } from '../api.js'
+import { getSessionIdentity, getStoredOrgId, setStoredOrgId, listProjects, openProject, requestBindingGrant, getDrawingVersions } from '../api.js'
 import { pull, publish } from './drawingSync.js'
-import { isSignedIn, login } from '../auth.js'
+import { isSignedIn, login, subscribeTokenStored } from '../auth.js'
 import { getLeafHostBridge } from './hostBridge.js'
 import LeafPlatformScene from './LeafPlatformScene.jsx'
+import { studioFeature, studioFeatureAvailable } from '../site/studioAvailability.js'
 
-vi.mock('../api.js', () => ({ getStoredOrgId: vi.fn(), listProjects: vi.fn(), openProject: vi.fn(), requestBindingGrant: vi.fn(), getDrawingVersions: vi.fn() }))
+vi.mock('../api.js', () => ({ getSessionIdentity: vi.fn(), getStoredOrgId: vi.fn(), setStoredOrgId: vi.fn(), listProjects: vi.fn(), openProject: vi.fn(), requestBindingGrant: vi.fn(), getDrawingVersions: vi.fn() }))
 vi.mock('./drawingSync.js', async (importOriginal) => ({ ...await importOriginal(), pull: vi.fn(), publish: vi.fn() }))
-vi.mock('../auth.js', () => ({ isSignedIn: vi.fn(), login: vi.fn() }))
+vi.mock('../auth.js', () => ({ isSignedIn: vi.fn(), login: vi.fn(), subscribeTokenStored: vi.fn() }))
 vi.mock('./hostBridge.js', () => ({ getLeafHostBridge: vi.fn() }))
+vi.mock('../site/studioAvailability.js', async (importOriginal) => ({
+  ...await importOriginal(), studioFeatureAvailable: vi.fn(),
+}))
 
 const FAKE_ACCESS_TOKEN = 'test-bearer'
 const orgId = '11111111-1111-4111-8111-111111111111'
@@ -29,16 +33,21 @@ function setBridgeState(next) {
 
 beforeEach(() => {
   vi.resetAllMocks()
+  studioFeatureAvailable.mockImplementation((id, env) => studioFeature(id, env).available)
   state = { status: 'unavailable', ready: null, selectedObjectId: null, selectedHandles: null, lastCommand: null, helloSentAt: null }
   bridge = {
     subscribe: vi.fn((fn) => { listener = fn; fn(state); return vi.fn() }),
     start: vi.fn(), stop: vi.fn(), bindDrawing: vi.fn().mockResolvedValue(undefined),
     bindDrawingWithGrant: vi.fn().mockResolvedValue(undefined),
     focusObject: vi.fn().mockResolvedValue(undefined),
+    listTools: vi.fn().mockResolvedValue({ tools: [] }),
     retryHello: vi.fn(() => { state = { ...state, helloSentAt: Date.now() }; listener(state) }),
   }
   getLeafHostBridge.mockReturnValue(bridge)
   getStoredOrgId.mockReturnValue(orgId)
+  setStoredOrgId.mockImplementation((org) => getStoredOrgId.mockReturnValue(org))
+  getSessionIdentity.mockResolvedValue({ org: null })
+  subscribeTokenStored.mockReturnValue(vi.fn())
   isSignedIn.mockReturnValue(true)
   login.mockResolvedValue(undefined)
   listProjects.mockResolvedValue([{ project_id: projectId, name: 'Roof project' }])
@@ -62,37 +71,239 @@ function expectStudioRecovery() {
 }
 
 describe('AutoCAD palette scene in Studio', () => {
-  it('shows the drawing sync row and publishes the first version', async () => {
+  it.each([null, '55555555-5555-4555-8555-555555555555'])(
+    'adopts the verified session org over stored org %s and lists its projects', async storedOrg => {
+      getStoredOrgId.mockReturnValue(storedOrg)
+      getSessionIdentity.mockResolvedValue({ org: orgId })
+      mountUnbound()
+      expect(await screen.findByRole('option', { name: 'Roof project' })).toBeTruthy()
+      expect(setStoredOrgId).toHaveBeenCalledTimes(1)
+      expect(setStoredOrgId).toHaveBeenCalledWith(orgId)
+      expect(listProjects).toHaveBeenLastCalledWith(orgId)
+      expect(getSessionIdentity).toHaveBeenCalledTimes(1)
+      expect(getSessionIdentity).toHaveBeenCalledWith(false)
+    })
+
+  it.each(['null', 'invalid', 'rejected'])('keeps the Studio message for %s identity', async kind => {
+    getStoredOrgId.mockReturnValue(null)
+    if (kind === 'rejected') getSessionIdentity.mockRejectedValue(new Error('identity unavailable'))
+    else getSessionIdentity.mockResolvedValue({ org: kind === 'null' ? null : 'not-a-uuid' })
+    mountUnbound()
+    await act(async () => {})
+    expect(screen.getByText('Choose a workspace in Studio, then reopen this palette.')).toBeTruthy()
+    expect(setStoredOrgId).not.toHaveBeenCalled()
+    expect(listProjects).not.toHaveBeenCalled()
+  })
+
+  it('does not fetch identity while signed out', async () => {
+    isSignedIn.mockReturnValue(false)
+    mountUnbound()
+    await act(async () => {})
+    expect(getSessionIdentity).not.toHaveBeenCalled()
+    expect(setStoredOrgId).not.toHaveBeenCalled()
+  })
+
+  it('offers Open in Studio above the legacy connect controls only when signed in (M3 S4)', async () => {
+    mountUnbound()
+    await act(async () => {})
+    const open = screen.getByRole('button', { name: 'Open in Studio' })
+    const heading = screen.getByRole('heading', { name: 'Or connect to a drawing version already in Studio' })
+    expect(open.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    cleanup()
+    isSignedIn.mockReturnValue(false)
+    mountUnbound()
+    await act(async () => {})
+    expect(screen.queryByRole('button', { name: 'Open in Studio' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeTruthy()
+  })
+
+  it('does not rewrite a matching org or refetch identity on org storage events', async () => {
+    const storedOrg = 'abcdef12-1111-4111-8111-111111111111'
+    getStoredOrgId.mockReturnValue(storedOrg)
+    getSessionIdentity.mockResolvedValue({ org: storedOrg.toUpperCase() })
+    mountUnbound()
+    await act(async () => {})
+    act(() => window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.org_id' })))
+    await act(async () => {})
+    expect(setStoredOrgId).not.toHaveBeenCalled()
+    expect(getSessionIdentity).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['leaf.jwt', null, 'same-tab'])('drops a late identity after token change via %s', async key => {
+    let finish
+    getStoredOrgId.mockReturnValue(null)
+    getSessionIdentity.mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+      .mockResolvedValue({ org: null })
+    mountUnbound()
+    act(() => {
+      if (key === 'same-tab') subscribeTokenStored.mock.calls[0][0]()
+      else window.dispatchEvent(new StorageEvent('storage', { key }))
+    })
+    await act(async () => finish({ org: orgId }))
+    expect(getSessionIdentity).toHaveBeenCalledTimes(2)
+    expect(setStoredOrgId).not.toHaveBeenCalled()
+    expect(screen.getByText('Choose a workspace in Studio, then reopen this palette.')).toBeTruthy()
+  })
+
+  it('clears the held org when a new token arrives', async () => {
+    getStoredOrgId.mockReturnValue(null)
+    getSessionIdentity.mockResolvedValueOnce({ org: orgId }).mockResolvedValue({ org: null })
+    mountUnbound()
+    await screen.findByRole('option', { name: 'Roof project' })
+    setStoredOrgId.mockClear()
+    getStoredOrgId.mockReturnValue(null)
+    act(() => subscribeTokenStored.mock.calls[0][0]())
+    await act(async () => {})
+    expect(setStoredOrgId).not.toHaveBeenCalled()
+    expect(screen.getByText('Choose a workspace in Studio, then reopen this palette.')).toBeTruthy()
+  })
+
+  it.each(['sign-out', 'unmount'])('drops a late identity after %s', async action => {
+    let finish
+    getStoredOrgId.mockReturnValue(null)
+    getSessionIdentity.mockReturnValue(new Promise(resolve => { finish = resolve }))
+    const view = mountUnbound()
+    if (action === 'unmount') view.unmount()
+    else {
+      isSignedIn.mockReturnValue(false)
+      act(() => window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt' })))
+    }
+    await act(async () => finish({ org: orgId }))
+    expect(setStoredOrgId).not.toHaveBeenCalled()
+    if (action === 'unmount') expect(subscribeTokenStored.mock.results[0].value).toHaveBeenCalledTimes(1)
+  })
+
+  it('never adopts the bridge or URL org when verified identity has no org', async () => {
+    getStoredOrgId.mockReturnValue(null)
+    window.history.replaceState({}, '', `/?org_id=${orgId}`)
+    try {
+      state = { status: 'connected', ready }
+      render(<LeafPlatformScene />)
+      await act(async () => {})
+      expect(setStoredOrgId).not.toHaveBeenCalled()
+      expect(listProjects).not.toHaveBeenCalled()
+      expect(screen.getByText('Choose a workspace in Studio, then reopen this palette.')).toBeTruthy()
+    } finally { window.history.replaceState({}, '', '/') }
+  })
+
+  it.each([undefined, false, true])('mounts Branch tools only with runTool true (%s)', async (runTool) => {
+    state = { status: 'connected', ready: { ...ready, ...(runTool === undefined ? {} : { capabilities: { planGrammarMax: 2, runTool, hostApi: 1 } }) } }
+    render(<LeafPlatformScene />)
+    if (runTool === true) {
+      expect(await screen.findByRole('region', { name: 'Branch tools' })).toBeTruthy()
+      await waitFor(() => expect(bridge.listTools).toHaveBeenCalledTimes(1))
+    } else {
+      expect(screen.queryByRole('region', { name: 'Branch tools' })).toBeNull()
+      expect(bridge.listTools).not.toHaveBeenCalled()
+    }
+  })
+
+  it('shows the production sync notice without controls or a version request', async () => {
+    studioFeatureAvailable.mockImplementation((id, env) => id === 'cad.drawing-sync' ? false : studioFeature(id, env).available)
     state = { status: 'connected', ready, selectedObjectId: null }
     openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })
+    render(<LeafPlatformScene />)
+    expect(await screen.findByText('Sync back to AutoCAD is coming soon.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Drawing sync' }).parentElement).toHaveAttribute('aria-label', 'Drawing sync')
+    expect(screen.queryByRole('button', { name: 'Pull' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Publish/ })).not.toBeInTheDocument()
+    expect(getDrawingVersions).not.toHaveBeenCalled()
+    expect(pull).not.toHaveBeenCalled()
+    expect(publish).not.toHaveBeenCalled()
+  })
+
+  it('shows the drawing sync row and publishes the first version', async () => {
+    state = { status: 'connected', ready, selectedObjectId: null }
+    openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }],
+      drawing_artifacts: [{ drawing_id: 'other', name: 'other.dwg' }, { drawing_id: 'roof-1', name: 'roof-site.dwg' }] })
     getDrawingVersions.mockResolvedValue({ head: 3 })
     let finish
     publish.mockImplementation(() => new Promise((resolve) => { finish = resolve }))
     render(<LeafPlatformScene />)
     const button = await screen.findByRole('button', { name: 'Publish drawing' })
-    expect(screen.getByText(/Drawing store: roof-1/).textContent).toContain('not synced')
+    expect(screen.getByTitle('roof-1').textContent).toBe('Not published from this drawing yet.')
     expect(screen.getByRole('button', { name: 'Pull' }).disabled).toBe(true)
     fireEvent.click(button)
     fireEvent.click(button)
     expect(publish).toHaveBeenCalledTimes(1)
-    expect(publish).toHaveBeenCalledWith({ api: expect.any(Object), bridge: expect.any(Object), drawingStoreId: 'roof-1', cursor: null })
+    expect(publish).toHaveBeenCalledWith({ api: expect.any(Object), bridge: expect.any(Object), drawingStoreId: 'roof-1', cursor: null, fileName: 'roof-site.dwg' })
     expect(button.disabled).toBe(true)
     await act(async () => { finish({ cursor: 4 }) })
     expect(screen.getByRole('button', { name: 'Publish' }).disabled).toBe(false)
     expect(screen.getByRole('button', { name: 'Pull' }).disabled).toBe(false)
-    expect(screen.getByText('Drawing published.')).toBeTruthy()
+    expect(screen.getByText('Published as version 4.')).toBeTruthy()
+    expect(screen.getByTitle('roof-1').textContent).toBe('Up to date with version 4.')
   })
 
-  it('starts from the matching native cursor and pulls', async () => {
+  it('keeps drawing sync disabled until the mount tool list finishes', async () => {
+    state = { status: 'connected', ready: { ...ready, capabilities: { planGrammarMax: 2, runTool: true, hostApi: 1 },
+      syncCursor: { drawingStoreId: 'roof-1', version: 2 } } }
+    openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })
+    getDrawingVersions.mockResolvedValue({ head: 3 })
+    let finishList
+    bridge.listTools.mockImplementation(() => new Promise((resolve) => { finishList = resolve }))
+    render(<LeafPlatformScene />)
+    const publishButton = await screen.findByRole('button', { name: 'Publish' })
+    expect(publishButton.disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Pull' }).disabled).toBe(true)
+    await act(async () => { finishList({ tools: [] }) })
+    expect(publishButton.disabled).toBe(false)
+  })
+
+  it.each(['pull', 'publish'])('excludes tool runs and refresh from drawing %s in both directions', async (kind) => {
+    state = { status: 'connected', ready: { ...ready, capabilities: { planGrammarMax: 2, runTool: true, hostApi: 1 },
+      syncCursor: { drawingStoreId: 'roof-1', version: 2 } } }
+    openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })
+    getDrawingVersions.mockResolvedValue({ head: 3 })
+    bridge.listTools.mockResolvedValue({ tools: [{ name: 'panel-gap-check', version: '1.0.0', packageDigest: 'a'.repeat(64),
+      source: 'downloaded', decision: 'accept', runnable: true, params: { type: 'object', properties: {} } }] })
+    let finishRun, finishSync, finishList
+    bridge.runTool = vi.fn(() => new Promise((resolve) => { finishRun = resolve }))
+    const syncCommand = kind === 'pull' ? pull : publish
+    syncCommand.mockImplementation(() => new Promise((resolve) => { finishSync = resolve }))
+    render(<LeafPlatformScene />)
+    const run = await screen.findByRole('button', { name: 'Run panel-gap-check' })
+    const syncButton = await screen.findByRole('button', { name: kind === 'pull' ? 'Pull' : 'Publish' })
+    const refresh = screen.getByRole('button', { name: 'Refresh tools' })
+    await waitFor(() => expect(run.disabled || syncButton.disabled).toBe(false))
+    fireEvent.click(syncButton)
+    expect(run.disabled).toBe(true)
+    expect(refresh.disabled).toBe(true)
+    fireEvent.click(run)
+    fireEvent.click(refresh)
+    expect(bridge.runTool).not.toHaveBeenCalled()
+    expect(bridge.listTools).toHaveBeenCalledTimes(1)
+    await act(async () => { finishSync({ cursor: 3, applied: [3] }) })
+    fireEvent.click(run)
+    expect(screen.getByRole('button', { name: 'Pull' }).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Publish' }).disabled).toBe(true)
+    fireEvent.click(syncButton)
+    expect(syncCommand).toHaveBeenCalledTimes(1)
+    await act(async () => { finishRun({ decision: 'accept', result: {}, resultTruncated: false }) })
+    bridge.listTools.mockImplementationOnce(() => new Promise((resolve) => { finishList = resolve }))
+    fireEvent.click(refresh)
+    await waitFor(() => expect(bridge.listTools).toHaveBeenCalledTimes(2))
+    expect(screen.getByRole('button', { name: 'Pull' }).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Publish' }).disabled).toBe(true)
+    await act(async () => { finishList({ tools: [] }) })
+    expect(screen.getByRole('button', { name: 'Publish' }).disabled).toBe(false)
+  })
+
+  it.each([
+    [[], 2, 'Already up to date.'],
+    [[3], 3, 'Pulled version 3 into AutoCAD.'],
+    [[3, 4], 4, 'Pulled versions 3 to 4 into AutoCAD.'],
+  ])('starts from the matching native cursor and reports applied versions %j', async (applied, cursor, message) => {
     state = { status: 'connected', ready: { ...ready, syncCursor: { drawingStoreId: 'roof-1', version: 2 } } }
     openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })
     getDrawingVersions.mockResolvedValue({ head: 3 })
-    pull.mockResolvedValue({ cursor: 3, applied: [3], reason: null })
+    pull.mockResolvedValue({ cursor, applied, reason: null })
     render(<LeafPlatformScene />)
     const button = await screen.findByRole('button', { name: 'Pull' })
     expect(button.disabled).toBe(false)
+    await screen.findByText('Studio has version 3. Pull to update AutoCAD.')
     fireEvent.click(button)
-    await screen.findByText('Pulled 1 versions.')
+    await screen.findByText(message)
     expect(pull).toHaveBeenCalledWith({ api: expect.any(Object), bridge: expect.any(Object), drawingStoreId: 'roof-1', cursor: 2 })
   })
 
@@ -442,7 +653,7 @@ describe('AutoCAD palette scene in Studio', () => {
       drawing_versions: [{ ...version, version_id: orgId, seq: 9 }, version],
       drawing_artifacts: [{ drawing_id: drawingId, name: 'Roof plan' }],
     }) })
-    expect(screen.getByText('Roof plan, Version 3')).toBeTruthy()
+    expect(screen.getByText('Roof plan')).toBeTruthy()
     expect(document.activeElement).toBe(select)
     setBridgeState({ ...state, ready: { ...ready }, selectedObjectId: 'panel:A2' })
     await act(async () => {})
@@ -457,7 +668,7 @@ describe('AutoCAD palette scene in Studio', () => {
     state = { status: 'connected', ready, selectedObjectId: null }
     render(<LeafPlatformScene />)
     await act(async () => {})
-    expect(screen.queryByText(/, Version/)).toBeNull()
+    expect(screen.queryByText('Drawing 33333333')).toBeNull()
     expect(getActionStatus().textContent).toBe('DWG connected.')
     expect(document.body.textContent).not.toContain('private catalog error')
   })
@@ -797,7 +1008,7 @@ describe('AutoCAD palette scene in Studio', () => {
     await waitFor(() => expect(region.textContent).toBe('AutoCAD could not find those objects. Select them again in AutoCAD.'))
     expect(screen.getByText(connectionText)).toBe(connection)
     const detail = name ? connection.nextElementSibling : screen.getByRole('button', { name: 'Retry project name' }).nextElementSibling
-    expect(detail.textContent).toBe('Drawing 33333333, Version 3')
+    expect(detail.textContent).toBe('Drawing 33333333')
     expect(detail.nextElementSibling.textContent).toBe('Selected object: panel:A1')
     expect(region).not.toBe(connection)
     for (const element of [connection, region]) {
