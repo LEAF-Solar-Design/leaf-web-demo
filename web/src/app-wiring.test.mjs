@@ -28,6 +28,7 @@ import { slashDecision, alternativeDecision } from './controllers/catalog/catalo
 import { createCatalogController } from './controllers/catalog/createCatalogController.js'
 import { createWorkspaceController } from './controllers/workspace/createWorkspaceController.js'
 import { solarSettingsScope } from './solar/solarSettingsWire.js'
+import { drawingHeaderSource } from './site/drawingHeaderName.js'
 import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
 import { projectSolarAppReason } from './solar/solarProjectAppModel.js'
 import { requiresReconciliation } from './errorPresentation.js'
@@ -948,7 +949,7 @@ describe('R13F project Solar execution and form ingresses', () => {
     assert.equal(r13Find(refusal).length, 21)
     for (const [name, hash] of Object.entries({
       // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
-      engineSaveTarget: '06d0e28a19d194c630cc12c67343d021614cd756aff0d3d446425845d384e84b',
+      engineSaveTarget: '555dbbd7a4b15d31c36ba4b69a19b1fbf9c88d0039066999f383d4bf6caaf523',
       onEngineSaved: 'cb635c9b798a35f39291384c8eb0fe5b63cc8e89e4fc1d3e406bb432b005ff3a',
       onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
       retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
@@ -5526,8 +5527,8 @@ describe('App.jsx wiring', () => {
       assert.notEqual(planCall, -1)
       assert.notEqual(sidecarCall, -1)
       assert.doesNotMatch(body, /save(?:DrawingVersionPlan|EditedDrawingVersion)\([^)]*chain\.head/)
-      assert.match(body, /saveDrawingVersionPlan\(\s*REQUESTED_DRAWING_ID,\s*bytes,\s*parent,\s*digest,\s*plan\.mutations,\s*cap,\s*\{\s*onStatus\s*\}\s*\)/)
-      assert.match(body, /saveEditedDrawingVersion\(\s*REQUESTED_DRAWING_ID,\s*bytes,\s*parent,\s*digest,\s*cap\s*\)/)
+      assert.match(body, /saveDrawingVersionPlan\(\s*REQUESTED_DRAWING_ID,\s*bytes,\s*parent,\s*digest,\s*plan\.mutations,\s*cap,\s*\{\s*onStatus,\s*fileName\s*\}\s*\)/)
+      assert.match(body, /saveEditedDrawingVersion\(\s*REQUESTED_DRAWING_ID,\s*bytes,\s*parent,\s*digest,\s*cap,\s*\{\s*fileName\s*\}\s*\)/)
       assert.ok(planCall < sidecarCall, 'the plan route is tried first, behind the plan check')
       assert.match(body.slice(0, planCall), /if \(plan && plan\.mutations\)/)
       // Both calls sit inside the acquire -> save -> release try block.
@@ -6073,7 +6074,7 @@ it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () =
     onUndo: 'ae7f7d8ea55310a93f4599ce6be8a70a53c52a14a46a02cbc106ad2ef64081f4',
     onRedo: 'da27b4a464e6fc6a0d9fb8ffd0355ac87bab162d47906a73e3a8824ba051e8d2',
     // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
-    engineSaveTarget: '06d0e28a19d194c630cc12c67343d021614cd756aff0d3d446425845d384e84b',
+    engineSaveTarget: '555dbbd7a4b15d31c36ba4b69a19b1fbf9c88d0039066999f383d4bf6caaf523',
     onEngineSaved: 'cb635c9b798a35f39291384c8eb0fe5b63cc8e89e4fc1d3e406bb432b005ff3a',
     onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
     retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
@@ -6215,7 +6216,7 @@ it('BSP5 imported drawing labels and counts follow source objects', () => {
     const scope = {
       projectMode: false, projectDrawingName: 'project.dwg', activeIntake: null,
       shown: { polylines: Array(2345), layers: ['Panels'] }, projectName: 'sample',
-      drawingName: null, engineDocument: null, REQUESTED_DRAWING_ID: 'demo', holdsHeadDocument,
+      drawingName: null, engineDocument: null, REQUESTED_DRAWING_ID: 'demo', holdsHeadDocument, drawingHeaderSource,
       drawingPropertyName: (preferred, fallback) => preferred || fallback || '', ...env,
     }
     scope.mountedDrawingFile = r13Evaluate(init('mountedDrawingFile'), scope)
@@ -6224,6 +6225,8 @@ it('BSP5 imported drawing labels and counts follow source objects', () => {
   }
   assert.equal(label({ activeIntake: { documentId: 'rooftop.dxf' } }), 'rooftop.dxf')
   assert.equal(label({}), 'sample.dwg')
+  assert.equal(label({ drawingName: 'plant-room', shown: { dwg: 'plant-room.dxf', polylines: [], layers: [] } }), 'plant-room.dxf')
+  assert.equal(label({ drawingName: 'roof-site', shown: { dwg: 'roof-site.dwg', polylines: [], layers: [] } }), 'roof-site.dwg')
   assert.equal(label({ shown: null }), '')
   assert.equal(label({ projectMode: true, activeIntake: { documentId: 'rooftop.dxf' } }), 'project.dwg')
   const head = (documentId, drawingId = 'demo', drawingName = 'rooftop_demo') => ({
@@ -6231,7 +6234,8 @@ it('BSP5 imported drawing labels and counts follow source objects', () => {
     REQUESTED_DRAWING_ID: drawingId, drawingName,
   })
   const uploadId = '5ecede53-1e27-49cf-9829-841b2939e635'
-  assert.equal(label(head(`${uploadId}-v1.dxf`, uploadId, 'walk.dxf')), 'walk.dxf')
+  const walkIntake = { dwg: 'walk.dxf', polylines: [], layers: [] }
+  assert.equal(label({ ...head(`${uploadId}-v1.dxf`, uploadId, 'walk'), shown: walkIntake }), 'walk.dxf')
   assert.equal(label(head('demo-v1.dxf')), 'rooftop_demo.dwg')
   assert.equal(label(head('demo-v7.dxf')), 'rooftop_demo.dwg')
   assert.equal(label(head('demo-v1.dxf', 'demo', null)), 'demo-v1.dxf')
@@ -6242,7 +6246,7 @@ it('BSP5 imported drawing labels and counts follow source objects', () => {
   assert.equal(label(head('other-v1.dxf', 'demo', 'old_drawing')), 'other-v1.dxf')
   assert.equal(label({ ...head('a-v1.dxf', 'a', 'old_drawing'),
     engineDocument: { documentId: 'b-v1.dxf', documentOrigin: 'head' } }), 'a-v1.dxf')
-  assert.equal(label({ activeIntake: null, drawingName: 'walk.dxf' }), 'walk.dxf')
+  assert.equal(label({ activeIntake: null, drawingName: 'walk', shown: walkIntake }), 'walk.dxf')
   assert.equal(label({ ...head('demo-v1.dxf'), projectMode: true }), 'project.dwg')
   const countsByLayer = Object.fromEntries(['Roof', 'Zones', 'Obstructions', 'Panels', 'Strings', 'Inverters', 'StringLabels', 'InverterLabels'].map(layer => [layer, 1]))
   const summary = { entityCount: 80, countsByType: { LWPOLYLINE: 74, TEXT: 6 }, countsByLayer }

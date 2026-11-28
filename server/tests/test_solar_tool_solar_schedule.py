@@ -28,6 +28,8 @@ from solar_graph_context import resolve_graph_context
 from solar_joint_homerun_routing import route_together
 from solar_sizing_client import digest
 from solar_wiring_client import local_routes
+import test_sip_r5_routes as project_routes
+from test_sip_r5_routes import lane as project_lane  # noqa: F401
 from test_solar_tool_solar_homeruns import _box, _save, assigned, dispatch as dispatch_homeruns  # noqa: F401
 from test_w1_design_graph import app_id, graph  # noqa: F401
 from test_w1_equipment import case, equipment, licensed as licensed_equipment  # noqa: F401
@@ -535,19 +537,89 @@ def test_studio_run_refuses_incomplete_routing(api):
     assert store.load_manifest(api[1], INTAKE_TENANT, "solar")["head"] == 1
 
 
-def test_studio_run_commits_the_schedule(api, case):
+@pytest.fixture
+def assigned_with_routes(case):
     graph, equipment_params, drawing_intake = case
     assigned = equipment.assign_equipment(
         graph, equipment_params, drawing_intake=drawing_intake,
         licensed_equipment=licensed_equipment)["graph"]
     assigned["routes"] = local_routes(assigned)
     assert assigned["rev"] == 1
-    intake = {"layers": [], "polylines": [], "solar_design_graph": assigned,
-              "solar_design_graph_sha256": digest(assigned)}
+    return assigned
+
+
+def _save_assigned_version(api, graph):
+    intake = {"layers": [], "polylines": [], "solar_design_graph": graph,
+              "solar_design_graph_sha256": digest(graph)}
     holder, fence = api[3]._checkout_identity()
     assert write_loop._put_bytes_version(
         api[1], INTAKE_TENANT, "solar", json.dumps(intake).encode(),
         1, {}, holder=holder, fence=fence, require_parent_is_head=True) == 2
+
+
+@pytest.mark.parametrize("defect", ["missing", "duplicate", "reversed", "stale-binding"])
+def test_studio_run_identifies_only_incomplete_saved_leads(api, assigned_with_routes, defect):
+    assigned = assigned_with_routes
+    lead = assigned["routes"][0]
+    affected_ids = [lead["id"]]
+    if defect == "missing":
+        assigned["routes"].pop(0)
+        affected_ids.clear()
+    elif defect == "duplicate":
+        duplicate = dict(lead, id=f"leaf:route:{uuid.uuid4()}")
+        assigned["routes"].append(duplicate)
+        affected_ids.append(duplicate["id"])
+    elif defect == "reversed":
+        lead["points"].reverse()
+    else:
+        lead["extra"]["input_number"] += 1
+    _save_assigned_version(api, assigned)
+    request = body(api, TOOL, {"expected_rev": 1, "insertion_point": [10, 20]})
+    request["dwg_version"] = 2
+    response = api[0].post("/api/run?wait=1", json=request)
+    assert response.status_code == 409, response.text
+    env = response.json()
+    assert env["reason_code"] == "complete_routing_required"
+    diagnostics = env["availability"]
+    expected_leads = [f"{lead['from_ref'].split(':')[-1]}/{lead['route_kind']}"]
+    assert diagnostics["affected_leads"] == expected_leads
+    assert diagnostics["affected_route_ids"] == sorted(affected_ids)
+    assert not jobs._query("SELECT job_id FROM jobs")
+    assert store.load_manifest(api[1], INTAKE_TENANT, "solar")["head"] == 2
+    with pytest.raises(availability.IncompleteHomerunRouting) as refusal:
+        builtin().run(assigned, request["params"])
+    assert refusal.value.diagnostics == {"affected_leads": expected_leads,
+                                         "affected_route_ids": sorted(affected_ids)}
+
+
+def test_project_preview_and_submit_identify_the_same_incomplete_lead(project_lane, case, monkeypatch):
+    r3b = project_routes.policy_cases.r3b
+    ctx = r3b.assigned_parent(project_lane.s, case)
+    ctx = r3b.canonical_custody(project_lane.s, monkeypatch, ctx.graph)
+    routed = r3b.direct(ctx, "solar-homeruns", {"expected_rev": ctx.graph["rev"]})
+    lead = routed["routes"].pop(0)
+    project_lane.s.set_parent({**ctx.intake, "solar_design_graph": routed,
+                               "solar_design_graph_sha256": digest(routed)})
+    pinned = project_routes.graph_adapter.resolve_project_graph_context(project_lane.s.context())
+    project_routes.policy_cases.r4.at(project_lane.a, monkeypatch, pinned, TOOL)
+    request = {"expected_rev": routed["rev"], "insertion_point": [0, 0, 0]}
+    before = project_lane.s.head, list(project_lane.s.writes)
+
+    state = project_routes.states(project_routes.preview(project_lane, request, TOOL))[TOOL]
+    submitted = project_routes.run(project_lane, request, TOOL)
+    assert state["admission_checked"] is True and state["runnable"] is False
+    assert state["admission"]["status_code"] == submitted.status_code == 409
+    error = submitted.json()["error"]
+    assert state["admission"]["error"] == error
+    assert error["reason_code"] == "COMPLETE_ROUTING_REQUIRED"
+    assert error["affected_leads"] == [f"{lead['from_ref'].rsplit(':', 1)[-1]}/{lead['route_kind']}"]
+    assert error["affected_route_ids"] == []
+    assert (project_lane.s.head, project_lane.s.writes) == before
+    assert not project_lane.records
+
+
+def test_studio_run_commits_the_schedule(api, assigned_with_routes):
+    _save_assigned_version(api, assigned_with_routes)
     assert availability.w1_input_readiness(api[5], "solar", version=2)[TOOL] == {
         "input_ready": True, "input_reason": None}
     request = body(api, TOOL, {"expected_rev": 1, "insertion_point": [10, 20]})

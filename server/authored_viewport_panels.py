@@ -121,6 +121,8 @@ def _crop(fields, boundaries, camera, layout_owner):
             or (flags & 4 and not math.isfinite(back)) or front < back):
         raise ValueError("Invalid viewport depth planes.")
     clip_handle = fields.get(340, "").upper()
+    if clip_handle == "0":
+        clip_handle = ""
     if clip_handle or flags & 65536:
         matches = boundaries.get(clip_handle, ())
         if len(matches) != 1 or not clip_handle:

@@ -827,6 +827,31 @@ it('R13C-20 renders topology refusal', async () => {
 it('R13C-21 renders incomplete routing', async () => {
   await assertRefusal('solar-schedule', 'COMPLETE_ROUTING_REQUIRED', 'The schedule requires complete current homeruns.')
 })
+it.each([
+  { code: 'COMPLETE_ROUTING_REQUIRED', leads: [startHomerun] },
+  { code: 'complete_routing_required', leads: [endHomerun, startHomerun] },
+])('shows saved schedule lead IDs and disables Run after an exact refusal', async ({ code, leads }) => {
+  const blocked = harness('solar-schedule', code)
+  const denied = catalog(blocked.name, code)
+  const error = denied.data.families[0].capabilities[0].availability.admission.error
+  error.affected_leads = leads
+  blocked.previews.push(Promise.resolve(denied))
+  const mounted = render(<ProjectSolarGraphForm {...blocked.props} />)
+  const sentence = `Check these homerun leads. ${leads.join(', ')}`
+  fireEvent.change(location(), { target: { value: '1,2' } })
+  await waitFor(() => expect(feedback()).toContain(sentence))
+  expect(action().disabled).toBe(true)
+  expect(blocked.submit).not.toHaveBeenCalled()
+  mounted.unmount()
+
+  const raced = harness('solar-schedule')
+  raced.submissions.push(Promise.resolve({ ok: false, status: 409, reason: code, envelope: { error } }))
+  render(<ProjectSolarGraphForm {...raced.props} />)
+  fireEvent.change(location(), { target: { value: '1,2' } })
+  await submitAndWait(raced)
+  await waitFor(() => expect(feedback()).toContain(sentence))
+  expect(screen.queryByText(published)).toBeNull()
+})
 it('R13C-22 renders unavailable electrical output', async () => {
   const h = await assertRefusal('solar-schedule', 'SOLAR_OUTPUT_NOT_CURRENT',
     'Electrical output is unavailable because this Solar design is not current.')

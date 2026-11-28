@@ -7,6 +7,7 @@
 // at. Bounded and fail-closed: a malformed entity is skipped, never thrown on;
 // a huge document is truncated at MAX_POINTS with the truncation reported.
 import { blockDefinitions, MAX_GLYPH_CHARS, textGlyphPolylines } from '../components/viewerIntake.js'
+import { MAX_CLIP_EDGE_CHECKS, prepareBlockClip } from './clipBlockPolyline.js'
 
 export const MAX_POINTS = 200_000
 export const CIRCLE_SEGMENTS = 48
@@ -497,7 +498,7 @@ export function entityToPolyline(entity, markSize = POINT_MARK) {
  * line, never a silent cut).
  */
 export function expandBlockReference(insert, definition, options = {}) {
-  if (definition?.baseUnknown === true) return { polylines: [], complete: false }
+  if (definition?.baseUnknown === true || options.clip === null) return { polylines: [], complete: false }
   const base = point(definition?.base)
   const ip = point(insert?.ip)
   const scale = insert?.scale
@@ -533,22 +534,36 @@ export function expandBlockReference(insert, definition, options = {}) {
     // transform circular arcs and text outlines correctly too.
     const pl = entityToPolyline(child)
     if (!pl) { complete = false; continue }
+    const sampled = child.strokeOnly ? { ...pl, strokeOnly: true } : pl
+    const pieces = options.clip ? options.clip(sampled) : [sampled]
+    if (!pieces) { complete = false; continue }
+    if (!pieces.length) continue
+    const cellPoints = pieces.reduce((sum, piece) => sum + piece.pts.length, 0)
     for (let cell = 0; cell < cells; cell += 1) {
-      if (points + pl.pts.length > pointLimit) { complete = false; truncated += cells - cell; break }
+      if (points + cellPoints > pointLimit) { complete = false; truncated += cells - cell; break }
       const column = cell % columns
       const row = Math.floor(cell / columns)
-      const pts = pl.pts.map((p) => {
-        const x = (p[0] - base[0]) * scale[0]
-        const y = (p[1] - base[1]) * scale[1]
-        // The pinned Insert::array_transforms adds spacing to the insertion
-        // point, outside both the child's scale and rotation.
-        const relative = [x * cos - y * sin, x * sin + y * cos, (p[2] - base[2]) * scale[2]]
-        const world = basis ? ocsToWcs(relative, basis) : relative
-        return [ip[0] + column * columnSpacing + world[0], ip[1] + row * rowSpacing + world[1], ip[2] + world[2]]
+      const dx = column * columnSpacing
+      const dy = row * rowSpacing
+      // DXF MINSERT spacing rotates in the reference OCS without array scale.
+      // Engine references keep the pinned Insert::array_transforms convention.
+      const offset = options.dxfArray ? [dx * cos - dy * sin, dx * sin + dy * cos, 0] : [dx, dy, 0]
+      const cellOffset = options.dxfArray && basis ? ocsToWcs(offset, basis) : offset
+      const origin = [ip[0] + cellOffset[0], ip[1] + cellOffset[1], ip[2] + cellOffset[2]]
+      const transformed = pieces.map(piece => {
+        const pts = piece.pts.map(p => {
+          const x = (p[0] - base[0]) * scale[0]
+          const y = (p[1] - base[1]) * scale[1]
+          const relative = [x * cos - y * sin, x * sin + y * cos, (p[2] - base[2]) * scale[2]]
+          const world = basis ? ocsToWcs(relative, basis) : relative
+          return [origin[0] + world[0], origin[1] + world[1], origin[2] + world[2]]
+        })
+        return { ...piece, handle, sourceHandle: handle,
+          layer: piece.layer === '0' ? (insert.layer || '0') : piece.layer, pts }
       })
-      if (pts.some((p) => !p.every(finite))) { complete = false; continue }
-      polylines.push({ ...pl, handle, sourceHandle: handle, layer: pl.layer === '0' ? (insert.layer || '0') : pl.layer, pts })
-      points += pts.length
+      if (transformed.some(piece => piece.pts.some(p => !p.every(finite)))) { complete = false; continue }
+      polylines.push(...transformed)
+      points += cellPoints
     }
   }
   return { polylines, complete, ...(finite(pointLimit) ? { truncated } : {}) }
@@ -611,11 +626,25 @@ export function projectServerBlocks(intake) {
   const modelInserts = originals.filter((insert) => insert?.space !== 'paper')
   const definitions = blockDefinitions(intake)
   const cache = new Map()
+  const clipBudget = { remaining: MAX_CLIP_EDGE_CHECKS }
+  const clips = intake?.insert_clips ?? {}
+  const preparedClips = new Map()
+  const clipFor = reference => {
+    const handle = reference.sourceHandle.toUpperCase()
+    if (!Object.hasOwn(clips, handle)) return undefined
+    if (!preparedClips.has(handle)) preparedClips.set(handle, prepareBlockClip(clips[handle], clipBudget))
+    return preparedClips.get(handle)
+  }
+  const projectReference = (reference, definition, pointLimit) =>
+    expandBlockReference(reference, definition, {
+      pointLimit, dxfArray: reference.dxfArray, clip: clipFor(reference),
+    })
   const polylines = [], inserts = []
   let points = 0, sampledPoints = 0, truncated = 0
   let nestedVisits = 0, nestedPoints = 0
   const nestedDepthLimit = 8
-  const polylineChild = (pl) => ({ type: 'LWPOLYLINE', layer: pl.layer, vertices: pl.pts, closed: pl.closed })
+  const polylineChild = (pl) => ({ type: 'LWPOLYLINE', layer: pl.layer,
+    vertices: pl.pts, closed: pl.closed, strokeOnly: pl.strokeOnly })
   const normalizeReference = (source) => {
     const positioned = Array.isArray(source.pt)
     const ip = positioned ? serverPoint(source.pt) : (finite(source.x) && finite(source.y)
@@ -626,6 +655,10 @@ export function projectServerBlocks(intake) {
       layer: typeof source.layer === 'string' && source.layer ? source.layer : '0',
       scale: source.scale ?? [1, 1, 1], normal: source.nrm ?? [0, 0, 1],
       rotationDeg: finite(rotation) ? (positioned ? rotation : rotation * 180 / Math.PI) : NaN,
+      // The DXF parser emits group 44/45 as snake_case fields. Existing
+      // camelCase inputs use parent-axis spacing and take precedence.
+      dxfArray: (source.column_spacing !== undefined || source.row_spacing !== undefined)
+        && source.columnSpacing == null && source.rowSpacing == null,
       columnSpacing: source.columnSpacing ?? source.column_spacing,
       rowSpacing: source.rowSpacing ?? source.row_spacing }
   }
@@ -679,7 +712,7 @@ export function projectServerBlocks(intake) {
       const reference = source && normalizeReference(source)
       const definition = reference && expandDefinition(String(reference.name).toUpperCase(), ancestors)
       if (!definition) { complete = false; continue }
-      const expanded = expandBlockReference(reference, definition, { pointLimit: MAX_POINTS - nestedPoints })
+      const expanded = projectReference(reference, definition, MAX_POINTS - nestedPoints)
       if (!expanded.complete) complete = false
       truncated += expanded.truncated ?? 0
       for (const pl of expanded.polylines) {
@@ -701,7 +734,7 @@ export function projectServerBlocks(intake) {
     const name = String(source.name).toUpperCase()
     const direct = normalizedDefinition(name)
     const definition = direct?.nested.length ? expandDefinition(name, new Set()) : direct
-    const expanded = definition ? expandBlockReference(row, definition, { pointLimit: MAX_POINTS - points })
+    const expanded = definition ? projectReference(row, definition, MAX_POINTS - points)
       : { polylines: [], complete: false }
     for (const pl of expanded.polylines) { polylines.push(pl); points += pl.pts.length }
     truncated += expanded.truncated ?? 0
