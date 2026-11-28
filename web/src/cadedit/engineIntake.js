@@ -636,7 +636,9 @@ export function projectServerBlocks(intake) {
     return preparedClips.get(handle)
   }
   const projectReference = (reference, definition, pointLimit) =>
-    expandBlockReference(reference, definition, { pointLimit, dxfArray: true, clip: clipFor(reference) })
+    expandBlockReference(reference, definition, {
+      pointLimit, dxfArray: reference.dxfArray, clip: clipFor(reference),
+    })
   const polylines = [], inserts = []
   let points = 0, sampledPoints = 0, truncated = 0
   let nestedVisits = 0, nestedPoints = 0
@@ -653,6 +655,10 @@ export function projectServerBlocks(intake) {
       layer: typeof source.layer === 'string' && source.layer ? source.layer : '0',
       scale: source.scale ?? [1, 1, 1], normal: source.nrm ?? [0, 0, 1],
       rotationDeg: finite(rotation) ? (positioned ? rotation : rotation * 180 / Math.PI) : NaN,
+      // The DXF parser emits group 44/45 as snake_case fields. Existing
+      // camelCase inputs use parent-axis spacing and take precedence.
+      dxfArray: (source.column_spacing !== undefined || source.row_spacing !== undefined)
+        && source.columnSpacing == null && source.rowSpacing == null,
       columnSpacing: source.columnSpacing ?? source.column_spacing,
       rowSpacing: source.rowSpacing ?? source.row_spacing }
   }
