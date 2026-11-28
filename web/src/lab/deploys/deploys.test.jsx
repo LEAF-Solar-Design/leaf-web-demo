@@ -191,6 +191,34 @@ describe('Deploys', () => {
     expect(clear).toHaveBeenCalledWith(123)
   })
 
+  it.each([
+    ['documents at the same revision and cadence', { doc_id: 'other' }, '', 'Document other · Revision 2 · Every 60 seconds'],
+    ['revisions of the same document', { revision: 1, state: 'stopped' }, '', 'Document strategy · Revision 1 · Every 60 seconds'],
+    ['cadences of the same revision', { interval_s: 120 }, '', 'Document strategy · Revision 2 · Every 120 seconds'],
+    ['duplicate schedules', {}, ' · Schedule first-id', 'Document strategy · Revision 2 · Every 60 seconds · Schedule second-id'],
+  ])('distinguishes %s and turns off only the selected schedule', async (_, difference, firstSuffix, secondLabel) => {
+    const { client } = ledger()
+    const first = { activation_id: 'first-id', doc_id: 'strategy', revision: 2, interval_s: 60, state: 'active' }
+    const second = { ...first, ...difference, activation_id: 'second-id' }
+    const fetchImpl = vi.fn(async (url, { method }) => {
+      if (method === 'POST') {
+        expect(url).toMatch(/\/activations\/second-id\/off$/)
+        second.state = 'off'
+      }
+      return { ok: true, json: async () => ({ activations: [first, second] }) }
+    })
+    render(<DeploysView client={client} fetchImpl={fetchImpl} />)
+    const target = await screen.findByRole('group', { name: secondLabel, exact: true })
+    const sibling = screen.getByRole('group', {
+      name: 'Document strategy · Revision 2 · Every 60 seconds' + firstSuffix, exact: true,
+    })
+    fireEvent.click(within(target).getByRole('button', { name: 'Off' }))
+    await waitFor(() => expect(within(target).getByRole('button', { name: 'Off' })).toBeDisabled())
+    expect(within(target).getByText('Off', { selector: 'p' })).toBeVisible()
+    expect(within(sibling).getByRole('button', { name: 'Off' })).toBeEnabled()
+    expect(within(sibling).getByText('Scheduled')).toBeVisible()
+  })
+
   it('creates, lists and controls activations and shows errors plainly', async () => {
     const { client } = ledger()
     let rows = []
@@ -217,8 +245,9 @@ describe('Deploys', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Activate published r2' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Pause' })).toBeEnabled())
     const card = screen.getAllByRole('article')[1]
-    expect(card).toHaveTextContent('Revision 2: Scheduled. Runs every 90 seconds.')
-    expect(card).not.toHaveTextContent(/Coalesced ticks|"result"|created|a1|strategy/)
+    const schedule = within(card).getByRole('group', { name: 'Document strategy · Revision 2 · Every 90 seconds' })
+    expect(within(schedule).getByText('Scheduled')).toBeVisible()
+    expect(card).not.toHaveTextContent(/Coalesced ticks|"result"|created|a1/)
     expect(screen.getByRole('button', { name: 'Resume' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Resume' })).toBeEnabled())
@@ -227,7 +256,7 @@ describe('Deploys', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Renew' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Off' })).toBeEnabled())
     fireEvent.click(screen.getByRole('button', { name: 'Off' }))
-    await waitFor(() => expect(card).toHaveTextContent('Revision 2: Off. Runs every 90 seconds.'))
+    await waitFor(() => expect(within(schedule).getByText('Off', { selector: 'p' })).toBeVisible())
     for (const name of ['Pause', 'Resume', 'Renew', 'Off']) expect(screen.getByRole('button', { name })).toBeDisabled()
     fetchImpl.mockResolvedValueOnce({ ok: false, json: async () => ({ detail: 'lab_activation_limit' }) })
     fireEvent.click(screen.getByRole('button', { name: 'Activate published r2' }))

@@ -12,6 +12,10 @@ const cardStyle = {
 
 const activationFetch = (...args) => globalThis.fetch(...args)
 
+function scheduleLabel(row) {
+  return `Document ${row.doc_id} · Revision ${row.revision} · Every ${row.interval_s} seconds`
+}
+
 function ExecutionPlan({ plan }) {
   return <section aria-label="Execution plan">
     <p>Published r{plan.revision}. Proposed interval {plan.interval_s} seconds. Run limit {plan.max_run_wall_s} seconds.</p>
@@ -137,6 +141,11 @@ function Activations({ docId, published, fetchImpl }) {
       ? 'Choose a whole number of seconds from 60 to 86400.' : ''
   const activationReason = baseReason || (plan?.blockers.length
     ? 'Resolve the execution plan blockers before activating this revision.' : '')
+  const labelCounts = new Map()
+  for (const row of rows) {
+    const label = scheduleLabel(row)
+    labelCounts.set(label, (labelCounts.get(label) || 0) + 1)
+  }
   return <section aria-label="Scheduled runs">
     <label>Interval (seconds) <input type="number" min="60" max="86400" step="1" value={interval}
       onChange={event => setInterval(event.target.value)} /></label>
@@ -154,8 +163,12 @@ function Activations({ docId, published, fetchImpl }) {
       title={busy ? 'Wait for the scheduling change to finish.' : undefined}
       onClick={() => changeReload()}>Reload schedules</button>
     {rows.length === 0 && <p>No scheduled runs.</p>}
-    {rows.map(row => <div key={row.activation_id}>
-      <p>Revision {row.revision}: {({ active: 'Scheduled', paused: 'Paused', expired: 'Expired', stopped: 'Stopped', off: 'Off' })[row.state] || 'Status unavailable'}. Runs every {row.interval_s} seconds.</p>
+    {rows.map(row => <fieldset key={row.activation_id} style={{ minInlineSize: 0 }}>
+      <legend style={{ overflowWrap: 'anywhere' }}>
+        {scheduleLabel(row)}
+        {labelCounts.get(scheduleLabel(row)) > 1 && <> · Schedule {row.activation_id}</>}
+      </legend>
+      <p>{({ active: 'Scheduled', paused: 'Paused', expired: 'Expired', stopped: 'Stopped', off: 'Off' })[row.state] || 'Status unavailable'}</p>
       {['pause', 'resume', 'renew', 'off'].map(action => <button key={action} type="button"
         title={busy ? 'Wait for the scheduling change to finish.' : ({
           pause: 'Pause is available while a schedule is active.',
@@ -169,7 +182,7 @@ function Activations({ docId, published, fetchImpl }) {
               : ['active', 'paused', 'expired', 'stopped'].includes(row.state))}
         onClick={() => change(`/${encodeURIComponent(row.activation_id)}/${action}`, {})}>
         {action[0].toUpperCase() + action.slice(1)}</button>)}
-    </div>)}
+    </fieldset>)}
   </section>
 }
 
