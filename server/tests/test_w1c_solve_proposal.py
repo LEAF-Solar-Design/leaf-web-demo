@@ -10,6 +10,7 @@ from leaf_platform import project_solve_store as assembly_store
 from routers import jobs as assembly_route
 from solar_design_graph import validate_graph
 from test_w1_design_graph import app_id
+from test_w1_grid_restitch import GROUPS
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -1139,10 +1140,29 @@ def assembly_world(graph, monkeypatch):
                               context=context, plan=plan)
 
 
+@pytest.mark.parametrize("group", GROUPS, ids=lambda group: group["group_block"])
+def test_preview_producer_uses_pinned_split_membership(group):
+    children = [{"candidate_bytes": cloud.canonical_bytes({"proposal": response})}
+                for response in group["responses"]]
+    pieces = [{"row_indices": piece["row_indices"], "request": {"grid": {"Rows": [
+        {"Panels": [{"Id": cell, "Code": 1} for cell in row if cell]}
+        for row in piece["cells"]
+    ]}}} for piece in group["pieces"]]
+    saved = solve.completed_prefix_strings(group["responses"], [p["row_indices"] for p in pieces])
+    for count in range(1, len(children) + 1):
+        actual = solve._preview_groups(children[:count], pieces)
+        assert actual and actual == saved[:len(actual)]
+
+    first_panel = next(panel for row in pieces[0]["request"]["grid"]["Rows"] for panel in row["Panels"])
+    first_panel["Id"] = "outside-pinned-split"
+    assert solve._preview_groups(children, pieces) == []
+
+
 def test_split_progress_read_is_opt_in_and_project_authorized(assembly_world, monkeypatch):
     from leaf_platform import project_solve_store
     a = assembly_world
     a.observed["status"] = "running"
+    monkeypatch.setenv("LEAF_SOURCE_SHA", ASSEMBLY_SOURCE)
     calls = []
 
     def read(scope, **kwargs):
@@ -1163,7 +1183,8 @@ def test_split_progress_read_is_opt_in_and_project_authorized(assembly_world, mo
         ASSEMBLY_ORG, ASSEMBLY_PROJECT, ASSEMBLY_DRAWING, ASSEMBLY_JOB)
     assert args == {"tenant_id": str(ASSEMBLY_ORG), "input_version_id": ASSEMBLY_VERSION,
                     "graph_revision": a.context.graph["rev"],
-                    "graph_sha256": a.plan["solve_binding"]["graph_sha256"], "conn": a.db}
+                    "graph_sha256": a.plan["solve_binding"]["graph_sha256"], "conn": a.db,
+                    "source_sha": ASSEMBLY_SOURCE}
 
     a.observed["status"] = "failed"
     terminal = a.client.get(url + "?include_solve_progress=true")
