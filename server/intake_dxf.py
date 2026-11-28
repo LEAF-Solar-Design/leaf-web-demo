@@ -63,12 +63,16 @@ def _fail(msg: str) -> None:
     raise IntakeDxfError(msg)
 
 
-def _layer_name(value: Any, where: str) -> str:
+def _dxf_name(value: Any, where: str, field: str) -> str:
     if not isinstance(value, str) or not value or len(value) > MAX_LAYER_CHARS:
-        _fail(f"{where}: layer must be a non-empty string of at most {MAX_LAYER_CHARS} chars")
+        _fail(f"{where}: {field} must be a non-empty string of at most {MAX_LAYER_CHARS} chars")
     if _CONTROL_RE.search(value):
-        _fail(f"{where}: layer name carries a control character")
+        _fail(f"{where}: {field} name carries a control character")
     return value
+
+
+def _layer_name(value: Any, where: str) -> str:
+    return _dxf_name(value, where, "layer")
 
 
 def _number(value: Any, where: str) -> float:
@@ -233,13 +237,13 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         where = f"mlstyles[{k}]"
         if not isinstance(style, dict):
             _fail(f"{where}: not an object")
-        name = _layer_name(style.get("name"), where)
+        name = _dxf_name(style.get("name"), where, "multileader style")
         if name.casefold() in {n.casefold() for n in mlstyles}:
             _fail(f"{where}: duplicate style")
         segments = style.get("segments")
         if isinstance(segments, bool) or not isinstance(segments, int):
             _fail(f"{where}: segments must be an integer")
-        mlstyles[name] = {"name": name, "textstyle": _layer_name(style.get("textstyle"), where),
+        mlstyles[name] = {"name": name, "textstyle": _dxf_name(style.get("textstyle"), where, "text style"),
                           "segments": segments,
                           **{field: _number(style.get(field), where)
                              for field in ("height", "arrow", "dogleg", "gap")}}
@@ -475,7 +479,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         if not isinstance(ent, dict):
             _fail(f"{where}: not an object")
         layer = _layer_name(ent.get("layer"), where)
-        style = _layer_name(ent.get("style"), where)
+        style = _dxf_name(ent.get("style"), where, "multileader style")
         if style not in mlstyles:
             _fail(f"{where}: unresolved mleader style")
         pts = ent.get("pts")
@@ -485,7 +489,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         if total_points > MAX_POINTS:
             _fail(f"more than {MAX_POINTS} points in total")
         record = {"layer": layer, "style": style,
-                  "textstyle": _layer_name(ent.get("textstyle"), where),
+                  "textstyle": _dxf_name(ent.get("textstyle"), where, "text style"),
                   "pts": [_vector(p, where) for p in pts],
                   **{field: _vector(ent.get(field), where)
                      for field in ("landing", "dogleg_dir", "textpt")},
@@ -719,7 +723,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         if source.get("space") == "paper":
             space_pairs = ["67", "1"]
             if "layout" in source:
-                space_pairs += ["410", _layer_name(source["layout"], "entity layout")]
+                space_pairs += ["410", _dxf_name(source["layout"], "entity layout", "layout")]
             # Place common entity metadata before its kind-specific subclass,
             # including for a POLYLINE whose following records are its vertices.
             entity_start = out.index("AcDbEntity", entity_offset)
@@ -1041,7 +1045,7 @@ def _vector(value, where, width=3):
 def _validated_insert(ent, where):
     if not isinstance(ent, dict):
         _fail(f"{where}: not an object")
-    name = _layer_name(ent.get("name"), where)
+    name = _dxf_name(ent.get("name"), where, "INSERT target block")
     layer = _layer_name(ent.get("layer"), where)
     point = [_number(ent.get(axis), f"{where}.{axis}") for axis in ("x", "y", "z")]
     normal = _vector(ent.get("nrm", [0, 0, 1]), f"{where}.nrm")
@@ -1089,14 +1093,14 @@ def _used_text_styles(catalogue, names):
         _fail("text_styles must be an object")
     result = {}
     for name in names:
-        _layer_name(name, "text style")
+        _dxf_name(name, "STYLE reference", "text style")
         key = name.casefold()
         if key == "standard" or key in result:
             continue
         definition = catalogue.get(key)
         if not isinstance(definition, dict):
             _fail(f"text style {name!r}: missing STYLE definition")
-        canonical_name = _layer_name(definition.get("name"), "STYLE definition")
+        canonical_name = _dxf_name(definition.get("name"), "STYLE definition", "text style")
         if canonical_name.casefold() != key:
             _fail(f"text style {name!r}: STYLE name does not match the reference")
         fields = {}
@@ -1125,7 +1129,7 @@ def _validated_blocks(blocks, note_layer, real, remaining_entities):
     known_names = {name.casefold() for name in blocks}
     result = {}
     for name, block in blocks.items():
-        _layer_name(name, "block name")
+        _dxf_name(name, "blocks", "block")
         if _layout_block_name(name):
             _fail("reserved layout block name")
         if not isinstance(block, dict):

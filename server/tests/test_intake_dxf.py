@@ -811,6 +811,40 @@ def test_invisible_nested_insert_keeps_definition_and_handle():
     assert shown["handle"] == "1B" and "invisible" not in shown
 
 
+@pytest.mark.parametrize("control", ["\n", "\r", "\0"], ids=["LF", "CR", "NUL"])
+@pytest.mark.parametrize(("field", "label"), [
+    ("name", "INSERT target block name"),
+    ("layer", "layer name"),
+])
+def test_nested_insert_reports_invalid_dxf_name(field, label, control):
+    pairs = [
+        0, "SECTION", 2, "BLOCKS",
+        0, "BLOCK", 2, "Frame",
+        0, "INSERT", 5, "1A", 2, "Rail", 8, "Equipment", 10, 2, 20, 3,
+        0, "ENDBLK", 0, "BLOCK", 2, "Rail", 0, "ENDBLK",
+        0, "ENDSEC", 0, "EOF", "",
+    ]
+    intake = dxf_intake.parse_dxf_bytes("\n".join(map(str, pairs)).encode())
+    baseline = intake_dxf.intake_to_dxf(intake)
+    nested, = intake["blocks"]["Frame"]["nested_inserts"]
+    valid = nested[field]
+    nested[field] = valid + control
+
+    with pytest.raises(intake_dxf.IntakeDxfError) as exc:
+        intake_dxf.intake_to_dxf(intake)
+    assert str(exc.value) == (
+        f"blocks[Frame].nested_inserts[0]: {label} carries a control character"
+    )
+
+    nested[field] = valid
+    reopened, repaired = _roundtrip(intake)
+    assert repaired == baseline
+    reference, = reopened["blocks"]["Frame"]["nested_inserts"]
+    assert (reference["handle"], reference["name"], reference["layer"]) == (
+        "1A", "Rail", "Equipment",
+    )
+
+
 @pytest.mark.parametrize(("flags", "suffix", "outline"), [
     (8, [0, "SEQEND"], {"layer": "Detail", "closed": False, "pts": [[1, 2, 3], [4, 5, 7]]}),
     (9, [0, "SEQEND"], {"layer": "Detail", "closed": True, "pts": [[1, 2, 3], [4, 5, 7]]}),
