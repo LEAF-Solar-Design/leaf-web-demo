@@ -20,12 +20,26 @@ from solar_design_graph import GraphValidationError, _bounded_json, entities
 from solar_project import apply_project_changes, normalize_project_changes
 from solar_preset_sync import L2_EQUIPMENT_PRESENT, leaves_l2_blocked, retype_inverters
 from solar_settings_invalidation import invalidate_settings_dependents
-from solar_sizing_client import advance, checked_graph
+from solar_sizing_client import advance, checked_graph, manual_sizing_evidence, require_sizing
 
 EDITABLE = {"panel_layer_contains", "panel_group_layer", "string_layer", "home_run_layer",
             "panels_in_sequence", "num_mppt", "strings_per_mppt", "optimizer_ratio",
             "use_l2_collectors", "panel_group_number", "string_number", "inverter_number",
             "mppt_letter"}
+
+
+def _prior_manual_sizing(before, params, changes):
+    maximum = changes.get("panels_in_sequence")
+    if (set(changes) != {"panels_in_sequence"} or "project_changes" in params
+            or before["project"]["installation_design"] != "Roof" or before["electrical_zones"]
+            or type(maximum) is not int or not 1 <= maximum <= 4096
+            or maximum == before["settings"]["panels_in_sequence"]):
+        return None
+    try:
+        evidence = require_sizing(before)
+    except GraphValidationError:
+        return None
+    return evidence if evidence["mode"] == "manual-global" else None
 
 
 def run(intake, params):
@@ -55,10 +69,16 @@ def run(intake, params):
         mode_flip = type(mode) is bool and mode != settings["use_l2_collectors"]
         if mode_flip and not mode and leaves_l2_blocked(graph):
             raise GraphValidationError(L2_EQUIPMENT_PRESENT)
+        prior_manual = _prior_manual_sizing(before, params, changes)
         settings.update(copy.deepcopy(changes))
-        # Editing a drawing setting requires explicit sizing confirmation again.
         settings["global_string_sizing_confirmed"] = False
         settings["extra"].pop("string_sizing", None)
+        if prior_manual is not None:
+            refreshed = manual_sizing_evidence(graph)
+            if refreshed["basis_sha256"] == prior_manual["basis_sha256"]:
+                settings["extra"]["string_sizing"] = refreshed
+                settings["global_string_sizing_confirmed"] = True
+                require_sizing(graph)
         if mode_flip:
             retype_inverters(graph, mode)
     if "project_changes" in params:

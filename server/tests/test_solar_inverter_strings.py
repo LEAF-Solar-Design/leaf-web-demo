@@ -243,3 +243,68 @@ def test_no_strings_prints_the_layer():
     after, lines = ss.color_strings(state, {})
     assert lines == ["LEAFCOLORSTRINGS: no strings found on layer String."]
     assert json.loads(st.canonical(st.publish(after))) == json.loads(st.canonical(st.publish(state)))
+
+
+@pytest.mark.parametrize("xs", [(0, 10, 20, 30, 40, 50), (0, 1, 4, 92, 97, 100)])
+def test_balance_intact_strings_with_spare_capacity(xs):
+    before = make_state(xs=xs)
+    after, lines = ss.assign_strings(before, HOST, FORMS, balance_whole_strings=True)
+    rows = by_string(after)
+    assert set(rows) == set(by_string(before))
+    assert [sum(row["device"] == number for row in rows.values()) for number in (1, 2)] == [3, 3]
+    for number in (1, 2):
+        assert sorted(row["input"] for row in rows.values() if row["device"] == number) == [1, 1, 2]
+    assert after["geometry"] == before["geometry"]
+    assert all(row["label"] == "-" for row in by_string(before).values())
+    assert any(line.startswith("Whole-string balance complete.") for line in lines)
+
+
+def test_balance_preserves_assigned_strings_and_uses_their_actual_mppt():
+    before = make_state()
+    saved = before["rows"]["string-assignment"][-2:]
+    for string_number, row in enumerate(saved, start=10):
+        # The physical MPPT is A even though the historical circuit says B.
+        circuit = f"+{string_number}/2b"
+        row.update(device=2, input=1, label=circuit, _detail={"circuit": circuit, "string_number": string_number})
+
+    after, _ = ss.assign_strings(before, HOST, FORMS, balance_whole_strings=True)
+    rows = by_string(after)
+    assert [rows[row["string"]] for row in saved] == saved
+    assert [sum(row["device"] == number for row in rows.values()) for number in (1, 2)] == [3, 3]
+    new = [row for row in rows.values() if row["device"] == 2 and row not in saved]
+    assert len(new) == 1 and new[0]["input"] == 2
+
+
+def test_balance_identifies_a_collector_with_insufficient_inputs_for_an_even_split():
+    devices = [device(x, 0.0, number=number, role="combiner")
+               for number, x in enumerate((0.0, 50.0, 100.0), start=1)]
+    for row, capacity in zip(devices, (1, 4, 4)):
+        row["_detail"]["box_input_count"] = capacity
+    before = make_state(devices=devices)
+    forms = {"assign_strings_to_combiner_boxs": "OK", "assign_strings_to_combiner_boxs_mode": "Auto",
+             "excess_capacity": "Yes"}
+    after, lines = ss.assign_strings(before, HOST, forms, balance_whole_strings=True)
+    assert [sum(row["device"] == number for row in by_string(after).values()) for number in (1, 2, 3)] == [1, 3, 2]
+    assert "Collector 1 has no free inputs (assigned: 1)." in lines
+    assert not any(line.startswith(("Collector 2 ", "Collector 3 ")) for line in lines)
+
+
+def test_balance_with_insufficient_total_capacity_keeps_the_saved_state():
+    before = make_state()
+    after, _ = ss.assign_strings(before, dict(HOST, L2StringsPerMppt=1), FORMS, balance_whole_strings=True)
+    assert after == before
+
+
+def test_balance_explains_a_load_that_would_require_moving_saved_strings():
+    before = make_state(xs=(0, 10, 20, 30, 40))
+    saved = before["rows"]["string-assignment"][:4]
+    for number, row in enumerate(saved, start=1):
+        circuit = ss.tag_text(1, number, 2, 2)
+        row.update(device=1, input=(number - 1) // 2 + 1, label=circuit,
+                   _detail={"circuit": circuit, "string_number": number})
+
+    after, lines = ss.assign_strings(before, HOST, FORMS, balance_whole_strings=True)
+    rows = by_string(after)
+    assert [rows[row["string"]] for row in saved] == saved
+    assert [sum(row["device"] == number for row in rows.values()) for number in (1, 2)] == [4, 1]
+    assert "Collector 1 already has 4 assigned strings." in lines

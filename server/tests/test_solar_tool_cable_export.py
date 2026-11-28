@@ -340,6 +340,11 @@ def test_cable_export_i8_lengths_use_inches(i8, unit, mpu):
 def test_route_bundle_joins_real_drawing_routes_to_workbook_rows(i8, unit, mpu, insunits):
     g = unsized(i8)
     g["project"]["units"].update(drawing_units=unit, meters_per_unit=mpu, drawing_unit_is_feet=(unit == "ft"))
+    cables = [route for route in g["routes"] if route["route_kind"] != "trench"]
+    flat, elevated, nonplanar = cables[:3]
+    flat["points"] = [[*point, 0] for point in flat["points"]]
+    elevated["points"] = [[*point, .75] for point in elevated["points"]]
+    nonplanar["points"] = [[*point, index * .25] for index, point in enumerate(nonplanar["points"])]
     before = copy.deepcopy(g)
     workbook = builtin().run(g, I9_PARAMS)
     bundle = builtin().run(g, {**I9_PARAMS, "export_format": "route_bundle"})
@@ -368,8 +373,9 @@ def test_route_bundle_joins_real_drawing_routes_to_workbook_rows(i8, unit, mpu, 
             route["from_ref"], route["to_ref"], route["route_kind"])
         assert polyline["layer"] == entry["dxf_layer"]
         assert len(polyline["pts"]) == len(route["points"])
-        for point, (x, y) in zip(polyline["pts"], route["points"]):
-            assert point == pytest.approx([x / mpu, y / mpu, 0])
+        for point, (x, y, *height) in zip(polyline["pts"], route["points"]):
+            z = height[0] if height else 0
+            assert point == pytest.approx([x / mpu, y / mpu, z / mpu])
         assert rows[entry["homeruns_row"]][2] == kinds[entry["kind"]]
 
 

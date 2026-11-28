@@ -301,9 +301,9 @@ def lane(memory, monkeypatch):
     monkeypatch.setattr(deps, "load_seed_catalog_tools", lambda: [*seed_tools, batch])
     memory.role = "read_only"
     memory.tenant.tier = "demo"
-    store_intake(memory, V2, {"polylines": [{"layer": "PV-ROW"}, {"layer": "A"}],
+    store_intake(memory, V2, {"polylines": [{"layer": "PV-ROW", "pts": []}, {"layer": "A", "pts": []}],
                               "inserts": [{"layer": "PV-ROW"}], "faces3d": []})
-    store_intake(memory, V1, {"polylines": [{"layer": "HISTORICAL"}],
+    store_intake(memory, V1, {"polylines": [{"layer": "HISTORICAL", "pts": []}],
                               "inserts": [], "faces3d": [{"layer": "OLD-TERRAIN"}]})
     monkeypatch.setattr(deps, "auth_live", lambda: True)
     monkeypatch.setattr(platform_link.platform_store(), "resolve_active_identity_binding",
@@ -416,7 +416,7 @@ def test_c02_api_persists_exact_stored_selection_and_matching_retry(lane, read_j
 
     def execute(*args, **kwargs):
         calls.append(True)
-        return actual_run(*args, **kwargs)
+        return {**actual_run(*args, **kwargs), "catalog_digest": "sha256:" + "0" * 64}
 
     monkeypatch.setattr(tool_loader, "run_tool_dynamic", execute)
     first = request(lane, headers=headers, dwg=str(D1), dwg_version=999)
@@ -425,10 +425,16 @@ def test_c02_api_persists_exact_stored_selection_and_matching_retry(lane, read_j
     job = first.json()
     assert job["job_id"] == second.json()["job_id"] and calls == [True]
     assert job["result"]["result"]["layers"] == layers(lane, version)
+    internal = read_job_store.db.execute("SELECT execution_context FROM jobs").fetchone()
+    digest = json.loads(internal["execution_context"])["catalog_digest"]
+    assert digest != "sha256:" + "0" * 64
+    assert job["result"]["catalog_digest"] == digest
+    assert second.json()["result"] == job["result"]
     board = [row.to_dict() for row in store.list_jobs(O1, P1)]
     assert len(board) == 1 and board[0]["job_id"] == job["job_id"]
     assert board[0]["input_version_id"] == str(version)
     assert board[0]["result"]["project_context"]["drawing_id"] == str(D1)
+    assert board[0]["result"]["catalog_digest"] == digest
 
 
 @pytest.mark.parametrize("conflict", ["drawing", "project", "organization", "missing", "store"])
@@ -471,6 +477,8 @@ def test_c02_real_persisted_read_and_project_board_tuple(lane, read_job_store, v
                 "input_version_id": str(version), "intake_sha256": hashlib.sha256(
                     lane.memory.blobs[lane.memory.versions[version].intake_ref]).hexdigest()}
     assert job["result"]["project_context"] == expected
+    digest = deps.catalog_tool_digest(deps.find_tool(BATCH_LAYER_TOOL, str(lane.memory.tenant)))
+    assert job["result"]["catalog_digest"] == digest
     # The exact board SQL and Job.from_row/to_dict run, not a fake board response.
     board = [row.to_dict() for row in store.list_jobs(O1, P1)]
     assert len(board) == 1 and board[0]["job_id"] == job["job_id"]
@@ -480,10 +488,123 @@ def test_c02_real_persisted_read_and_project_board_tuple(lane, read_job_store, v
     row = read_job_store.db.execute("SELECT status,kind,attempt,max_attempts,execution_context "
                                    "FROM jobs").fetchone()
     assert tuple(row[:4]) == ("succeeded", "run", 1, 1)
-    assert json.loads(row["execution_context"])["catalog_digest"] == deps.catalog_tool_digest(
-        deps.find_tool(BATCH_LAYER_TOOL, str(lane.memory.tenant)))
+    assert json.loads(row["execution_context"])["catalog_digest"] == digest
     assert read_job_store.db.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] == 0
     assert all(not write for write in lane.memory.accesses)
+
+
+@pytest.mark.parametrize("rule_changed,revision_changed", [(True, False), (False, True), (True, True)],
+                         ids=["rule-only", "revision-only", "mixed"])
+def test_count_rule_reference_is_saved_with_drawing_revision(
+    lane, read_job_store, monkeypatch, tmp_path, rule_changed, revision_changed,
+):
+    from leaf_platform import store
+
+    tool = next(tool for tool in json.loads(tool_loader.PLATFORM_PACKAGE_REGISTRY.read_bytes())["tools"]
+                if tool["name"] == "count-modules")
+    tool["entry"] = "count_modules.py"
+    source = (tool_loader.BUILTIN_DIR / "count_modules.py").read_bytes()
+    builtin = tmp_path / "builtins"
+    builtin.mkdir()
+    entry = builtin / "count_modules.py"
+    entry.write_bytes(source)
+    monkeypatch.setattr(tool_loader, "BUILTIN_DIR", builtin)
+    before = _real_read_job(lane, version=V2, key="count-before", tool=tool)
+    if rule_changed:
+        entry.write_bytes(source.replace(b"dimensions[0] * dimensions[1]",
+                                         b"dimensions[0] + dimensions[1]"))
+    version = V1 if revision_changed else V2
+    after = _real_read_job(lane, version=version, key="count-after", tool=tool)
+    assert before["status"] == after["status"] == "complete", (before.get("error"), after.get("error"))
+    saved = {row["job_id"]: row["result"] for row in (job.to_dict() for job in store.list_jobs(O1, P1))}
+    before_result = saved[before["job_id"]]
+    after_result = saved[after["job_id"]]
+    assert before_result["rule_reference"]["entry_sha256"] == hashlib.sha256(source).hexdigest()
+    assert after_result["rule_reference"]["entry_sha256"] == hashlib.sha256(entry.read_bytes()).hexdigest()
+    assert (before_result["rule_reference"] != after_result["rule_reference"]) == rule_changed
+    assert before_result["project_context"]["input_version_id"] == str(V2)
+    assert after_result["project_context"]["input_version_id"] == str(version)
+    assert (before_result["project_context"]["intake_sha256"]
+            != after_result["project_context"]["intake_sha256"]) == revision_changed
+    assert [row["count"] for row in before_result["result"]["sets"]] == [1]
+    expected = [] if revision_changed else [2 if rule_changed else 1]
+    assert [row["count"] for row in after_result["result"]["sets"]] == expected
+
+
+def test_trusted_string_panels_has_no_count_rule_reference():
+    registry = json.loads(tool_loader.PLATFORM_PACKAGE_REGISTRY.read_bytes())
+    tool = next(tool for tool in registry["tools"] if tool["name"] == "string-panels")
+    intake = {"polylines": [{
+        "layer": "Panels", "closed": True, "handle": "A",
+        "pts": [[0, 0], [40, 0], [40, 80], [0, 80]],
+    }]}
+
+    assert tool_loader.is_trusted_builtin_tool(tool, str(O1))
+    envelope = tool_loader.run_tool_dynamic(tool, intake, {}, aps_live=False, tenant_id=str(O1))
+
+    assert envelope["ok"], envelope
+    assert envelope["result"]["stats"]["panel_count"] == 1
+    assert "rule_reference" not in envelope
+
+
+def test_count_selection_http_board(lane, read_job_store):
+    from leaf_platform import store
+
+    store_intake(lane.memory, V2, {"inserts": [
+        {"layer": "East roof", "name": "Panel", "handle": "A"},
+        {"layer": "Annex roof", "name": "Panel", "handle": "B"},
+    ]})
+    version = lane.memory.versions[V2]
+    read_job_store.db.execute("UPDATE drawing_versions SET provenance = ? WHERE version_id = ?",
+                              (json.dumps(version.provenance), str(V2)))
+    read_job_store.db.commit()
+    tool = deps.find_tool("count-modules", str(lane.memory.tenant))
+    assert tool and tool["name"] == "count-modules"
+    digest = deps.catalog_tool_digest(tool)
+    expected_rule = {
+        "schema": "leaf.count-rule.v1",
+        "entry_sha256": hashlib.sha256(tool_loader.resolve_local_file(tool).read_bytes()).hexdigest(),
+        "geometry_sha256": hashlib.sha256((tool_loader.SERVER_DIR / "dxf_intake.py").read_bytes()).hexdigest(),
+    }
+
+    def save(key, params):
+        headers = {"X-Org-Id": str(O1), "X-Project-Id": str(P1),
+                   "Idempotency-Key": key, "Prefer": "respond-async"}
+        response = request(lane, tool=tool, params=params, headers=headers)
+        assert response.status_code == 202, response.text
+        job = response.json()
+        assert job["status"] == "complete", job
+        envelope = job["result"]
+        assert envelope["catalog_digest"] == digest
+        assert envelope["rule_reference"] == expected_rule
+        assert envelope["project_context"] == {
+            "organization_id": str(O1), "project_id": str(P1), "drawing_id": str(D1),
+            "input_version_id": str(V2), "intake_sha256": version.provenance["source"]["intake"]["sha256"],
+        }
+        board = {row["job_id"]: row for row in (item.to_dict() for item in store.list_jobs(O1, P1))}
+        assert board[job["job_id"]]["result"] == envelope
+        retry = request(lane, tool=tool, params=params, headers=headers)
+        assert retry.status_code == 202, retry.text
+        replay = retry.json()
+        assert replay["job_id"] == job["job_id"]
+        assert replay["result"] == envelope
+        return envelope
+
+    listing = save("list-sets", {})
+    by_layer = {row["layer"]: row["set_id"] for row in listing["result"]["sets"]}
+    assert set(by_layer) == {"East roof", "Annex roof"}
+    assert listing["result"]["selection_required"]
+    assert not listing.get("overlay")
+    for label, layers, handles in (
+        ("both", ["East roof", "Annex roof"], ["A", "B"]),
+        ("east", ["East roof"], ["A"]),
+        ("annex", ["Annex roof"], ["B"]),
+    ):
+        result = save(label, {"set_ids": [by_layer[layer] for layer in layers]})
+        assert {row["layer"] for row in result["result"]["selected_sets"]} == set(layers)
+        assert result["result"]["count"] == len(handles)
+        assert sorted(result["overlay"]["highlight_handles"]) == handles
+    assert read_job_store.db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 4
 
 
 def test_c02_matching_retry_reads_same_real_job_without_execution(lane, read_job_store):
@@ -523,6 +644,7 @@ def test_c02_callback_failure_is_a_real_replayable_failed_job(lane, read_job_sto
     assert job["status"] == "failed" and job["result"]["ok"] is False
     assert job["error"]["error_code"] == ErrorCode.INTERNAL
     assert job["result"]["project_context"]["input_version_id"] == str(V2)
+    assert "catalog_digest" not in job["result"]
     assert "private callback" not in json.dumps(job)
     assert read_job_store.db.execute("SELECT status FROM jobs").fetchone()[0] == "failed"
 
@@ -1053,6 +1175,7 @@ def test_c1a_full_envelope_allowlist(lane, monkeypatch):
         "error": None,
         "unexpected": {"claim": True},
         "execution_provenance": {"forged": True},
+        "rule_reference": {"fixture": True},
     }
     tool = tool_override(monkeypatch)
     install_tool_body(
@@ -1087,7 +1210,7 @@ def test_c1a_full_envelope_allowlist(lane, monkeypatch):
     }
     assert not {
         "job_id", "status", "output_version_id", "source_version",
-        "unexpected", "execution_provenance",
+        "unexpected", "execution_provenance", "rule_reference",
     } & body.keys()
     assert response.headers["cache-control"] == "no-store"
 

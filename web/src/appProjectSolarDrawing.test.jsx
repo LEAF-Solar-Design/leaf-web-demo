@@ -121,7 +121,7 @@ function environment(intake = graphIntake(), scene, binding = B) {
 }
 function projection(env) {
   const scope = { ...env }
-  for (const name of ['projectScene', 'projectDrawingBinding', 'projectContextView', 'projectContextCurrent',
+  for (const name of ['projectScene', 'projectDrawingBinding', 'projectContextView', 'projectSolvePreview', 'projectContextCurrent',
     'projectSceneIntake', 'projectSceneKey', 'projectSceneReady', 'projectDrawing',
     'projectEngineIntake', 'drawingIntake', 'projectDrawingName', 'projectHiddenLayers', 'visibleLayers', 'shownLayers', 'setVisibleLayers'])
     scope[name] = evaluate(decl(name).init, scope)

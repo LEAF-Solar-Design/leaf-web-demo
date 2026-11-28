@@ -3,9 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import re
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -2170,6 +2175,35 @@ def test_queue_log_survives_stats_failure(monkeypatch, caplog):
         "customization_stage_queue exception=RuntimeError",
         "customization_stage_queue depth=2 running=1 oldest_wait_s=30",
     ]
+    assert caplog.records[1].levelno == logging.WARNING
+
+
+def test_queue_line_reaches_the_default_last_resort_handler():
+    code = """
+import customization_stage_worker
+from types import SimpleNamespace
+
+customization_stage_worker.CustomizationService.configured = lambda: SimpleNamespace(
+    store=SimpleNamespace(stage_queue_stats=lambda: {
+        "depth": 3, "running": 1, "oldest_wait_s": 245,
+    }),
+)
+waits = iter((False, True))
+stop = SimpleNamespace(wait=lambda interval: next(waits))
+customization_stage_worker._queue_log_loop(stop, 10)
+"""
+    server_directory = Path(customization_stage_worker.__file__).parent
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(server_directory)
+    child = subprocess.run(
+        [sys.executable, "-c", code], cwd=server_directory,
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert child.returncode == 0, child.stderr
+    queue_line = "customization_stage_queue depth=3 running=1 oldest_wait_s=245"
+    assert queue_line in [line.strip() for line in child.stderr.splitlines()]
+    assert re.search(r"oldest_wait_s=[2-9][0-9][0-9]$", queue_line)
+    assert "customization_stage_queue depth=" in queue_line
 
 
 def test_stage_queue_stats_age_counts_and_removal_exclusion(store, monkeypatch):

@@ -42,6 +42,33 @@ def test_empty_dependencies_are_an_explicit_empty_report():
     assert from_pairs([])["dependencies"] == []
 
 
+def test_material_texture_inventory_uses_full_locator_and_saved_map_source():
+    def material(handle, tags):
+        return f"0\nMATERIAL\n5\n{handle}\n100\nAcDbMaterial\n{tags}"
+
+    shared = "finish/Shared.png"
+    first = material("A1", f"72\n1\n3\n{shared}\n271\n0\n72\n1\n3\nnormal/Shared.png\n")
+    second = material("A2", f"77\n1\n4\n{shared}\n175\n0\n7\nscene.png\n")
+    separate = material("A3", "179\n1\n8\nother/Shared.png\n9\nrefract.png\n273\n0\n")
+    decoy = material("AA", "171\n1\n6\nwrong-section.png\n")
+    raw = (
+        f"0\nSECTION\n2\nENTITIES\n{decoy}0\nENDSEC\n"
+        f"0\nSECTION\n2\nOBJECTS\n{first}{second}{separate}0\nENDSEC\n0\nEOF\n"
+    ).encode()
+    report = parse_dxf_bytes(raw)["dependency_report"]
+    assert report["external_files_opened"] is False
+    rows = report["dependencies"]
+    assert all(row["kind"] == "material_texture" and row["disposition"] == "texture omitted"
+               for row in rows)
+    assert {row["name"]: row["material_maps"] for row in rows} == {
+        shared: [{"material_handle": "A1", "channel": "diffuse"},
+                 {"material_handle": "A2", "channel": "specular"}],
+        "normal/Shared.png": [{"material_handle": "A1", "channel": "normal"}],
+        "other/Shared.png": [{"material_handle": "A3", "channel": "bump"}],
+        "refract.png": [{"material_handle": "A3", "channel": "refraction"}],
+    }
+
+
 @pytest.mark.parametrize("setup, layout_device, duplicates, status", [
     ("office", "Shared.pc3", False, "matched"),
     ("Office", "../local/Override.pc3", False, "matched"),
@@ -59,7 +86,8 @@ def test_real_intake_binds_layout_plot_settings_in_object_subclasses(
 
     named = ("0\nPLOTSETTINGS\n5\nAB\n100\nAcDbPlotSettings\n"
              "1\nOffice\n2\nShared.pc3\n7\nShared.ctb\n")
-    objects = layout("Roof", layout_device, setup, "A1") + named
+    unused = named.replace("AB\n", "AD\n").replace("Office\n", "Reserve\n")
+    objects = layout("Roof", layout_device, setup, "A1") + named + unused
     objects += layout("Model", "ModelOnly.pc3", setup, "A2")
     if duplicates:
         objects += named.replace("AB\n", "AC\n").replace("Shared.pc3", "Other.pc3")
@@ -77,7 +105,11 @@ def test_real_intake_binds_layout_plot_settings_in_object_subclasses(
     expected = {layout_device, "Local.stb", "Shared.pc3", "Shared.ctb"}
     if duplicates:
         expected.add("Other.pc3")
-    assert {row["name"] for row in report["dependencies"]} == expected
+    by_name = {row["name"]: row for row in report["dependencies"]}
+    assert set(by_name) == expected
+    assert by_name["Shared.pc3"]["page_setups"] == ["Office", "Reserve"]
+    assert by_name["Shared.ctb"]["page_setups"] == ["Office", "Reserve"]
+    assert "page_setups" not in by_name["Local.stb"]
     assert report["external_files_opened"] is False
 
 
@@ -125,7 +157,8 @@ def test_normal_intake_reports_plot_resources_without_resolving_them(
     assert report["scope"] == "local_dxf_records"
     assert report["external_files_opened"] is False
     assert report["dependencies"] == [
-        {"kind": kind, "name": name, "disposition": "reported"} for kind, name in expected
+        {"kind": kind, "name": name, "disposition": "reported",
+         "page_setups": ["Setup name.pc3"]} for kind, name in expected
     ]
     assert intake["polylines"][0]["pts"] == [[1.0, 2.0, 0.0], [3.0, 4.0, 0.0]]
 
@@ -234,7 +267,10 @@ def test_dependency_paths_are_reported_without_any_filesystem_access(path, monke
     pairs = [(0, "BLOCK"), (70, "4"), (1, path),
              (0, "STYLE"), (3, path), (4, path),
              (0, "IMAGEDEF"), (1, path),
-             (0, "DGNDEFINITION"), (1, path)]
+             (0, "DGNDEFINITION"), (1, path),
+             (0, "MATERIAL"), (5, "AA"), (100, "AcDbMaterial"), (72, "1"), (3, path),
+             (0, "LIGHT"), (5, "BB"), (100, "AcDbLight"), (290, "0"), (280, "1"),
+             (290, "1"), (300, path)]
     with monkeypatch.context() as guard:
         guard.setattr(builtins, "open", forbidden_open)
         guard.setattr(io, "open", forbidden_open)
@@ -245,7 +281,34 @@ def test_dependency_paths_are_reported_without_any_filesystem_access(path, monke
             for row in report["dependencies"]} == {
         ("xref", path, "detached"), ("font", path, "font remapped"),
         ("shape_font", path, "font remapped"), ("image", path, "image omitted"),
-        ("underlay", path, "underlay omitted")}
+        ("underlay", path, "underlay omitted"), ("material_texture", path, "texture omitted"),
+        ("photometric_web", path, "reported")}
+
+
+def test_light_web_requires_its_subclass_and_an_enabled_web_flag():
+    def light(handle, *tags):
+        return [(0, "LIGHT"), (5, handle), *tags]
+
+    path = (300, "fixtures/shared.ies")
+    light_subclass = (100, "AcDbLight")
+    status = (290, "1")
+    enabled = (290, "1")
+    disabled = (290, "0")
+    pairs = [(0, "SECTION"), (2, "ENTITIES")]
+    pairs += light("A", light_subclass, status, path)
+    pairs += light("B", light_subclass, status, disabled, path)
+    pairs += light("C", light_subclass, status, (100, "AcDbEntity"), enabled, path)
+    pairs += light("D", status, enabled, path)
+    pairs += light("E", light_subclass, disabled, (280, "1"), enabled, path)
+    pairs += light("E", light_subclass, status, (1, "1"), (295, "0"), enabled, path)
+    pairs += light("F", light_subclass, status, enabled, (300, ""))
+    pairs += [(0, "ENDSEC"), (0, "SECTION"), (2, "OBJECTS")]
+    pairs += light("G", light_subclass, status, enabled, path)
+    pairs += [(0, "ENDSEC"), (0, "EOF")]
+    assert from_pairs(pairs)["dependencies"] == [{
+        "kind": "photometric_web", "name": path[1], "disposition": "reported",
+        "light_handles": ["E"],
+    }]
 
 
 def test_unicode_records_reorder_stably_deduplicate_by_kind_and_preserve_input():
