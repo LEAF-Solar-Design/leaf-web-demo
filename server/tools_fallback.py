@@ -415,6 +415,135 @@ _QUOTED_LAYER = re.compile(
 )
 _RELATIVE_LAYER = re.compile(r"\b(?:active|current)\s+layer\b", re.IGNORECASE)
 
+
+_LINE_PATTERN_REFERENCE = re.compile(
+    r"\b(?:linetypes?|line[\s-]+(?:types?|patterns?)|lines?\b[^.!?]{0,80}\bpatterns?)\b",
+    re.IGNORECASE,
+)
+_MISSING_PATTERN_DEFINITION = re.compile(
+    r"\b(?:undefined|(?:missing|absent)\b[^.!?]{0,60}\bdefinitions?|"
+    r"definitions?\b[^.!?]{0,60}\b(?:missing|absent)|(?:no longer|not)\s+defin\w+)\b",
+    re.IGNORECASE,
+)
+_MISSING_LINETYPES_BODY = """
+def run(intake, params):
+    report = intake.get("dependency_report") or {}
+    if report.get("explicit_line_linetypes_checked") is not True:
+        return ({"status": "unavailable", "message": "Reopen the DXF to check its line patterns."}, None)
+
+    missing = [
+        row for row in report["dependencies"]
+        if row["kind"] == "linetype" and row["disposition"] == "missing definition"
+    ]
+    return ({
+        "status": "missing_definitions" if missing else "clean",
+        "missing_linetype_count": len(missing),
+        "missing_linetypes": missing,
+    }, None)
+"""
+
+_PANEL_MATERIAL_LINK_REQUEST = [
+    re.compile(pattern, re.IGNORECASE) for pattern in (
+        r"^(?:show|list|report|identify|flag|tell me)\b",
+        r"\b(?:panels?|outlines?)\b",
+        r"\bmaterials?\b",
+        r"\b(?:ambiguous|missing|unresolved|shared|shares?|sharing|conflicting)\b",
+        r"\b(?:definitions?|links?|handles?|shares?|sharing)\b",
+    )
+]
+_PANEL_MATERIAL_LINKS_BODY = """
+def run(intake, params):
+    report = intake.get("dependency_report") or {}
+    links = report.get("explicit_panel_material_links")
+    if links is None:
+        return ({"status": "unavailable", "message": "Reopen the DXF to check explicit material links."}, None)
+    return ({
+        "status": "reported",
+        "scope": "direct_material_links_on_closed_model_space_outlines",
+        "links": links,
+    }, None)
+"""
+_TABLE_STYLE_REQUEST = [
+    re.compile(pattern, re.IGNORECASE) for pattern in (
+        r"\b(?:list|show|report|identify|check|flag|which)\b",
+        r"\b(?:schedules?|tables?)\b",
+        r"\bstyles?\b",
+        r"\b(?:missing|cyclic|cycles?|competing|conflicting|ambiguous|dangling|unresolved|links?|bindings?)\b",
+    )
+]
+_TABLE_STYLE_BODY = """
+def run(intake, params):
+    report = intake.get("dependency_report") or {}
+    links = report.get("table_style_links")
+    if links is None:
+        return ({"status": "unavailable", "message": "Reopen the DXF to check schedule styles."}, None)
+    return ({"status": "reported", "scope": "drawing_schedule_styles", "schedules": links}, None)
+"""
+
+_TOLERANCE_FONT_REQUEST = [
+    re.compile(pattern, re.IGNORECASE) for pattern in (
+        r"\b(?:list|show|report|identify|check|flag|which)\b",
+        r"\b(?:tolerance|feature\s+control)\s+frames?\b",
+        r"\b(?:fonts?|glyphs?|style\s+references?)\b",
+    )
+]
+_TOLERANCE_FONT_BODY = """
+def run(intake, params):
+    report = intake.get("dependency_report") or {}
+    links = report.get("tolerance_font_links")
+    if links is None:
+        return ({"status": "unavailable", "message": "Reopen the DXF to check tolerance-frame fonts."}, None)
+    return ({"status": "reported", "scope": "drawing_tolerance_fonts", "frames": links}, None)
+"""
+
+_NOTE_STYLE_REQUEST = [
+    re.compile(pattern, re.IGNORECASE) for pattern in (
+        r"\b(?:list|show|report|identify|check|flag|which)\b",
+        r"\b(?:notes?|multileaders?|text\s+leaders?)\b",
+        r"\b(?:styles?|fonts?)\b",
+        r"\b(?:missing|competing|conflicting|ambiguous|dangling|unresolved|links?|bindings?)\b",
+    )
+]
+_NOTE_STYLE_BODY = """
+def run(intake, params):
+    report = intake.get("dependency_report") or {}
+    links = report.get("note_style_links")
+    if links is None:
+        return ({"status": "unavailable", "message": "Reopen the DXF to check note styles."}, None)
+    return ({"status": "reported", "scope": "drawing_text_multileader_styles", "notes": links}, None)
+"""
+_SHEET_PLOT_SETUP_REQUEST = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\b(?:identify|report|show|list|check|flag|which)\b",
+        r"\b(?:sheets?|layouts?)\b",
+        r"\b(?:page\s+|plot\s+)?setups?\b",
+        r"\b(?:share[sd]?|sharing|valid|missing|conflict(?:ing|s)?|ambiguous|bindings?)\b",
+    )
+]
+_SHEET_PLOT_SETUPS_BODY = """
+def run(intake, params):
+    report = intake.get("dependency_report") or {}
+    bindings = report.get("plot_layout_bindings")
+    if bindings is None:
+        return ({"status": "unavailable", "message": "Reopen a DXF with saved sheet plot settings."}, None)
+
+    matched = {}
+    for binding in bindings:
+        if binding["setup_status"] == "matched":
+            name = binding["page_setup"]
+            group = matched.setdefault(name.casefold(), {"page_setup": name, "sheets": []})
+            group["sheets"].append(binding["layout"])
+
+    return ({
+        "status": "reported",
+        "scope": "saved_sheet_plot_settings",
+        "bindings": bindings,
+        "shared_setups": [group for group in matched.values() if len(group["sheets"]) > 1],
+    }, None)
+"""
+
+
 _PANEL_COUNT_TARGET = re.compile(
     r"\b(?:count(?:s|ing)?|tally|how many|number of)\s+(?:the\s+)?(?:nested\s+)?(?:(?:pv|solar)\s+)?(?:panels?|modules?)\b",
     re.IGNORECASE,
@@ -843,6 +972,37 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "check", "check_route_crossings"
         drawing_body = authored_route_crossings.ROUTE_CROSSINGS_BODY
         summary = "checks cable routes against array and aisle boundaries"
+
+    if drawing_body is None and all(pattern.search(description) for pattern in _TOLERANCE_FONT_REQUEST):
+        verb, engine_op = "report", "tolerance_font_dependencies"
+        drawing_body = _TOLERANCE_FONT_BODY
+        summary = "reports inherited fonts and glyph overrides for saved tolerance frames"
+
+    if drawing_body is None and all(pattern.search(description) for pattern in _NOTE_STYLE_REQUEST):
+        verb, engine_op = "report", "note_styles"
+        drawing_body = _NOTE_STYLE_BODY
+        summary = "reports saved text multileader styles and their font definitions"
+
+    if drawing_body is None and all(pattern.search(description) for pattern in _TABLE_STYLE_REQUEST):
+        verb, engine_op = "report", "table_style_dependencies"
+        drawing_body = _TABLE_STYLE_BODY
+        summary = "reports schedule style links and competing definitions in the saved DXF"
+
+    if drawing_body is None and all(pattern.search(description) for pattern in _SHEET_PLOT_SETUP_REQUEST):
+        verb, engine_op = "report", "sheet_plot_setups"
+        drawing_body = _SHEET_PLOT_SETUPS_BODY
+        summary = "reports saved page setup links and shared setups across sheets"
+
+    if drawing_body is None and all(pattern.search(description) for pattern in _PANEL_MATERIAL_LINK_REQUEST):
+        verb, engine_op = "report", "panel_material_links"
+        drawing_body = _PANEL_MATERIAL_LINKS_BODY
+        summary = "reports explicit material links on closed model-space outlines"
+
+    if (drawing_body is None and _LINE_PATTERN_REFERENCE.search(description)
+            and _MISSING_PATTERN_DEFINITION.search(description)):
+        verb, engine_op = "report", "missing_linetype_definitions"
+        drawing_body = _MISSING_LINETYPES_BODY
+        summary = "reports missing line pattern definitions and the lines that use them"
 
     if drawing_body is None:
         family = authored_layer_subtotals.requested_family(description)

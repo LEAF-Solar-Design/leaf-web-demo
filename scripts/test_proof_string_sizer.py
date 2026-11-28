@@ -928,6 +928,15 @@ def sp_reconstruct():
     assert digest(dxf) == "18cfed23a3fd45d0bc6382b6f274c85c22dd717f4cf63a1ac10c1f30f76d9bda"
     # The recorded upload predates the optional spatial measurement indexes.
     intake = parse_dxf_bytes(dxf, source_name="rooftop-unsplit.dxf", include_measurement_evidence=False)
+    # Rebuild the dependency report as it appeared in the recorded upload.
+    for field in (
+        "explicit_line_linetypes_checked",
+        "explicit_panel_material_links",
+        "note_style_links",
+        "table_style_links",
+        "tolerance_font_links",
+    ):
+        intake["dependency_report"].pop(field)
     upload = json.dumps(intake).encode()
     assert len(upload) == 177394
     source = digest(upload)

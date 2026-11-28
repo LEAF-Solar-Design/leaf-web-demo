@@ -44,10 +44,10 @@ CORRUPT = "the version this save replaces does not match its stored record; noth
 TOO_LARGE = "the edited drawing and its solar design together exceed the stored design bound; nothing was saved"
 # Measured: the payload a carried save stores (raw bytes as the route encodes them, and canonical), and the
 # payload a plain drawing's save stores.
-CARRIED_PAYLOAD_SHA = "3af1fadca194de6534b3b91f87b9d3065f1c7cd820089d62b5e2067505728909"
-CARRIED_CANONICAL_SHA = "69a4b4d028133679c3a9acc71cc5767132b6553e2608548257561e46ed1eb10a"
-PLAIN_PAYLOAD_SHA = "2d6bfcbc4ed6cf34d5940b5aea4822ca710594c56dd48f9082ec37f47fc25a63"
-MERGED_NODES = 185684  # solar_design_graph._bounded_json node count of the carried v3 intake (i4 fixture)
+CARRIED_PAYLOAD_SHA = "fa9300f1d8b57af131cf6bcd1b4d13a0f3eb621001ab09e9452ec0d9dba9de88"
+CARRIED_CANONICAL_SHA = "660b21249f993e27c50cf51d06d86b243b4e9ca4d96cc02fe8971f23efe50c06"
+PLAIN_PAYLOAD_SHA = "374dfd53b0b37332f173762e64d5c82ab3d3f7e65775fe921431b4e689cc7781"
+MERGED_NODES = 185694  # solar_design_graph._bounded_json node count of the carried v3 intake (i4 fixture)
 PLAN_LEGS = [({"mutations": {}}, "the plan names no operation; the DXF carries this save"),
              ({"mutations": {"removed": ["AB"]}}, "the head has no DWG source; the DXF carries this save")]
 

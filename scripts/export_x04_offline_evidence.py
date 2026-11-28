@@ -20,6 +20,11 @@ SCHEMA = 'leaf.x04.offline-evidence.v1'
 MAX_JSON_CONTAINER_DEPTH = 256
 MAX_JSON_INTEGER_DIGITS = 4300
 DEFAULT_MAX_INPUT_BYTES = 16 * 1024 * 1024
+_ADDED_DEPENDENCY_FIELDS = frozenset({
+    'explicit_line_linetypes_checked', 'explicit_panel_material_links',
+    'note_style_links', 'table_style_links', 'tolerance_font_links',
+    'linetype_shape_links',
+})
 
 
 def read_bounded(stream, limit):
@@ -91,6 +96,16 @@ def positive_byte_limit(value):
     return limit
 
 
+def _matches_dependency_report(report, pairs):
+    current = from_pairs(pairs)
+    if report == current:
+        return True
+    # Historical v1 artifacts predate the added dependency observations.
+    legacy = {key: value for key, value in current.items() if key not in _ADDED_DEPENDENCY_FIELDS}
+    legacy['dependencies'] = [row for row in current['dependencies'] if row['kind'] != 'linetype']
+    return report == legacy
+
+
 def export_evidence(payload):
     if not isinstance(payload, dict) or payload.get('schema') != SCHEMA or payload.get('synthetic') is not True:
         raise ValueError('Require the X04 offline-evidence v1 schema and synthetic=true.')
@@ -123,7 +138,7 @@ def export_evidence(payload):
             not isinstance(pair, list) or len(pair) != 2 or type(pair[0]) is not int
             or not isinstance(pair[1], str) for pair in pairs):
         raise ValueError('drawing.dependency_pairs must contain decoded integer-code/string-value pairs.')
-    if report != from_pairs(pairs):
+    if not _matches_dependency_report(report, pairs):
         raise ValueError('Observed dependency rows and coverage must match embedded decoded records.')
     rows = report.get('dependencies')
     if not isinstance(rows, list):
