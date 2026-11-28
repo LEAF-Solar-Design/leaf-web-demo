@@ -275,6 +275,33 @@ _QUOTED_LAYER = re.compile(
 )
 _RELATIVE_LAYER = re.compile(r"\b(?:active|current)\s+layer\b", re.IGNORECASE)
 
+
+_LINE_PATTERN_REFERENCE = re.compile(
+    r"\b(?:linetypes?|line[\s-]+(?:types?|patterns?)|lines?\b[^.!?]{0,80}\bpatterns?)\b",
+    re.IGNORECASE,
+)
+_MISSING_PATTERN_DEFINITION = re.compile(
+    r"\b(?:undefined|(?:missing|absent)\b[^.!?]{0,60}\bdefinitions?|"
+    r"definitions?\b[^.!?]{0,60}\b(?:missing|absent)|(?:no longer|not)\s+defin\w+)\b",
+    re.IGNORECASE,
+)
+_MISSING_LINETYPES_BODY = """
+def run(intake, params):
+    report = intake.get("dependency_report") or {}
+    if report.get("explicit_line_linetypes_checked") is not True:
+        return ({"status": "unavailable", "message": "Reopen the DXF to check its line patterns."}, None)
+
+    missing = [
+        row for row in report["dependencies"]
+        if row["kind"] == "linetype" and row["disposition"] == "missing definition"
+    ]
+    return ({
+        "status": "missing_definitions" if missing else "clean",
+        "missing_linetype_count": len(missing),
+        "missing_linetypes": missing,
+    }, None)
+"""
+
 _PANEL_COUNT_TARGET = re.compile(
     r"\b(?:count(?:s|ing)?|tally|how many|number of)\s+(?:the\s+)?(?:nested\s+)?(?:(?:pv|solar)\s+)?(?:panels?|modules?)\b",
     re.IGNORECASE,
@@ -698,6 +725,12 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "check", "check_route_crossings"
         drawing_body = authored_route_crossings.ROUTE_CROSSINGS_BODY
         summary = "checks cable routes against array and aisle boundaries"
+
+    if (drawing_body is None and _LINE_PATTERN_REFERENCE.search(description)
+            and _MISSING_PATTERN_DEFINITION.search(description)):
+        verb, engine_op = "report", "missing_linetype_definitions"
+        drawing_body = _MISSING_LINETYPES_BODY
+        summary = "reports missing line pattern definitions and the lines that use them"
 
     if drawing_body is None:
         family = authored_layer_subtotals.requested_family(description)

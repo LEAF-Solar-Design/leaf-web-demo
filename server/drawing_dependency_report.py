@@ -279,6 +279,7 @@ def from_pairs(pairs, *, literal_text=None):
     for key, setup_names in plot_resource_setups.items():
         dependencies[key]["page_setups"] = sorted(setup_names)
     report = {"schema": "leaf.drawing-dependencies.v1",
+            "explicit_line_linetypes_checked": True,
             "scope": "local_dxf_records", "external_files_opened": False,
             "dependencies": [dependencies[key] for key in sorted(dependencies)],
             "coverage_note": "Lists dependency records preserved in the local DXF conversion; raw DWG metadata coverage requires an independent inventory."}

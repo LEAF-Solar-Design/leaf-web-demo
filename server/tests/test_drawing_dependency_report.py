@@ -430,3 +430,58 @@ def test_missing_explicit_line_linetypes_are_reported_with_references(elements):
             {"entity_type": "LWPOLYLINE", "handle": polyline.dxf.handle},
         ],
     }]
+
+
+@pytest.mark.parametrize(("elements", "request_text"), [
+    (2, "Flag an exported drawing if its lines name a pattern that the exported file no longer defines."),
+    (8, "Report undefined linetypes in this exported DXF."),
+    (32, "Check for missing line pattern definitions in this drawing."),
+])
+def test_authored_export_linetype_check_uses_real_intake(elements, request_text):
+    from io import StringIO
+
+    import ezdxf
+
+    from intake_dxf import intake_to_dxf
+    from tool_loader import _run_source_in_sandbox
+    from tools_fallback import author_tool
+
+    doc = ezdxf.new("R2018")
+    name = f"Export_Dash_{elements}"
+    doc.linetypes.new(name, dxfattribs={
+        "pattern": [3.0 * (elements // 2), *([2.0, -1.0] * (elements // 2))],
+    })
+    model = doc.modelspace()
+    first = model.add_lwpolyline([(0, 0), (10, 0)], dxfattribs={"linetype": name})
+    second = model.add_lwpolyline([(0, 2), (10, 2)], dxfattribs={"linetype": name})
+    model.add_lwpolyline([(0, 4), (10, 4)], dxfattribs={"linetype": "Continuous"})
+    payload = StringIO()
+    doc.write(payload)
+    original = parse_dxf_bytes(payload.getvalue().encode("utf-8"))
+    exported = parse_dxf_bytes(intake_to_dxf(original))
+
+    manifest, code, _ = author_tool(request_text)
+    assert manifest["engine_op"] == "missing_linetype_definitions"
+    assert manifest["capabilities"] == ["drawing.read"]
+
+    def run(intake):
+        status, payload = _run_source_in_sandbox(code, "authored.py", intake, {})
+        assert status == "ok", payload
+        result, overlay = payload
+        assert overlay is None
+        return result
+
+    assert run(original) == {"status": "clean", "missing_linetype_count": 0, "missing_linetypes": []}
+    assert run(exported) == {
+        "status": "missing_definitions", "missing_linetype_count": 1,
+        "missing_linetypes": [{
+            "kind": "linetype", "name": name, "disposition": "missing definition",
+            "references": [
+                {"entity_type": "LWPOLYLINE", "handle": first.dxf.handle},
+                {"entity_type": "LWPOLYLINE", "handle": second.dxf.handle},
+            ],
+        }],
+    }
+    original["dependency_report"].pop("explicit_line_linetypes_checked")
+    assert run(original)["status"] == "unavailable"
+    assert author_tool("Flag panels near the roof edge.")[0]["engine_op"] == "highlight_near_edge"
