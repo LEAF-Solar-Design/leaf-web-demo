@@ -19,6 +19,7 @@ import uuid
 import zlib
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import ZipFile
 
 import pytest
 from fastapi import HTTPException
@@ -65,6 +66,81 @@ def _upload(client, data=DXF_BYTES, name="mine.dxf", headers=None):
     return client.post("/api/drawings/upload",
                        files={"file": (name, io.BytesIO(data))},
                        headers=headers or {})
+
+
+def _bundle_request(client, members, *, primary="A101.dxf", account=True):
+    data = io.BytesIO()
+    with ZipFile(data, "w") as archive:
+        for name, payload in members.items():
+            archive.writestr(name, payload)
+    return client.post(
+        "/api/drawings/upload",
+        params={"bundle_root": primary},
+        files={"file": ("drawings.zip", data.getvalue(), "application/zip")},
+        headers={"X-Tenant-Id": "acme-solar"} if account else {},
+    )
+
+
+def _with_external_block(target):
+    return DXF_BYTES.replace(
+        b"0\nEOF",
+        b"0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nXREF\n70\n4\n1\n"
+        + target.encode("ascii") + b"\n0\nENDBLK\n0\nENDSEC\n0\nEOF",
+    )
+
+
+def test_bundle_preflight_follows_nested_references_without_writes(client, monkeypatch):
+    def reject_storage(*args):
+        pytest.fail("bundle preflight must not open upload storage")
+
+    monkeypatch.setattr(write_loop, "upload_backend_for_tenant", reject_storage)
+    response = _bundle_request(client, {
+        "A101.dxf": _with_external_block(r"REFS\Roof.dxf"),
+        "refs/roof.dxf": _with_external_block("../a101.DXF"),
+    })
+    assert response.status_code == 200, response.text
+    report = response.json()
+    assert report["primary_member"] == "A101.dxf"
+    assert report["drawings_inspected"] == ["A101.dxf", "refs/roof.dxf"]
+    assert [(row["drawing"], row["member"], row["resolution"]) for row in report["dependencies"]] == [
+        ("A101.dxf", "refs/roof.dxf", "present"),
+        ("refs/roof.dxf", "A101.dxf", "present"),
+    ]
+
+
+@pytest.mark.parametrize("target, resolution", [
+    ("missing.dxf", "missing"),
+    ("../outside.dxf", "outside_bundle"),
+    (r"C:\outside.dxf", "outside_bundle"),
+])
+def test_bundle_preflight_keeps_unresolved_references_visible(client, target, resolution):
+    response = _bundle_request(client, {"A101.dxf": _with_external_block(target)})
+    assert response.status_code == 200, response.text
+    assert response.json()["dependencies"] == [{
+        "drawing": "A101.dxf",
+        "kind": "xref",
+        "declared_path": target,
+        "resolution": resolution,
+        "member": None,
+    }]
+
+
+@pytest.mark.parametrize("members, message", [
+    ({"../outside.dxf": DXF_BYTES}, "unsafe member"),
+    ({"A101.dxf": DXF_BYTES, "a101.DXF": DXF_BYTES}, "ambiguous member"),
+    ({"A101.dxf": DXF_BYTES.replace(b"0\nENDSEC\n0\nEOF\n", b"")}, "invalid ASCII DXF"),
+    ({"A101.dxf": _with_external_block("roof.dxf"), "roof.dxf": b"not a drawing"}, "invalid drawing roof.dxf"),
+])
+def test_bundle_preflight_rejects_unsafe_or_incomplete_inventory(client, members, message):
+    response = _bundle_request(client, members)
+    assert response.status_code == 400, response.text
+    assert message in response.json()["error"]["message"]
+
+
+def test_bundle_preflight_requires_account_and_explicit_primary(client):
+    members = {"A101.dxf": DXF_BYTES}
+    assert _bundle_request(client, members, account=False).status_code == 403
+    assert _bundle_request(client, members, primary="").status_code == 400
 
 
 def test_live_account_upload_uses_active_binding_not_stale_org_claim(monkeypatch):

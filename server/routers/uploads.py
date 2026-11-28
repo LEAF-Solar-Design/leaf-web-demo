@@ -31,10 +31,11 @@ import math
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
-from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 import deps
+import drawing_bundle_preflight
 import dwg_convert
 import entitlements
 import guest_uploads
@@ -192,12 +193,14 @@ def upload_drawing(
     x_tenant_id: Optional[str] = Header(default=None),
     authorization: Optional[str] = Header(default=None),
     x_guest_session: Optional[str] = Header(default=None),
+    bundle_root: Optional[str] = Query(default=None, max_length=512),
 ) -> Any:
     ident: Dict[str, Any] = {}
     resp = _upload_drawing_gated(
         request, file, x_tenant_id, authorization, x_guest_session, ident,
-        engine=engine)
-    _emit_upload_event(resp, ident)
+        engine=engine, bundle_root=bundle_root)
+    if bundle_root is None:
+        _emit_upload_event(resp, ident)
     return resp
 
 
@@ -209,6 +212,7 @@ def _upload_drawing_gated(
     x_guest_session: Optional[str],
     ident: Optional[Dict[str, Any]] = None,
     engine: Optional[str] = None,
+    bundle_root: Optional[str] = None,
 ) -> Any:
     if not write_loop.upload_import_mutations_enabled():
         return error_response(
@@ -256,6 +260,7 @@ def _upload_drawing_gated(
             x_guest_session,
             ident,
             engine=engine,
+            bundle_root=bundle_root,
         )
 
 
@@ -267,6 +272,7 @@ def _upload_drawing(
     x_guest_session: Optional[str],
     ident: Optional[Dict[str, Any]] = None,
     engine: Optional[str] = None,
+    bundle_root: Optional[str] = None,
 ) -> Any:
 
     tenant, tenant_kind, _minted = _resolve_upload_identity(
@@ -289,6 +295,12 @@ def _upload_drawing(
     if not entitlements.entitlements_for(tier, roles, elevated).get("upload", False):
         return entitlements.entitlement_denied_response("upload", tier)
 
+    if bundle_root is not None:
+        if tenant_kind != "account":
+            return error_response(ErrorCode.FORBIDDEN, "bundle preflight requires an account", retryable=False)
+        if engine or not (file.filename or "").lower().endswith(".zip"):
+            return error_response(ErrorCode.BAD_PARAMS, "bundle preflight takes a ZIP and a primary DXF member", retryable=False)
+
     # Size cap. Two layers: (1) the declared Content-Length is rejected up
     # front; (2) the handler never buffers more than cap+1 bytes. STALE NOTE
     # CORRECTED (2026-08-24, Phase 0.5 item 5): a round-1 review flagged that
@@ -305,6 +317,8 @@ def _upload_drawing(
     # That is the real outer wall; CONTRACT-ADDENDUM §19 has been corrected to
     # match.
     cap = guest_uploads.max_upload_bytes()
+    if bundle_root is not None:
+        cap = min(cap, drawing_bundle_preflight.MAX_ARCHIVE_BYTES)
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > cap + 65536:
         return error_response(
@@ -317,6 +331,12 @@ def _upload_drawing(
             ErrorCode.BAD_PARAMS,
             f"file exceeds the {cap} byte upload cap", retryable=False,
             status_code=413)
+
+    if bundle_root is not None:
+        try:
+            return drawing_bundle_preflight.inspect_drawing_bundle(data, primary_member=bundle_root)
+        except drawing_bundle_preflight.BundlePreflightError as exc:
+            return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False)
 
     ext, reason = guest_uploads.validate_upload(file.filename or "", data)
     if reason is not None:
