@@ -1,6 +1,8 @@
 """Guardrails registry reads: pinned graph outputs, plugin receipts, and API proofs."""
 import copy
 import json
+from dataclasses import asdict, replace
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,7 @@ import write_loop
 from leaf_cloud_client import canonical_bytes
 from solar_design_graph import GraphValidationError, validate_graph
 from solar_sizing_client import digest
+from solar_string_voltage_compare import VoltageRevisionBinding, compare_saved_string_voltage
 from test_w1_design_graph import app_id, entity, graph  # noqa: F401
 from test_w1_local_graph_jobs import isolated_jobs, no_network  # noqa: F401
 from test_w1_solve_commit import seed
@@ -672,3 +675,102 @@ def test_guardrails_read_worker_rejects_a_tampered_read_receipt(api):
     assert rec["error"]["message"] == "graph read terminal proof rejected"
     assert len(api[4]["requests"]) == 1
     assert store.load_manifest(api[1], TENANT, "solar")["head"] == 1
+
+
+VOLTAGE_BASELINE = VoltageRevisionBinding("org-a", "project-a", "drawing-a", "version-a", "a" * 64, "b" * 64)
+VOLTAGE_CURRENT = VoltageRevisionBinding("org-a", "project-a", "drawing-a", "version-b", "c" * 64, "d" * 64)
+
+
+def _comparison_cold(status, volts=550):
+    if status == "unverified":
+        return {"status": status, "reason": "sizing_stale"}
+    return {"status": status, "voc_v": volts, "saved_inverter_max_dc_v": 600}
+
+
+def _comparison_report(binding, *, temp=-12, **rows):
+    output = {
+        "schema": "leaf.solar-string-voltage.v1",
+        "status": "incomplete",
+        "design_min_temp_c": temp,
+        "caller_mppt_window": None,
+        "rows": [
+            {"string_ref": ref, "inverter_ref": "inverter-a", "module_count": 12,
+             "cold_dc_limit": value, "hot_mppt_window": {
+                 "status": "unverified", "reason": "vmp_temperature_model_required",
+             }}
+            for ref, value in rows.items()
+        ],
+    }
+    return dict(asdict(binding), schema="leaf.solar-project-read.v1", tool="solar-guardrails-read",
+                drawing_changed=False, output=output, output_sha256=sha256(canonical_bytes(output)).hexdigest())
+
+
+def _comparison_artifact(binding, saved, report_id):
+    return dict(asdict(binding), report_id=report_id, output_sha256=saved["output_sha256"])
+
+
+def test_classifies_lost_coverage_by_stable_string_and_preserves_units_and_reason():
+    before = _comparison_report(VOLTAGE_BASELINE, s2=_comparison_cold("pass"), s1=_comparison_cold("fail", 620))
+    after = _comparison_report(VOLTAGE_CURRENT, temp=None, s1=_comparison_cold("unverified"), s2=_comparison_cold("unverified"))
+    result = compare_saved_string_voltage(VOLTAGE_BASELINE, VOLTAGE_CURRENT, baseline_report=before, current_report=after)
+    assert result["design_approval"] == "unverified"
+    assert result["baseline_kind"] == "saved_revision"
+    assert result["baseline"]["design_min_temp_c"] == -12
+    assert result["current"]["design_min_temp_c"] is None
+    assert [(row["string_ref"], row["change"]) for row in result["rows"]] == [
+        ("s1", "lost_coverage"), ("s2", "lost_coverage"),
+    ]
+    assert result["rows"][0]["baseline"] == _comparison_cold("fail", 620)
+    assert result["rows"][0]["current"] == _comparison_cold("unverified")
+
+
+def test_distinguishes_status_change_addition_removal_and_unavailable_report():
+    before = _comparison_report(VOLTAGE_BASELINE, removed=_comparison_cold("pass"), same=_comparison_cold("pass"), restored=_comparison_cold("unverified"))
+    after = _comparison_report(VOLTAGE_CURRENT, fresh=_comparison_cold("unverified"), same=_comparison_cold("fail", 620), restored=_comparison_cold("pass"))
+    result = compare_saved_string_voltage(VOLTAGE_BASELINE, VOLTAGE_CURRENT, baseline_report=before, current_report=after)
+    assert {row["string_ref"]: row["change"] for row in result["rows"]} == {
+        "fresh": "added", "removed": "removed", "restored": "gained_coverage", "same": "changed",
+    }
+    absent = compare_saved_string_voltage(VOLTAGE_BASELINE, VOLTAGE_CURRENT, baseline_report=before)
+    assert absent["current"]["report_status"] == "unavailable"
+    assert all(row["change"] == "unknown" and row["current"] is None for row in absent["rows"])
+
+
+def test_download_ids_need_independent_exact_bindings_and_report_digest():
+    before = _comparison_report(VOLTAGE_BASELINE, s=_comparison_cold("pass"))
+    after = _comparison_report(VOLTAGE_CURRENT, s=_comparison_cold("pass"))
+    first = _comparison_artifact(VOLTAGE_BASELINE, before, "old-report")
+    second = _comparison_artifact(VOLTAGE_CURRENT, after, "new-report")
+    result = compare_saved_string_voltage(VOLTAGE_BASELINE, VOLTAGE_CURRENT, baseline_report=before,
+                                          current_report=after, baseline_artifact=first, current_artifact=second)
+    assert result["baseline"]["downloadable_report_id"] == "old-report"
+    assert result["current"]["downloadable_report_id"] == "new-report"
+    assert result["rows"][0]["change"] == "unchanged"
+    inline = compare_saved_string_voltage(VOLTAGE_BASELINE, VOLTAGE_CURRENT, baseline_report=before, current_report=after)
+    assert inline["baseline"]["downloadable_report_id"] is None
+    assert inline["current"]["downloadable_report_id"] is None
+
+
+@pytest.mark.parametrize("field,bad", [
+    ("organization_id", "other"), ("project_id", "other"), ("drawing_id", "other"),
+    ("input_version_id", "other"), ("input_intake_sha256", "0" * 64),
+    ("graph_sha256", "0" * 64), ("output_sha256", "0" * 64),
+    ("report_id", "https://example.invalid/report"),
+])
+def test_refuses_artifact_pin_mismatch(field, bad):
+    before = _comparison_report(VOLTAGE_BASELINE, s=_comparison_cold("pass"))
+    claim = _comparison_artifact(VOLTAGE_BASELINE, before, "old-report")
+    claim[field] = bad
+    with pytest.raises(GraphValidationError, match="SOLAR_VOLTAGE_COMPARISON_EVIDENCE_INVALID"):
+        compare_saved_string_voltage(VOLTAGE_BASELINE, VOLTAGE_CURRENT, baseline_report=before, baseline_artifact=claim)
+
+
+def test_refuses_cross_project_revisions_tampered_report_and_duplicate_strings():
+    before = _comparison_report(VOLTAGE_BASELINE, s=_comparison_cold("pass"))
+    tampered = dict(before, output_sha256="0" * 64)
+    duplicate_output = dict(before["output"], rows=before["output"]["rows"] * 2)
+    duplicate = dict(before, output=duplicate_output,
+                     output_sha256=sha256(canonical_bytes(duplicate_output)).hexdigest())
+    for current, saved in ((replace(VOLTAGE_CURRENT, project_id="foreign"), before), (VOLTAGE_CURRENT, tampered), (VOLTAGE_CURRENT, duplicate)):
+        with pytest.raises(GraphValidationError, match="SOLAR_VOLTAGE_COMPARISON_EVIDENCE_INVALID"):
+            compare_saved_string_voltage(VOLTAGE_BASELINE, current, baseline_report=saved)
