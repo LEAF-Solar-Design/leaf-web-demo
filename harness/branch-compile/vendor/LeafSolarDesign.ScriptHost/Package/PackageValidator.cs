@@ -124,6 +124,7 @@ namespace LeafSolarDesign.ScriptHost.Package
             }
             else failures.Add("V14: review must be an object");
             CheckIntegersOnly(m, "$", failures);
+            CheckPicks(m, failures);
 
             // V17: script directives
             foreach (var kv in files.Where(f => f.Key.EndsWith(".csx")))
@@ -152,6 +153,27 @@ namespace LeafSolarDesign.ScriptHost.Package
                 }
             }
             return m;
+        }
+
+        // V18: x-leaf-pick object-pick inputs (host API 2). Top-level params properties only; at most
+        // PickSpec.MaximumPicks; each on a "type": "string" property with a well-formed spec; a package that
+        // declares one needs hosts.min_host_api >= PickSpec.FirstHostApi so an older plugin refuses it cleanly.
+        private static void CheckPicks(JObject m, List<string> failures)
+        {
+            if (!(m["params"] is JObject prm) || !(prm["properties"] is JObject properties)) return;
+            var picks = 0;
+            foreach (var property in properties.Properties())
+            {
+                if (!(property.Value is JObject schema) || schema.Property(PickSpec.Keyword) == null) continue;
+                picks++;
+                if (schema["type"]?.Type != JTokenType.String || (string)schema["type"] != "string")
+                    failures.Add($"V18: pick input '{property.Name}' must have type string");
+                if (!PickSpec.TryParse(schema[PickSpec.Keyword], out _, out var why))
+                    failures.Add($"V18: pick input '{property.Name}': {why}");
+            }
+            if (picks > PickSpec.MaximumPicks) failures.Add($"V18: more than {PickSpec.MaximumPicks} pick inputs");
+            if (picks > 0 && !IntegerInRange((m["hosts"] as JObject)?["min_host_api"], PickSpec.FirstHostApi, long.MaxValue))
+                failures.Add($"V18: pick inputs need hosts.min_host_api >= {PickSpec.FirstHostApi}");
         }
 
         private static void CheckJsonTypes(JToken token)
@@ -215,6 +237,96 @@ namespace LeafSolarDesign.ScriptHost.Package
                     failures.Add("V1: unsupported JSON token: " + token.Type);
                     break;
             }
+        }
+    }
+
+    /// <summary>
+    /// One <c>x-leaf-pick</c> declaration (R2-11 contract v1): the command-line prompt, the DXF entity names the
+    /// picker accepts, whether a polyline must be closed, and whether a single matching pickfirst entity is used
+    /// without prompting. <see cref="TryParse"/> is the one parser for the package validator (V18) and the
+    /// catalog's input list, so publish and run agree. It fails closed on any unknown key or malformed value.
+    /// </summary>
+    public sealed class PickSpec
+    {
+        public const string Keyword = "x-leaf-pick";
+        public const int MaximumPicks = 8;
+        public const int MaximumPromptLength = 120;
+        public const int MaximumDxfNames = 16;
+        /// <summary>The first host API (HostApi.Version) that prompts for pick inputs.</summary>
+        public const int FirstHostApi = 2;
+
+        /// <summary>The DXF entity names a pick may name; each maps to an AutoCAD entity class in the picker.</summary>
+        public static readonly IReadOnlyCollection<string> KnownDxfNames = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "LWPOLYLINE", "POLYLINE", "LINE", "ARC", "CIRCLE", "INSERT", "TEXT", "MTEXT", "HATCH", "POINT",
+            "SPLINE", "ELLIPSE", "SOLID", "3DFACE", "3DSOLID", "REGION", "RAY", "XLINE", "DIMENSION", "LEADER",
+            "MULTILEADER"
+        };
+
+        private PickSpec(string prompt, IReadOnlyList<string> dxf, bool closed, bool implied)
+        {
+            Prompt = prompt;
+            Dxf = dxf;
+            Closed = closed;
+            Implied = implied;
+        }
+
+        public string Prompt { get; }
+        public IReadOnlyList<string> Dxf { get; }
+        public bool Closed { get; }
+        public bool Implied { get; }
+
+        /// <summary>True for the DXF names whose entities can be open or closed polylines.</summary>
+        public static bool IsPolyline(string dxfName) => dxfName == "LWPOLYLINE" || dxfName == "POLYLINE";
+
+        public static bool TryParse(JToken token, out PickSpec spec, out string error)
+        {
+            spec = null;
+            error = null;
+            if (!(token is JObject value)) { error = "x-leaf-pick must be an object"; return false; }
+            foreach (var property in value.Properties())
+                if (property.Name != "prompt" && property.Name != "dxf" && property.Name != "closed" && property.Name != "implied")
+                { error = "x-leaf-pick has unknown key '" + property.Name + "'"; return false; }
+            var prompt = value["prompt"];
+            if (prompt?.Type != JTokenType.String || !PrintablePrompt((string)prompt))
+            { error = "prompt must be 1 to " + MaximumPromptLength + " printable characters"; return false; }
+            if (!(value["dxf"] is JArray names) || names.Count < 1 || names.Count > MaximumDxfNames)
+            { error = "dxf must list 1 to " + MaximumDxfNames + " DXF entity names"; return false; }
+            var dxf = new List<string>(names.Count);
+            foreach (var name in names)
+            {
+                if (name.Type != JTokenType.String || !KnownDxfNames.Contains((string)name))
+                { error = "dxf has an unsupported entity name '" + name.ToString(Formatting.None) + "'"; return false; }
+                if (dxf.Contains((string)name)) { error = "dxf repeats '" + (string)name + "'"; return false; }
+                dxf.Add((string)name);
+            }
+            foreach (var flag in new[] { "closed", "implied" })
+                if (value[flag] != null && value[flag].Type != JTokenType.Boolean)
+                { error = flag + " must be true or false"; return false; }
+            spec = new PickSpec((string)prompt, dxf.AsReadOnly(), value["closed"] != null && (bool)value["closed"],
+                value["implied"] != null && (bool)value["implied"]);
+            return true;
+        }
+
+        private static bool PrintablePrompt(string text)
+        {
+            if (text.Length < 1 || text.Length > MaximumPromptLength || text.Trim().Length == 0) return false;
+            for (var i = 0; i < text.Length; i++)
+            {
+                if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1])) { i++; continue; }
+                switch (CharUnicodeInfo.GetUnicodeCategory(text[i]))
+                {
+                    case UnicodeCategory.Control:
+                    case UnicodeCategory.Format:
+                    case UnicodeCategory.LineSeparator:
+                    case UnicodeCategory.ParagraphSeparator:
+                    case UnicodeCategory.Surrogate:
+                    case UnicodeCategory.OtherNotAssigned:
+                    case UnicodeCategory.PrivateUse:
+                        return false;
+                }
+            }
+            return true;
         }
     }
 }
