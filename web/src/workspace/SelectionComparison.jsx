@@ -82,6 +82,20 @@ function conflictingIntake(a, b) {
     a.drawingRevision.intake_sha256 !== b.drawingRevision.intake_sha256
 }
 
+function matchingSavedSelection(file, selections) {
+  const saved = selections.find(selection => selection.jobId === file.jobId)
+  if (!saved || !sameDrawing(file, saved) ||
+      file.drawingRevision.input_version_id !== saved.drawingRevision.input_version_id ||
+      file.drawingRevision.intake_sha256 !== saved.drawingRevision.intake_sha256 ||
+      file.rule.entry_sha256 !== saved.rule.entry_sha256 ||
+      file.rule.geometry_sha256 !== saved.rule.geometry_sha256 || file.count !== saved.count ||
+      file.sets.size !== saved.sets.size || file.handles.size !== saved.handles.size) return null
+
+  const setsMatch = [...file.sets].every(([id, count]) => saved.sets.get(id) === count)
+  const handlesMatch = [...file.handles].every(handle => saved.handles.has(handle))
+  return setsMatch && handlesMatch ? saved : null
+}
+
 function downloadJson(value, filename) {
   const blob = new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
@@ -140,7 +154,7 @@ function countInputChanges(before, after) {
   }
 }
 
-function SelectionChanges({ a, b, fromFiles = false }) {
+function SelectionChanges({ a, b, fileSource }) {
   const referenceId = useId()
   if (!sameDrawing(a, b)) {
     return <p>Selection comparison requires two reports for the same drawing.</p>
@@ -160,15 +174,15 @@ function SelectionChanges({ a, b, fromFiles = false }) {
   const comparison = {
     schema: 'leaf.saved-selection-comparison.v1',
     selections: [snapshot(a), snapshot(b)],
-    ...(fromFiles && { source: 'unverified_files' }),
+    ...(fileSource && { source: fileSource }),
     rule_changed: ruleChanged,
     drawing_revision_changed: revisionChanged,
     changes,
   }
   return (
-    <section aria-label={fromFiles ? 'Exported selection comparison' : 'Saved selection comparison'}>
+    <section aria-label={fileSource ? 'Exported selection comparison' : 'Saved selection comparison'}>
       <p>{ruleChanged ? 'Count rule changed' : 'Same count rule'}</p>
-      {fromFiles && <p>{revisionChanged ? 'Drawing revision changed' : 'Same drawing revision'}</p>}
+      {fileSource && <p>{revisionChanged ? 'Drawing revision changed' : 'Same drawing revision'}</p>}
       {changes.length ? (
         <table style={{ overflowWrap: 'anywhere' }}>
           <caption>Saved selection changes</caption>
@@ -333,6 +347,9 @@ export function SelectionExports({ reports, projectId }) {
   const selections = [...reports.values()].filter(report => report.tool === countTool)
     .map(savedSelection).filter(Boolean)
   const selected = selections.find(selection => selection.jobId === exportId)
+  const savedFirst = first && second && !reverted ? matchingSavedSelection(first, selections) : null
+  const savedSecond = savedFirst ? matchingSavedSelection(second, selections) : null
+  const verified = Boolean(savedSecond)
   return (
     <details>
       <summary>Export or compare Count selections</summary>
@@ -352,7 +369,10 @@ export function SelectionExports({ reports, projectId }) {
           </button>
         </p>
       )}
-      <p>Files are compared locally. Their rule and drawing references come from the files and are unverified.</p>
+      <p role="status">{verified
+        ? 'Both files match saved Count jobs for this project.'
+        : 'Files are compared locally. Their rule and drawing references come from the files and are unverified.'}
+      </p>
       <SelectionFile label="First selection file" projectId={projectId} onSelection={setFirst} />
       <SelectionFile label="Second selection file" projectId={projectId} onSelection={setSecond} />
       <p>To compare a revert, use the first file for the original selection and the second for the edited selection.</p>
@@ -360,7 +380,8 @@ export function SelectionExports({ reports, projectId }) {
       <div aria-live="polite">
         {first && second && (reverted
           ? <SelectionHistory original={first} edited={second} reverted={reverted} />
-          : <SelectionChanges a={first} b={second} fromFiles />)}
+          : <SelectionChanges a={verified ? savedFirst : first} b={verified ? savedSecond : second}
+            fileSource={verified ? 'verified_saved_jobs' : 'unverified_files'} />)}
       </div>
     </details>
   )
