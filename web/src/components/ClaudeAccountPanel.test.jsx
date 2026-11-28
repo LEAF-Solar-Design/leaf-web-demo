@@ -202,6 +202,11 @@ describe('Claude link safety and recovery', () => {
     expect(within(explanation.previousElementSibling).getByText('Work').tagName).toBe('B')
   })
 
+  it('explains a linked API key with no credit', () => {
+    panel({ grant: { linked: true, accounts: [{ ...account, auth_refused_code: 'billing_error' }] } })
+    expect(screen.getByText('This API key has no credit. Add credit in Claude Console, then resend.')).toHaveClass('ca-refused-why')
+  })
+
   it('clears the token and local error on Cancel', () => {
     panel({ grant: { linked: true, accounts: [account] } })
     fireEvent.click(screen.getByRole('button', { name: 'Link again: Work' }))

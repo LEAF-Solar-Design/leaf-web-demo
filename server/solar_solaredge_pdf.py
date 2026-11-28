@@ -33,6 +33,7 @@ import itertools
 import math
 import os
 import zlib
+from bisect import bisect_left
 from dataclasses import dataclass, field
 
 from pdfminer.pdfdevice import PDFTextDevice
@@ -459,6 +460,7 @@ class _PrimitiveDevice(PDFTextDevice):
         self.visible = True
         self._cid_metrics = {}
         self.text_characters = 0
+        self.schedule_geometry = None
 
     def paint_path(self, graphicstate, stroke, fill, evenodd, path):
         paths = self.out.paths
@@ -543,6 +545,12 @@ class _PrimitiveDevice(PDFTextDevice):
         # PdfPig: Width of the rectangle (0, 0)-(w, 0) pushed through the rendering matrix.
         width = math.hypot(a * adv + x - x, b * adv + y - y)
         letters.append((value, x, y, width))
+        if self.schedule_geometry is not None:
+            dx, dy = a * adv, b * adv
+            length = math.hypot(dx, dy)
+            direction = (dx / length, dy / length) if 0 < length < math.inf else None
+            first, _ = self.schedule_geometry
+            self.schedule_geometry = first or ((x, y), direction), ((x + dx, y + dy), direction)
         return adv
 
     def _glyph_width(self, font, cid):
@@ -621,6 +629,13 @@ class _CopyTextAudit:
             self.findings.append(CopyTextMismatch(self.page, visible_id, span.text, x, y))
 
 
+@dataclass(frozen=True, slots=True)
+class PageTagPlacement:
+    tag: str
+    x: float
+    y: float
+
+
 @dataclass(frozen=True)
 class PageScheduleMatch:
     page: int
@@ -635,21 +650,53 @@ class PageScheduleMatch:
 class _PageScheduleAudit:
     def __init__(self, approved_pages):
         self.approved_ids = frozenset(itertools.chain.from_iterable(approved_pages))
-        self.positions: list[tuple[float, float, str]] = []
+        self.sorted_ids = sorted(self.approved_ids)
+        self.placements: list[PageTagPlacement] = []
+        self.pending = None
 
-    def observe(self, letters, start):
-        if start == len(letters):
-            return
-        tag = "".join(letters[index][0] for index in range(start, len(letters)))
+    def _has_longer_id(self, text):
+        index = bisect_left(self.sorted_ids, text)
+        if index < len(self.sorted_ids) and self.sorted_ids[index] == text:
+            index += 1
+        return index < len(self.sorted_ids) and self.sorted_ids[index].startswith(text)
+
+    def _record(self, tag, position):
         if tag in self.approved_ids:
-            _, x, y, _ = letters[start]
-            self.positions.append((-y, x, tag))
+            self.placements.append(PageTagPlacement(tag, *position))
+
+    def break_run(self):
+        if self.pending is not None:
+            tag, position, _ = self.pending
+            self._record(tag, position)
+            self.pending = None
+
+    def observe(self, letters, start, geometry):
+        tag = "".join(letters[index][0] for index in range(start, len(letters)))
+        (position, direction), end = geometry
+        if self.pending is not None:
+            prefix, origin, (previous_end, previous_direction) = self.pending
+            # Permit PDF decimal rounding on a shared, directed baseline.
+            continuous = (direction is not None and previous_direction is not None
+                          and math.dist(previous_direction, direction) <= 1e-6
+                          and math.dist(previous_end, position) <= 0.01)
+            combined = prefix + tag
+            separate_ids = prefix in self.approved_ids and tag in self.approved_ids
+            if continuous and not separate_ids and (
+                    combined in self.approved_ids or self._has_longer_id(combined)):
+                tag, position = combined, origin
+                self.pending = None
+            else:
+                self.break_run()
+        if self._has_longer_id(tag):
+            self.pending = tag, position, end
+        else:
+            self._record(tag, position)
 
     def finish_page(self):
-        self.positions.sort(key=lambda position: position[:2])
-        observed = tuple(tag for _, _, tag in self.positions)
-        self.positions.clear()
-        return observed
+        self.break_run()
+        placements = tuple(self.placements)
+        self.placements.clear()
+        return placements
 
 
 class _PrimitiveInterpreter(PDFPageInterpreter):
@@ -674,7 +721,8 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         self.raw_pending = ([], []) if layers.states else None
         self.records_raw = depth == 0 or (appearance and depth == 1) or bool(layers.states)
         self.color = ("DeviceGray", (0.0,), "DeviceGray", (0.0,))
-        self.color_stack = []
+        self.text_alpha = (1.0, 1.0)  # fill, stroke
+        self.paint_stack = []
         # Feed A state: never reset by q/Q, S or BT, exactly as the converter keeps it.
         self.raw_stroke = BLACK
         self.raw_point = None
@@ -686,6 +734,7 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
                                       self.layers, self.depth + 1, appearance=self.appearance,
                                       copy_audit=self.copy_audit, schedule_audit=self.schedule_audit)
         child.color = self.color
+        child.text_alpha = self.text_alpha
         child.replacement_span = self.replacement_span
         return child
 
@@ -797,12 +846,26 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
 
     def do_q(self):
         super().do_q()
-        self.color_stack.append(self.color)
+        self.paint_stack.append((self.color, self.text_alpha))
 
     def do_Q(self):
         super().do_Q()
-        if self.color_stack:
-            self.color = self.color_stack.pop()
+        if self.paint_stack:
+            self.color, self.text_alpha = self.paint_stack.pop()
+
+    def do_gs(self, name):
+        if (self.copy_audit is None and self.schedule_audit is None) or not isinstance(name, PSLiteral):
+            return
+        states = resolve1(self.resources.get("ExtGState"))
+        state = resolve1(states.get(literal_name(name))) if isinstance(states, dict) else None
+        if not isinstance(state, dict):
+            return
+        fill, stroke = self.text_alpha
+        fill = _num(resolve1(state.get("ca", fill)))
+        stroke = _num(resolve1(state.get("CA", stroke)))
+        if not (0 <= fill <= 1 and 0 <= stroke <= 1):
+            raise SolarEdgePdfError("BAD_OPERAND", "text opacity outside [0, 1]")
+        self.text_alpha = (fill, stroke)
 
     def do_RG(self, r, g, b):
         rgb = (_num(r), _num(g), _num(b))
@@ -973,14 +1036,28 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
             raise SolarEdgePdfError("BAD_TEXT_OPERAND")
         self.device.visible = self.visible
         first_letter = len(self.out.letters)
-        super().do_TJ(seq)
-        if self.textstate.render in (3, 7):
-            if self.replacement_span is not None and len(self.out.letters) > first_letter:
-                self.replacement_span.nonpainting = True
-        elif self.schedule_audit is not None:
-            self.schedule_audit.observe(self.out.letters, first_letter)
+        mode = self.textstate.render
+        fill, stroke = self.text_alpha
+        paints = ((mode in (0, 2, 4, 6) and fill > 0)
+                  or (mode in (1, 2, 5, 6) and stroke > 0))
+        if self.schedule_audit is not None and paints and self.visible:
+            self.device.schedule_geometry = (None, None)
+        try:
+            super().do_TJ(seq)
+            geometry = self.device.schedule_geometry
+        finally:
+            self.device.schedule_geometry = None
+        if not paints and self.replacement_span is not None and len(self.out.letters) > first_letter:
+            self.replacement_span.nonpainting = True
+        if self.schedule_audit is not None:
+            if not paints or not self.visible:
+                self.schedule_audit.break_run()
+            elif len(self.out.letters) > first_letter:
+                self.schedule_audit.observe(self.out.letters, first_letter, geometry)
 
     def do_Do(self, xobjid):
+        if self.schedule_audit is not None:
+            self.schedule_audit.break_run()
         if not self.visible:
             return
         reference = self.xobjmap.get(literal_name(xobjid))
@@ -993,6 +1070,8 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
             super().do_Do(xobjid)
         finally:
             self.device.set_ctm(saved)
+            if self.schedule_audit is not None:
+                self.schedule_audit.break_run()
 
 
 def _count_pages(doc):
@@ -1118,19 +1197,28 @@ def audit_copy_text(pdf_bytes, approved_ids):
     return audit.findings
 
 
+def iter_page_placements(pdf_bytes, approved_pages):
+    """Return approved painted tag origins per page, in PDF content order and PDF points."""
+    audit = _PageScheduleAudit(approved_pages)
+    for _ in _iter_primitives(pdf_bytes, first_only=False, schedule_audit=audit):
+        yield audit.finish_page()
+
+
 def audit_page_schedule(pdf_bytes, approved_pages):
     """Compare exact scheduled glyph IDs on each physical PDF page.
 
-    Each ID must occupy one painting text-show operation. Order follows the first
-    glyph baseline, descending Y then ascending X in PDF user space. The audit
+    An ID may span adjacent painting text shows on the same directed baseline.
+    Order follows the first glyph baseline, descending Y then ascending X in PDF
+    user space. The audit
     follows default layers and includes forms in page content. Annotation
     appearances, clipping and OCR are outside its scope. A missing page or
     schedule entry is None, while a present empty sequence is ().
     """
     expected = tuple(tuple(page) for page in approved_pages)
-    audit = _PageScheduleAudit(expected)
-    observed = [audit.finish_page() for _ in _iter_primitives(
-        pdf_bytes, first_only=False, schedule_audit=audit)]
+    observed = [
+        tuple(item.tag for item in sorted(page, key=lambda item: (-item.y, item.x)))
+        for page in iter_page_placements(pdf_bytes, expected)
+    ]
     return [
         PageScheduleMatch(page, approved, painted)
         for page, (approved, painted) in enumerate(itertools.zip_longest(expected, observed), start=1)

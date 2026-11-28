@@ -15,6 +15,8 @@ a loaded host the 1 MB fixture's first report took about 9 s (budget 10 s);
 reuse took under 1 s (budget 1.5 s).
 """
 
+from collections import Counter, defaultdict
+from itertools import zip_longest
 import json
 import math
 import os
@@ -53,6 +55,9 @@ MAX_REPORT_PANELS = 200_000
 MAX_CONCURRENT_PARSES = 2
 MAX_REPORT_CANDIDATES = 16
 MAX_REPORT_REQUEST_BYTES = 4096
+SCHEDULE_RESULT_SCHEMA = "leaf.solar-solaredge-schedule-audit-result.v1"
+MAX_SCHEDULE_REQUEST_BYTES = parse_worker.MAX_SCHEDULE_REQUEST_BYTES
+MAX_PAPER_ORIGIN_POINTS = 1_000_000_000
 # Wall time from starting the parse child to its reaped verdict. The 1 MB C14 fixture took 6.9 to
 # 11.1 s through the child on a fully loaded 20-core host (two and four at once); 60 s is more than
 # five times the worst case and leaves half of the 120 s load balancer idle timeout for the rest.
@@ -238,7 +243,7 @@ def _worker_argv():
     return [sys.executable, "-B", os.path.abspath(parse_worker.__file__)]
 
 
-def parse_source(content, *, legacy=False):
+def _run_parse_worker(content, flags, *, prefix=b""):
     """The PDF's matrices, parsed in a child process under a hard wall-time deadline.
 
     Returns only after the child has exited and been reaped, on every path, so a caller holding a
@@ -251,10 +256,11 @@ def parse_source(content, *, legacy=False):
     source = tempfile.TemporaryFile()
     try:
         # Windows communicate writes pipe input synchronously before applying its timeout.
+        source.write(prefix)
         source.write(content)
         source.seek(0)
         try:
-            argv = _worker_argv() + (["--legacy-matrices"] if legacy else [])
+            argv = _worker_argv() + flags
             child = subprocess.Popen(argv, stdin=source, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL)
         except (OSError, ValueError):
@@ -273,26 +279,158 @@ def parse_source(content, *, legacy=False):
         source.close()
     if timed_out:
         raise SolarEdgeReportError("REPORT_PARSE_TIMEOUT")
-    if parse_worker.decode_refusal(child.returncode, out) == parse_worker.RESOURCE_REFUSAL:
+    return child.returncode, out
+
+
+def parse_source(content, *, legacy=False):
+    returncode, out = _run_parse_worker(content, ["--legacy-matrices"] if legacy else [])
+    if parse_worker.decode_refusal(returncode, out) == parse_worker.RESOURCE_REFUSAL:
         raise SolarEdgeReportError(parse_worker.RESOURCE_REFUSAL)
-    matrices = parse_worker.decode_verdict(child.returncode, out)
+    matrices = parse_worker.decode_verdict(returncode, out)
     if matrices is None:
         raise SolarEdgeReportError("REPORT_PDF_UNSUPPORTED")
     return matrices
 
 
-def build_solaredge_report(backend, tenant_id, drawing_id, request):
-    if write_loop.drawing_mutations_refusal() is not None:
-        raise SolarEdgeReportError("REPORT_WRITES_DRAINED")
-    req = validate_request(request)
+def _drawing_context(backend, tenant_id, drawing_id, project_id):
     try:
-        context = resolve_graph_context(backend, tenant_id, drawing_id, "head", project_id=req["project_id"])
+        return resolve_graph_context(backend, tenant_id, drawing_id, "head", project_id=project_id)
     except GraphValidationError as exc:
         code = {"PROJECT_MISMATCH": "REPORT_PROJECT_MISMATCH",
                 "GRAPH_CONTEXT_UNAVAILABLE": "REPORT_DRAWING_NOT_FOUND"}.get(exc.code, "REPORT_GRAPH_REQUIRED")
         raise SolarEdgeReportError(code) from None
     except (OSError, RuntimeError):
         raise SolarEdgeReportError("REPORT_STORE_UNAVAILABLE") from None
+
+
+def _load_source(backend, tenant_id, drawing_id, artifact_id, project_id):
+    try:
+        return solar_import_sources.load_import_source(
+            backend, tenant_id, drawing_id, artifact_id, project_id=project_id)
+    except solar_import_sources.ImportSourceError as exc:
+        raise SolarEdgeReportError(exc.code) from None
+
+
+def _paper_point(value):
+    return (type(value) in (int, float)
+            and -MAX_PAPER_ORIGIN_POINTS <= value <= MAX_PAPER_ORIGIN_POINTS)
+
+
+def _valid_position_check(check, approved):
+    if type(check) is not dict or set(check) != {"tolerance_points", "approved_origins"}:
+        return False
+    tolerance = check["tolerance_points"]
+    pages = check["approved_origins"]
+    if (not _paper_point(tolerance) or tolerance < 0
+            or type(pages) is not list or len(pages) != len(approved)):
+        return False
+    for origins, tags in zip(pages, approved):
+        if type(origins) is not list or len(origins) != len(tags):
+            return False
+        for origin in origins:
+            if (type(origin) is not dict or set(origin) != {"tag", "x", "y"}
+                    or type(origin["tag"]) is not str
+                    or not _paper_point(origin["x"]) or not _paper_point(origin["y"])):
+                return False
+        if Counter(origin["tag"] for origin in origins) != Counter(tags):
+            return False
+    return True
+
+
+def _compare_tag_origins(approved, painted, tolerance):
+    """Compare occurrence order within each tag using PDF user space points."""
+    expected_by_tag = defaultdict(list)
+    actual_by_tag = defaultdict(list)
+    for item in approved:
+        expected_by_tag[item["tag"]].append((item["x"], item["y"]))
+    for tag, x, y in painted:
+        if not _paper_point(x) or not _paper_point(y):
+            raise SolarEdgeReportError("REPORT_PDF_UNSUPPORTED")
+        actual_by_tag[tag].append((x, y))
+
+    moved = []
+    count_mismatches = []
+    for tag in dict.fromkeys((*expected_by_tag, *actual_by_tag)):
+        expected = expected_by_tag.get(tag, [])
+        actual = actual_by_tag.get(tag, [])
+        if len(expected) != len(actual):
+            # A missing or extra occurrence makes the remaining pairings ambiguous.
+            count_mismatches.append({"tag": tag, "expected": len(expected), "observed": len(actual)})
+            continue
+        for occurrence, (origin, placement) in enumerate(zip(expected, actual), 1):
+            distance = math.dist(origin, placement)
+            if distance > tolerance:
+                moved.append({
+                    "tag": tag, "occurrence": occurrence, "expected": origin,
+                    "observed": placement, "distance_points": distance,
+                })
+    return {"moved": moved, "count_mismatches": count_mismatches}
+
+
+def audit_solaredge_schedule(backend, tenant_id, drawing_id, request):
+    """Compare the approved schedule with an immutable PDF source without writing a report."""
+    if (type(request) is not dict
+            or set(request) - {"source_artifact_id", "approved_pages", "project_id",
+                               "include_placements", "position_check"}):
+        raise SolarEdgeReportError("REPORT_REQUEST_INVALID")
+    artifact_id = request.get("source_artifact_id")
+    approved = request.get("approved_pages")
+    project_id = request.get("project_id")
+    include_placements = request.get("include_placements", False)
+    position_check = request.get("position_check")
+    if (type(artifact_id) is not str or not re.fullmatch(r"[0-9a-f]{64}", artifact_id)
+            or type(include_placements) is not bool
+            or not parse_worker.valid_approved_schedule(approved)
+            or len(approved) > solar_import_sources.MAX_IMPORT_PAGES
+            or ("position_check" in request and not _valid_position_check(position_check, approved))
+            or (project_id is not None and (type(project_id) is not str or not 1 <= len(project_id) <= 100))):
+        raise SolarEdgeReportError("REPORT_REQUEST_INVALID")
+    payload = json.dumps(approved, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(payload) > MAX_SCHEDULE_REQUEST_BYTES:
+        raise SolarEdgeReportError("REPORT_REQUEST_TOO_LARGE")
+    context = _drawing_context(backend, tenant_id, drawing_id, project_id)
+    meta, content = _load_source(backend, tenant_id, drawing_id, artifact_id, context["project_id"])
+    needs_placements = include_placements or position_check is not None
+    if not _PARSE_SLOTS.acquire(blocking=False):
+        raise SolarEdgeReportError("REPORT_BUSY")
+    try:
+        mode = "--schedule-placements" if needs_placements else "--schedule-audit"
+        returncode, out = _run_parse_worker(content, [mode],
+                                            prefix=len(payload).to_bytes(4, "big") + payload)
+    finally:
+        _PARSE_SLOTS.release()
+    if parse_worker.decode_refusal(returncode, out, schema=parse_worker.SCHEDULE_SCHEMA,
+                                  max_output=parse_worker.MAX_SCHEDULE_OUTPUT_BYTES) == parse_worker.RESOURCE_REFUSAL:
+        raise SolarEdgeReportError(parse_worker.RESOURCE_REFUSAL)
+    decoded = parse_worker.decode_schedule(returncode, out, approved, placements=needs_placements)
+    if decoded is None:
+        raise SolarEdgeReportError("REPORT_PDF_UNSUPPORTED")
+    observed = decoded
+    if needs_placements:
+        observed = [[tag for tag, _, _ in sorted(page, key=lambda item: (-item[2], item[1]))]
+                    for page in decoded]
+    pages = [{"page": number, "expected": expected, "observed": painted, "matches": expected == painted}
+             for number, (expected, painted) in enumerate(zip_longest(approved, observed), 1)]
+    if needs_placements:
+        expectations = position_check["approved_origins"] if position_check else ()
+        for page, placements, origins in zip_longest(pages, decoded, expectations):
+            if include_placements:
+                page["placements"] = (None if placements is None else
+                                      [{"tag": tag, "x": x, "y": y} for tag, x, y in placements])
+            if position_check is not None:
+                page["position_check"] = (None if origins is None else
+                                          _compare_tag_origins(origins, placements or (),
+                                                               position_check["tolerance_points"]))
+    return {"schema": SCHEDULE_RESULT_SCHEMA, "drawing_id": drawing_id,
+            "project_id": context["project_id"], "source_artifact_id": artifact_id,
+            "source_content_sha256": meta["content_sha256"], "pages": pages}
+
+
+def build_solaredge_report(backend, tenant_id, drawing_id, request):
+    if write_loop.drawing_mutations_refusal() is not None:
+        raise SolarEdgeReportError("REPORT_WRITES_DRAINED")
+    req = validate_request(request)
+    context = _drawing_context(backend, tenant_id, drawing_id, req["project_id"])
     # Hex spellings among panels sent to the kernel are ambiguous evidence.
     # Refuse before source I/O; numeric ties in the kernel's set ordering would
     # otherwise make immutable report bytes depend on the process hash seed.
@@ -307,11 +445,7 @@ def build_solaredge_report(backend, tenant_id, drawing_id, request):
             if number in handle_numbers:
                 raise SolarEdgeReportError("REPORT_HANDLE_ALIAS")
             handle_numbers.add(number)
-    try:
-        meta, content = solar_import_sources.load_import_source(
-            backend, tenant_id, drawing_id, req["source_artifact_id"], project_id=context["project_id"])
-    except solar_import_sources.ImportSourceError as exc:
-        raise SolarEdgeReportError(exc.code) from None
+    meta, content = _load_source(backend, tenant_id, drawing_id, req["source_artifact_id"], context["project_id"])
     request_sha256 = digest({"schema": REQUEST_SCHEMA, "source_artifact_id": req["source_artifact_id"],
                              "source_content_sha256": meta["content_sha256"],
                              "alignment_tolerance": req["alignment_tolerance"],

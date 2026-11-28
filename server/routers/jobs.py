@@ -1527,7 +1527,7 @@ def _running_split_progress(rec, tenant_id):
         return db.run_transaction(lambda conn: project_solve_store.read_running_split_progress(
             scope, tenant_id=tenant_id, input_version_id=input_version,
             graph_revision=binding["expected_rev"], graph_sha256=binding["graph_sha256"],
-            conn=conn), read_only=True, max_attempts=1)
+            conn=conn, source_sha=os.environ.get("LEAF_SOURCE_SHA")), read_only=True, max_attempts=1)
     except Exception:
         # Optional progress must not turn a readable job status into an error.
         return None

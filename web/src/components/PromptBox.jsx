@@ -142,6 +142,7 @@ export default function PromptBox({
   // like the authority while paths it never sees stayed open. Render the
   // verdict that was actually enforced, and nothing else.
   secretRefusal = null,
+  starter = null,
   // W4d Slice E: the reference's one-line docked "Command:" prompt. The DOM
   // is the same well; this only adds a class the studio's drafting-surface
   // CSS lays out as one row, and swaps the caret glyph for the prompt word.
@@ -229,6 +230,15 @@ export default function PromptBox({
   const dragDepth = useRef(0) // dragenter/leave pair counter (children re-fire them)
   const rootRef = useRef(null)
   const fieldRef = useRef(null)
+  const starterSelectionRef = useRef(null)
+  useLayoutEffect(() => {
+    const pending = starterSelectionRef.current
+    if (pending && value === pending.text) {
+      starterSelectionRef.current = null
+      fieldRef.current?.focus()
+      fieldRef.current?.setSelectionRange(...pending.select)
+    }
+  }, [value])
   const [wrapped, setWrapped] = useState(false)
   const setFieldRef = useCallback((node) => {
     fieldRef.current = node
@@ -1006,6 +1016,12 @@ export default function PromptBox({
             style={{ height: autoGrowHeight(value), resize: 'none', overflowY: 'auto' }}
           />
         </div>
+        {starter && !value.trim() && (
+          <button type="button" className="chip-neutral" data-testid="prompt-starter" onClick={() => {
+            starterSelectionRef.current = starter
+            changePrompt(starter.text)
+          }}>{starter.label}</button>
+        )}
         {secretRefusal && (
           <div className="bar-secret-notice" role="alert" data-testid="secret-notice">
             <span className="dot red" aria-hidden="true" />

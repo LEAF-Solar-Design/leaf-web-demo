@@ -130,7 +130,7 @@ def _tenant_missing(detail: str = "tool_not_published") -> Response:
 def tenant_tools(tenant=Depends(deps.require_active_tenant)) -> Response:
     if not _plugin_builder_visible(tenant):
         return _tenant_missing()
-    entries = tenant_catalog.list_versions(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant))
+    entries = tenant_catalog.list_latest_versions(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant))
     try:
         tenant_catalog.record_plugin_check(
             os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant), datetime.now(timezone.utc))

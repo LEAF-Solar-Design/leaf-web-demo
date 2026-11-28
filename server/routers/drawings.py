@@ -748,18 +748,41 @@ async def import_pvcase_g33(drawing_id: str, request: Request, project_id: Optio
     return JSONResponse(content=with_envelope_fields(result))
 
 
-def _solaredge_report(tenant_id, drawing_id, body):
+def _solaredge_pdf_operation(operation, tenant_id, drawing_id, body):
     try:
         backend = _backend(tenant_id)
     except (RuntimeError, OSError):
         raise solar_solaredge_report.SolarEdgeReportError("REPORT_STORE_UNAVAILABLE") from None
-    return solar_solaredge_report.build_solaredge_report(backend, tenant_id, drawing_id, body)
+    return operation(backend, tenant_id, drawing_id, body)
+
+
+def _solaredge_report(tenant_id, drawing_id, body):
+    return _solaredge_pdf_operation(
+        solar_solaredge_report.build_solaredge_report, tenant_id, drawing_id, body)
+
+
+def _solaredge_schedule_audit(tenant_id, drawing_id, body):
+    return _solaredge_pdf_operation(
+        solar_solaredge_report.audit_solaredge_schedule, tenant_id, drawing_id, body)
 
 
 @router.post("/api/drawings/{drawing_id}/imports/solaredge-pdf/report")
 async def solaredge_pdf_report(drawing_id: str, request: Request,
                                tenant=Depends(deps.require_active_tenant)):
     """Publish the revision-bound SolarEdge counts and tracking report for a stored source."""
+    return await _solaredge_pdf_request(drawing_id, request, tenant, _solaredge_report,
+                                       solar_solaredge_report.MAX_REPORT_REQUEST_BYTES, writes=True)
+
+
+@router.post("/api/drawings/{drawing_id}/imports/solaredge-pdf/schedule-audit")
+async def solaredge_pdf_schedule_audit(drawing_id: str, request: Request,
+                                       tenant=Depends(deps.require_active_tenant)):
+    """Compare ordered page tags on an immutable SolarEdge PDF import source."""
+    return await _solaredge_pdf_request(drawing_id, request, tenant, _solaredge_schedule_audit,
+                                       solar_solaredge_report.MAX_SCHEDULE_REQUEST_BYTES, writes=False)
+
+
+async def _solaredge_pdf_request(drawing_id, request, tenant, operation, byte_limit, *, writes):
     def refused(reason):
         reasons = {
             "REPORT_DRAWING_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
@@ -814,18 +837,18 @@ async def solaredge_pdf_report(drawing_id: str, request: Request,
             return entitlements.entitlement_denied_response("run_read", tier)
     except entitlements.EntitlementsError:
         return entitlements.policy_unavailable_response("run_read", tier)
-    if write_loop.drawing_mutations_refusal() is not None:
+    if writes and write_loop.drawing_mutations_refusal() is not None:
         return refused("REPORT_WRITES_DRAINED")
     if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
         return refused("REPORT_MEDIA_TYPE_REFUSED")
     length = request.headers.get("content-length", "")
     if re.fullmatch(r"[0-9]+", length):
         stripped = length.lstrip("0")
-        if len(stripped) > 12 or int(stripped or "0") > solar_solaredge_report.MAX_REPORT_REQUEST_BYTES:
+        if len(stripped) > 12 or int(stripped or "0") > byte_limit:
             return refused("REPORT_REQUEST_TOO_LARGE")
     raw = bytearray()
     async for chunk in request.stream():
-        if len(raw) + len(chunk) > solar_solaredge_report.MAX_REPORT_REQUEST_BYTES:
+        if len(raw) + len(chunk) > byte_limit:
             return refused("REPORT_REQUEST_TOO_LARGE")
         raw.extend(chunk)
     try:
@@ -833,7 +856,7 @@ async def solaredge_pdf_report(drawing_id: str, request: Request,
     except (ValueError, RecursionError):
         return refused("REPORT_REQUEST_INVALID")
     try:
-        result = await run_in_threadpool(_solaredge_report, str(tenant), drawing_id, body)
+        result = await run_in_threadpool(operation, str(tenant), drawing_id, body)
     except solar_solaredge_report.SolarEdgeReportError as exc:
         return refused(exc.code)
     return JSONResponse(content=with_envelope_fields(result))
@@ -1192,12 +1215,27 @@ def _entity_location(entity: Dict[str, Any]) -> Tuple[str, Optional[str]]:
 
 
 def _layout_entities(intake: Dict[str, Any]) -> Iterator[Tuple[str, Dict[str, Any]]]:
+    ownership = {}
+    records = intake.get("paper_entity_locations")
+    if isinstance(records, list):
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            kind, handle, layout = (record.get(key) for key in ("kind", "handle", "layout"))
+            if (kind in _HISTORY_LAYOUT_KINDS and isinstance(handle, str) and handle
+                    and isinstance(layout, str) and layout):
+                ownership[kind, handle.casefold()] = {**record, "space": "paper"}
     for kind in _HISTORY_LAYOUT_KINDS:
         entities = intake.get(kind)
         if isinstance(entities, list):
             for entity in entities:
                 if isinstance(entity, dict):
+                    handle = entity.get("handle")
+                    if isinstance(handle, str) and (kind, handle.casefold()) in ownership:
+                        continue
                     yield kind, entity
+    for (kind, _), entity in ownership.items():
+        yield kind, entity
 
 
 def _paper_layouts(intake: Dict[str, Any]) -> List[Optional[str]]:
@@ -1225,6 +1263,11 @@ def _layout_changes(parent: Dict[str, Any], child: Dict[str, Any]) -> List[Dict[
         prior = prior_locations.get((kind, handle))
         if prior is not None and prior != (to_space, to_layout):
             from_space, from_layout = prior
+            if (from_space == to_space == "paper"
+                    and bool(parent.get("paper_entity_locations")) != bool(child.get("paper_entity_locations"))
+                    and (from_layout is None or to_layout is None)):
+                # Resolving a previously unnamed sheet does not establish a move.
+                continue
             changes.append({
                 "kind": kind, "handle": handle,
                 "from_space": from_space, "from_layout": from_layout,
@@ -1744,7 +1787,8 @@ def _receive_edited_dxf(file: UploadFile, source_digest: str):
             retryable=False, status_code=400)
     try:
         intake = dxf_intake.parse_dxf_bytes(
-            data, source_name=file.filename or "edited.dxf", include_model_entity_counts=True
+            data, source_name=file.filename or "edited.dxf", include_model_entity_counts=True,
+            include_paper_entity_locations=True,
         )
         # Intake recovers partial drawings for viewing. A save must not make
         # recovered geometry the active revision when the upload is incomplete.

@@ -3486,7 +3486,9 @@ class CustomizationService:
                     os.environ["LEAF_TENANT_TOOLS_DIR"], change.tenant_id,
                     name, checked.manifest["version"])
                 if result.package_digest != checked.package_digest:
-                    raise tenant_publish.TenantPublishError("branch_version_conflict", 409)
+                    _, legacy_checked = tenant_publish.reviewed_package(files, name, timeout_cap_ms=None)
+                    if result.package_digest != legacy_checked.package_digest:
+                        raise tenant_publish.TenantPublishError("branch_version_conflict", 409)
             except (tenant_publish.TenantPublishError, OSError) as exc:
                 raise CustomizationServiceError("publish_not_available", 409) from exc
             return self._branch_publish_result(change, result)

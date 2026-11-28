@@ -19,6 +19,7 @@ import tool_envelopes
 PACKAGE_LIMIT = 8 * 1024 * 1024
 ENVELOPE_LIMIT = 64 * 1024
 REVOCATIONS_LIMIT = 1024 * 1024
+VERSION_SCAN_LIMIT = 2000  # bounded per-tool scan; names only, no file reads
 PLUGIN_CHECK_FILE = ".plugin-check.json"
 PLUGIN_CHECK_INTERVAL_S = 300
 PLUGIN_CHECK_LIMIT = 1024
@@ -143,6 +144,44 @@ def list_versions(root: str | Path, tenant_id: str, *, include_revoked: bool = F
                     if include_revoked:
                         result[-1]["revoked"] = value["package"]["package_digest"] in revoked
         return sorted(result, key=lambda item: (item["name"], item["version"]))
+    except (*_READ_ERRORS, TenantCatalogError):
+        return []
+
+
+def version_count(root, tenant_id, name, limit) -> int:
+    if not tool_envelopes.valid_identity(name, "0.0.0"):
+        raise TenantCatalogError("invalid_identity")
+    path = _tenant(root, tenant_id) / name
+    _safe_path(path)
+    return sum(1 for _ in tool_envelopes._directories(path, limit))
+
+
+def _semver(version: str) -> tuple[int, int, int]:
+    major, minor, patch = version.split(".")
+    return int(major), int(minor), int(patch)
+
+
+def list_latest_versions(root: str | Path, tenant_id: str) -> list[dict]:
+    """Newest non-revoked, verifiable version per tool; bounded scan, fails closed to []."""
+    try:
+        directory = _tenant(root, tenant_id)
+        _, revoked = _revocations(directory)
+        result = []
+        for name in tool_envelopes._directories(directory, 200):
+            if not tool_envelopes.valid_identity(name.name, "0.0.0"):
+                continue
+            _safe_path(name)
+            versions = [version.name for version in tool_envelopes._directories(name, VERSION_SCAN_LIMIT)
+                        if tool_envelopes.valid_identity(name.name, version.name)]
+            for version in sorted(versions, key=_semver, reverse=True):
+                entry = _entry(root, tenant_id, name.name, version, revoked)
+                if entry is not None:
+                    value = entry[0]
+                    result.append({"name": name.name, "version": version,
+                                   "package_digest": value["package"]["package_digest"],
+                                   "signed_at": value["signed_at"]})
+                    break
+        return sorted(result, key=lambda item: item["name"])
     except (*_READ_ERRORS, TenantCatalogError):
         return []
 

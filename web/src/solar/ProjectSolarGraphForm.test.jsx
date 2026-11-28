@@ -85,6 +85,37 @@ const location = () => screen.getByRole('textbox', { name: 'Insertion point (x, 
 const feedback = () => screen.getByTestId('project-solar-graph-feedback').textContent
 const arm = async () => waitFor(() => expect(action().disabled).toBe(false))
 
+it('binds saved aisle routing to a fresh homerun preview and submits that same layer', async () => {
+  const h = harness()
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await arm()
+  expect(h.client.catalog.mock.calls.at(-1)[0].intents[0].params).toEqual({
+    drawing_id: binding.drawing_id, expected_rev: 6,
+  })
+  fireEvent.change(screen.getByLabelText('Saved aisle layer (optional)'), { target: { value: ' Roof Aisles ' } })
+  expect(action().disabled).toBe(true)
+  await arm()
+  const params = { drawing_id: binding.drawing_id, expected_rev: 6, saved_aisle_layer: 'Roof Aisles' }
+  expect(h.client.catalog.mock.calls.at(-1)[0].intents[0].params).toEqual(params)
+  fireEvent.click(action())
+  await waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1))
+  expect(h.submit.mock.calls[0][0].params).toEqual(params)
+})
+
+it.each([
+  ['saved_aisle_layer_empty', 'The selected layer has no saved aisle centerlines.'],
+  ['invalid_saved_aisle_geometry', 'Use straight, open aisle centerlines on the selected layer.'],
+])('shows the saved aisle preview refusal %s and disables submit', async (code, message) => {
+  const h = harness()
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await arm()
+  h.code = code
+  fireEvent.change(screen.getByLabelText('Saved aisle layer (optional)'), { target: { value: 'Roof Aisles' } })
+  await screen.findByText(message)
+  expect(action().disabled).toBe(true)
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
 function discoveryHarness() {
   const h = harness('solar-panel-groups')
   h.client.readContext.mockImplementation(() => {
