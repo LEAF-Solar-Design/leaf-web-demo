@@ -2,6 +2,8 @@
 
 The [build plan schema](build-plan.v1.schema.json) defines the closed `leaf.build-plan.v1` object. A create plan omits `target_tool_name`. A revise plan requires it and must use the same value for `tool_name`. Both validators reject a rename with `plan_invalid_field:tool_name` before approval. Input names are unique and numeric defaults are finite. Every string must be trimmed and free of C0 controls and DEL, except that a summary can contain internal line feeds.
 
+An input has a `type` of `string`, `integer`, `boolean`, `number` or `pick` (R2-11). A `pick` input is an object the user picks in the drawing when the tool runs. It carries `default: null`, a `prompt` of 1 to 120 characters shown at the AutoCAD command line, `dxf`, a list of 1 to 16 unique DXF entity names from the 21 that Branch's picker accepts (the schema enum, for example `LWPOLYLINE`), and an optional `closed` boolean (default false) that requires a closed polyline. Only a pick input may carry `prompt`, `dxf` or `closed`. Pick inputs appear only in branch plans, at most 8 per plan, and the user is asked for them in input order. The author declares each one in the tool manifest as `x-leaf-pick` on a string parameter that receives the picked entity's handle.
+
 The digest is the lowercase SHA-256 hex of the complete validated plan. Serialize it as JSON with sorted object keys, array order preserved, `separators=(",", ":")` and `ensure_ascii=False`. Encode as UTF-8 with no trailing newline. The limit is 16,384 bytes.
 
 ## Author description
@@ -18,6 +20,7 @@ Behavior:
 1. <behavior>
 Inputs:
 - <name> (<type>, default <JSON default>): <description>
+- <name> (pick in drawing, prompt <JSON prompt>, dxf <dxf joined with ", ">, closed <true | false>): <description>
 Output: <output>
 Capabilities: <capabilities joined with ", ">
 Undo: <undo or "not specified">
@@ -30,7 +33,7 @@ User answers:
 === END APPROVED BUILD PLAN ===
 ```
 
-Number behavior items starting at 1. Repeat each list row for each item. Render empty sections as `- none` and sort answers by key. Prefix delimiter text `=== ` at the start of a user line with `> `. String defaults allow up to 200 characters. Render each default as its original JSON value, escaping U+2028 and U+2029 in the JSON text. The description has a 32,768-byte UTF-8 limit.
+Number behavior items starting at 1. Repeat each list row for each item; a pick input uses the second input row form, with `closed` rendered as false when absent. Render empty sections as `- none` and sort answers by key. Prefix delimiter text `=== ` at the start of a user line with `> `. String defaults allow up to 200 characters. Render each default and each pick prompt as its original JSON value, escaping U+2028 and U+2029 in the JSON text. The description has a 32,768-byte UTF-8 limit.
 
 ## Tenant rollout
 

@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { BuildPlan, PLAN_CONFIRMATION_TTL_S, planModeEnabled } from "../src/agent/buildPlan.js";
+import { BuildPlan, PICK_DXF_NAMES, PLAN_CONFIRMATION_TTL_S, planModeEnabled } from "../src/agent/buildPlan.js";
+import { PICK_DXF_NAMES as BRANCH_PICK_DXF_NAMES } from "../src/vendor/mushy-author/registry/branchPackageSchema.js";
 import { AUTHOR_STAGE_MODEL_GUIDANCE, ConverseLoop, authorStageModelView, type ConverseMessageInput } from "../src/agent/converseLoop.js";
-import { SPINE_SYSTEM_PROMPT } from "../src/agent/spineSystemPrompt.js";
+import { PLAN_MODE_PROMPT, SPINE_SYSTEM_PROMPT } from "../src/agent/spineSystemPrompt.js";
 import type { AppRunClient, ConverseEvent, ConverseRunInput, ConverseTurnInput, GateClient, SpineConverseRunner } from "../src/ports/index.js";
 import { FakeAppRunClient } from "../src/ports/fakes/fakeAppRunClient.js";
 import { FakeSessionStore } from "../src/ports/fakes/fakeSessionStore.js";
@@ -103,11 +104,21 @@ describe("converse inline authoring", () => {
       }
     }
     expect(props.capabilities).toMatchObject({ items: { enum: schema.properties.capabilities.items.enum } });
-    expect(props.inputs).toMatchObject({ items: { required: schema.$defs.input.required,
-      properties: { type: { enum: schema.$defs.input.properties.type.enum },
+    const inputItems = (props.inputs as { items: Record<string, Array<Record<string, any>>> }).items;
+    const [valueInput, pickInput] = inputItems.oneOf ?? inputItems.anyOf;
+    expect(valueInput).toMatchObject({ required: schema.$defs.input.required,
+      properties: { type: { enum: schema.$defs.input.properties.type.enum.filter((kind: string) => kind !== "pick") },
         default: { anyOf: expect.arrayContaining([{ type: "string", minLength: 0,
           maxLength: schema.$defs.input.properties.default.maxLength }]) },
-        description: { maxLength: schema.$defs.input.properties.description.maxLength } } } });
+        description: { maxLength: schema.$defs.input.properties.description.maxLength } } });
+    const inputProps = schema.$defs.input.properties;
+    expect(pickInput).toMatchObject({ required: expect.arrayContaining([...schema.$defs.input.required, ...schema.$defs.input.then.required]),
+      properties: { type: { const: "pick" }, default: { type: "null" },
+        prompt: { minLength: inputProps.prompt.minLength, maxLength: inputProps.prompt.maxLength },
+        dxf: { minItems: inputProps.dxf.minItems, maxItems: inputProps.dxf.maxItems, uniqueItems: true,
+          items: { enum: inputProps.dxf.items.enum } },
+        closed: { type: "boolean" } } });
+    expect(pickInput.required).not.toContain("closed");
     const answer = schema.$defs.answer.properties;
     expect(props.answers).toMatchObject({ additionalProperties: { anyOf: [
       { required: ["labels"], properties: { labels: { minItems: answer.labels.minItems,
@@ -125,6 +136,36 @@ describe("converse inline authoring", () => {
     expect(BuildPlan.safeParse({ ...plan, inputs: [{ ...field, default: "😀".repeat(limit + 1) }] }).success).toBe(false);
     expect(BuildPlan.safeParse({ ...plan, behavior: Array(12).fill("😀".repeat(240)),
       assumptions: Array(8).fill("😀".repeat(240)) }).success).toBe(false);
+  });
+
+  it("accepts pick inputs only in the contract shape and only on branch plans", () => {
+    const pick = { name: "handle", type: "pick", default: null, description: "Outline to mark",
+      prompt: "Pick a closed polyline", dxf: ["LWPOLYLINE"], closed: true } as const;
+    const radius = { name: "radius", type: "integer", default: 6, description: "" } as const;
+    const withInputs = (inputs: unknown[], target = "branch") => BuildPlan.safeParse({ ...plan, target, inputs });
+    expect(withInputs([pick, radius]).success).toBe(true);
+    const { closed: _closed, ...open } = pick;
+    expect(withInputs([open]).success).toBe(true);
+    expect(withInputs(Array.from({ length: 8 }, (_, i) => ({ ...pick, name: `pick_${i}` }))).success).toBe(true);
+    expect(withInputs(Array.from({ length: 9 }, (_, i) => ({ ...pick, name: `pick_${i}` }))).success).toBe(false);
+    expect(withInputs([pick], "studio").success).toBe(false);
+    for (const invalid of [
+      { ...pick, default: "81" }, { ...pick, prompt: "" }, { ...pick, prompt: "x".repeat(121) },
+      { ...pick, prompt: " Pick" }, { ...pick, dxf: [] }, { ...pick, dxf: PICK_DXF_NAMES.slice(0, 17) },
+      { ...pick, dxf: ["lwpolyline"] }, { ...pick, dxf: ["WIPEOUT"] }, { ...pick, dxf: ["LINE", "LINE"] }, { ...pick, closed: "yes" },
+      { ...pick, implied: true }, { ...open, dxf: undefined }, { ...radius, prompt: "Pick" }, { ...radius, dxf: ["LINE"] },
+    ]) expect(withInputs([invalid]).success, JSON.stringify(invalid)).toBe(false);
+    expect(withInputs([{ ...pick, prompt: "x".repeat(120), dxf: PICK_DXF_NAMES.slice(0, 16) }]).success).toBe(true);
+    expect([...PICK_DXF_NAMES]).toEqual([...BRANCH_PICK_DXF_NAMES]);
+    expect(PICK_DXF_NAMES).toHaveLength(21);
+  });
+
+  it("tells the planner that object picks are pick inputs and nothing else prompts", () => {
+    for (const phrase of ['A pick\ninput (type "pick")', "becomes a pick input, at most 8 per tool",
+      "Never promise in behavior, summary or output any interactive prompt that is not\na pick input",
+      "Studio tools have no picks."]) {
+      expect(PLAN_MODE_PROMPT).toContain(phrase);
+    }
   });
 
   it("rejects invalid proposals and unbound builds before consulting the gate", async () => {

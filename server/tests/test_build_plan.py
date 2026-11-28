@@ -243,3 +243,69 @@ def test_schema_matches_validator():
     assert set(props["capabilities"]["items"]["enum"]) == set(bp.CAPABILITIES)
     assert set(schema["$defs"]["input"]["properties"]["type"]["enum"]) == set(bp.INPUT_TYPES)
     assert schema["$defs"]["input"]["properties"]["default"]["maxLength"] == 200
+
+
+def pick(**changes):
+    return {"name": "handle", "type": "pick", "default": None, "description": "Outline to mark",
+            "prompt": "Pick a closed polyline", "dxf": ["LWPOLYLINE"], "closed": True, **changes}
+
+
+@pytest.mark.parametrize("inputs", [
+    [pick()], [pick(), field()], [{k: v for k, v in pick().items() if k != "closed"}],
+    [pick(name=f"p{i}") for i in range(8)],
+    [pick(prompt="x" * 120, dxf=list(bp.PICK_DXF_NAMES[:16]), closed=False)],
+])
+def test_valid_pick_inputs(inputs):
+    plan = dict(minimal(), inputs=inputs)
+    assert bp.validate_plan(plan) == plan
+
+
+@pytest.mark.parametrize("plan,code", [
+    (dict(minimal(), target="studio", inputs=[pick()]), "plan_invalid_field:inputs"),
+    (dict(minimal(), inputs=[pick(name=f"p{i}") for i in range(9)]), "plan_invalid_field:inputs"),
+    (dict(minimal(), inputs=[pick(implied=True)]), "plan_unknown_key"),
+    (dict(minimal(), inputs=[field(prompt="Pick")]), "plan_unknown_key"),
+    (dict(minimal(), inputs=[field(dxf=["LINE"])]), "plan_unknown_key"),
+    (dict(minimal(), inputs=[field(closed=True)]), "plan_unknown_key"),
+    (dict(minimal(), inputs=[{k: v for k, v in pick().items() if k != "prompt"}]), "plan_invalid_field:prompt"),
+    (dict(minimal(), inputs=[{k: v for k, v in pick().items() if k != "dxf"}]), "plan_invalid_field:dxf"),
+    (dict(minimal(), inputs=[pick(default="81")]), "plan_invalid_field:default"),
+    (dict(minimal(), inputs=[pick(prompt="")]), "plan_invalid_field:prompt"),
+    (dict(minimal(), inputs=[pick(prompt="x" * 121)]), "plan_invalid_field:prompt"),
+    (dict(minimal(), inputs=[pick(prompt=" Pick")]), "plan_invalid_field:prompt"),
+    (dict(minimal(), inputs=[pick(dxf=[])]), "plan_invalid_field:dxf"),
+    (dict(minimal(), inputs=[pick(dxf="LWPOLYLINE")]), "plan_invalid_field:dxf"),
+    (dict(minimal(), inputs=[pick(dxf=list(bp.PICK_DXF_NAMES[:17]))]), "plan_invalid_field:dxf"),
+    (dict(minimal(), inputs=[pick(dxf=["WIPEOUT"])]), "plan_invalid_field:dxf"),
+    (dict(minimal(), inputs=[pick(dxf=["lwpolyline"])]), "plan_invalid_field:dxf"),
+    (dict(minimal(), inputs=[pick(dxf=["LINE", "LINE"])]), "plan_invalid_field:dxf"),
+    (dict(minimal(), inputs=[pick(closed="yes")]), "plan_invalid_field:closed"),
+    (dict(minimal(), inputs=[pick(closed=None)]), "plan_invalid_field:closed"),
+])
+def test_invalid_pick_inputs(plan, code):
+    assert_error(plan, code)
+
+
+def test_pick_input_renders_for_the_author():
+    edge = {k: v for k, v in pick(name="edge", prompt="Pick a line\u2028now", dxf=["LINE", "ARC"]).items()
+            if k != "closed"}
+    plan = dict(minimal(), inputs=[pick(), edge, field()])
+    result = bp.render_description(plan)
+    assert ('Inputs:\n- handle (pick in drawing, prompt "Pick a closed polyline", dxf LWPOLYLINE, closed true): '
+            'Outline to mark\n- edge (pick in drawing, prompt "Pick a line\\u2028now", dxf LINE, ARC, closed false): '
+            'Outline to mark\n- limit (integer, default null): \n') in result
+    assert bp.plan_digest(plan) != bp.plan_digest(dict(plan, inputs=[pick(closed=False), edge, field()]))
+
+
+def test_schema_declares_pick_inputs():
+    path = Path(__file__).resolve().parents[2] / "contract" / "build-plan.v1.schema.json"
+    schema = json.loads(path.read_text(encoding="utf-8"))
+    item = schema["$defs"]["input"]
+    assert set(item["properties"]) == {"name", "type", "default", "description", *bp.PICK_KEYS}
+    assert item["then"]["required"] == ["prompt", "dxf"]
+    assert item["properties"]["prompt"]["maxLength"] == 120
+    assert (item["properties"]["dxf"]["minItems"], item["properties"]["dxf"]["maxItems"]) == (1, 16)
+    assert tuple(item["properties"]["dxf"]["items"]["enum"]) == bp.PICK_DXF_NAMES
+    from branch_tools import package_check
+    assert bp.PICK_DXF_NAMES == package_check.PICK_DXF_NAMES and len(bp.PICK_DXF_NAMES) == 21
+    assert schema["allOf"][0]["then"]["properties"]["inputs"]["maxContains"] == bp.MAX_PICK_INPUTS

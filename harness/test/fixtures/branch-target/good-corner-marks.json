@@ -1,0 +1,53 @@
+{
+  "name": "corner-marks",
+  "version": "1.0.0",
+  "description": "Mark each corner of a picked closed polyline with a circle on layer CORNER-MARKS.",
+  "params": {
+    "type": "object",
+    "properties": {
+      "handle": {
+        "type": "string",
+        "x-leaf-pick": {
+          "prompt": "Pick a closed polyline",
+          "dxf": [
+            "LWPOLYLINE"
+          ],
+          "closed": true,
+          "implied": true
+        }
+      },
+      "radius": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 6
+      }
+    },
+    "required": [
+      "handle"
+    ],
+    "additionalProperties": false
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "marked": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "marked"
+    ]
+  },
+  "capabilities": [
+    "drawing.read",
+    "drawing.write"
+  ],
+  "hosts": {
+    "min_release": 2023,
+    "min_host_api": 2
+  },
+  "timeout_ms": 30000,
+  "idempotent": false,
+  "main_csx": "using Autodesk.AutoCAD.DatabaseServices;\nusing Autodesk.AutoCAD.Geometry;\nusing Newtonsoft.Json.Linq;\n// The host has already asked the user to pick; handle is the picked entity's uppercase hex handle.\nstring handle = Ctx.Args.Value<string>(\"handle\");\nint radius = Ctx.Args.Value<int?>(\"radius\") ?? 6;\nint marked = 0;\nusing (var tr = Ctx.Db.TransactionManager.StartTransaction()) {\n  var layers = (LayerTable)tr.GetObject(Ctx.Db.LayerTableId, OpenMode.ForRead);\n  if (!layers.Has(\"CORNER-MARKS\")) {\n    layers.UpgradeOpen();\n    var rec = new LayerTableRecord { Name = \"CORNER-MARKS\" };\n    layers.Add(rec);\n    tr.AddNewlyCreatedDBObject(rec, true);\n  }\n  var bt = (BlockTable)tr.GetObject(Ctx.Db.BlockTableId, OpenMode.ForRead);\n  var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);\n  Polyline outline = null;\n  foreach (ObjectId id in ms) {\n    Ctx.Cancel.ThrowIfCancellationRequested();\n    if (id.Handle.ToString() == handle) { outline = tr.GetObject(id, OpenMode.ForRead) as Polyline; break; }\n  }\n  if (outline == null || !outline.Closed) throw new System.ArgumentException(\"handle must name a closed polyline\");\n  for (int i = 0; i < outline.NumberOfVertices; i++) {\n    var mark = new Circle(outline.GetPoint3dAt(i), Vector3d.ZAxis, radius);\n    mark.SetDatabaseDefaults(Ctx.Db);\n    mark.Layer = \"CORNER-MARKS\";\n    ms.AppendEntity(mark);\n    tr.AddNewlyCreatedDBObject(mark, true);\n    marked++;\n  }\n  tr.Commit();\n}\nreturn new { marked };\n",
+  "lib": {}
+}

@@ -42,13 +42,32 @@ const planAnswers = z.unknown().refine((value): value is Record<string, z.infer<
   return entries.length <= 4 && entries.every(([key, answer]) => answerKey.test(key) && planAnswer.safeParse(answer).success);
 }).meta({ type: "object", maxProperties: 4, propertyNames: { pattern: answerKey.source },
   additionalProperties: z.toJSONSchema(planAnswer, { io: "input" }) });
-const inputField = z.strictObject({
-  name: z.string().regex(/^[a-z][a-z0-9_]{0,39}(?![\s\S])/),
+const inputName = z.string().regex(/^[a-z][a-z0-9_]{0,39}(?![\s\S])/);
+const valueField = z.strictObject({
+  name: inputName,
   type: z.enum(["string", "integer", "boolean", "number"]),
   default: z.union([planText(0, 200), z.number(), z.boolean(), z.null()]),
   description: planText(0, 200),
 }).refine(field => field.default === null || (field.type === "integer"
   ? Number.isInteger(field.default) : typeof field.default === field.type), "default must match input type");
+// R2-11: an object the user picks in the drawing when the tool runs (x-leaf-pick in the manifest).
+export const MAX_PICK_INPUTS = 8;
+// The DXF names Branch's picker accepts (PickSpec.KnownDxfNames, Branch2025 #746).
+export const PICK_DXF_NAMES = ["LWPOLYLINE", "POLYLINE", "LINE", "ARC", "CIRCLE", "INSERT", "TEXT", "MTEXT",
+  "HATCH", "POINT", "SPLINE", "ELLIPSE", "SOLID", "3DFACE", "3DSOLID", "REGION", "RAY", "XLINE", "DIMENSION",
+  "LEADER", "MULTILEADER"] as const;
+const dxfName = z.enum(PICK_DXF_NAMES);
+const pickField = z.strictObject({
+  name: inputName,
+  type: z.literal("pick"),
+  default: z.null(),
+  description: planText(0, 200),
+  prompt: planText(1, 120),
+  dxf: z.array(dxfName).min(1).max(16).refine(names => new Set(names).size === names.length,
+    "dxf names must be unique").meta({ uniqueItems: true }),
+  closed: z.boolean().optional(),
+});
+const inputField = z.discriminatedUnion("type", [valueField, pickField]);
 
 // Serialize objects directly: JSON.stringify reorders numeric-looking keys even if
 // they were inserted in lexical order. Python retains the sorted order for those keys.
@@ -92,6 +111,8 @@ export const BuildPlan = z.strictObject({
     { path: ["tool_name"], message: "plan_invalid_field:tool_name" })
   .refine(plan => new Set(plan.inputs.map(field => field.name)).size === plan.inputs.length,
     "input names must be unique")
+  .refine(plan => plan.inputs.filter(field => field.type === "pick").length <= (plan.target === "branch" ? MAX_PICK_INPUTS : 0),
+    { path: ["inputs"], message: "plan_invalid_field:inputs" })
   .refine(plan => new Set(plan.capabilities).size === plan.capabilities.length, "capabilities must be unique")
   .refine(plan => Buffer.byteLength(canonical(plan), "utf8") <= MAX_PLAN_BYTES, "plan_too_large");
 export type BuildPlan = z.infer<typeof BuildPlan>;

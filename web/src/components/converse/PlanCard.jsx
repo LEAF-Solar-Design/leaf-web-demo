@@ -74,8 +74,10 @@ export default function PlanCard({ sessionId, proposal, replacedBy, expiresAt, r
     <Items title="Behavior" items={plan.behavior} ordered />
     <div><h5>Inputs</h5>{plan.inputs?.length ? <table aria-label="Inputs">
       <thead><tr>{['Name', 'Type', 'Default', 'Description'].map((name) => <th key={name}>{name}</th>)}</tr></thead>
-      <tbody>{plan.inputs.map((input) => <tr key={input.name}><td>{input.name}</td><td>{input.type}</td>
-        <td>{String(input.default ?? 'none')}</td><td>{input.description}</td></tr>)}</tbody></table> : <p>None</p>}</div>
+      <tbody>{plan.inputs.map((input) => input.type === 'pick'
+        ? <tr key={input.name}><td>{input.name}</td><td colSpan={2}>{`Pick in drawing: ${input.prompt}`}</td><td>{input.description}</td></tr>
+        : <tr key={input.name}><td>{input.name}</td><td>{input.type}</td>
+          <td>{String(input.default ?? 'none')}</td><td>{input.description}</td></tr>)}</tbody></table> : <p>None</p>}</div>
     <div><h5>Output</h5><p>{plan.output}</p></div>
     <Items title="Capabilities" items={plan.capabilities?.map(capabilityLabel)} />
     <div><h5>Undo</h5><p>{plan.undo || 'None specified'}</p></div>

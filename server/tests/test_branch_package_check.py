@@ -194,3 +194,71 @@ def test_check_is_read_only_and_deterministic(monkeypatch):
     assert files == original and sys.path == original_path
     assert not any(name.startswith("_branch_tools_cad_tool_package_runner")
                    for name in set(sys.modules) - original_modules)
+
+
+PICK = {"prompt": "Pick a closed polyline", "dxf": ["LWPOLYLINE"], "closed": True, "implied": True}
+
+
+def with_params(properties, host_api=2):
+    files = package()
+    manifest = json.loads(files["tool.json"])
+    manifest["params"] = {"type": "object", "properties": properties}
+    manifest["hosts"] = dict(manifest["hosts"], min_host_api=host_api)
+    files["tool.json"] = json.dumps(manifest).encode()
+    return files
+
+
+@pytest.mark.parametrize("properties", [
+    {"handle": {"type": "string", "x-leaf-pick": PICK}},
+    {"handle": {"type": "string", "x-leaf-pick": {"prompt": "x" * 120, "dxf": list(checker.PICK_DXF_NAMES[:16])}}},
+    {f"p{i}": {"type": "string", "x-leaf-pick": PICK} for i in range(8)},
+])
+def test_valid_pick_declarations(properties):
+    result = check_branch_package(with_params(properties), "panel-gap-check")
+    assert result.ok, result.failures
+
+
+@pytest.mark.parametrize(("prop", "message"), [
+    ({"type": "integer", "x-leaf-pick": PICK}, 'only valid on a "type": "string" property'),
+    ({"type": ["string"], "x-leaf-pick": PICK}, 'only valid on a "type": "string" property'),
+    ({"type": "string", "x-leaf-pick": True}, "expected an object"),
+    ({"type": "string", "x-leaf-pick": dict(PICK, layer="A")}, "unknown key layer"),
+    ({"type": "string", "x-leaf-pick": dict(PICK, prompt="")}, "prompt must be"),
+    ({"type": "string", "x-leaf-pick": dict(PICK, prompt="x" * 121)}, "prompt must be"),
+    ({"type": "string", "x-leaf-pick": dict(PICK, prompt="a\x85b")}, "prompt must be"),
+    ({"type": "string", "x-leaf-pick": {"dxf": ["LINE"]}}, "prompt must be"),
+    ({"type": "string", "x-leaf-pick": dict(PICK, dxf=[])}, "dxf must list"),
+    ({"type": "string", "x-leaf-pick": dict(PICK, dxf=["lwpolyline"])}, "dxf must list"),
+    ({"type": "string", "x-leaf-pick": dict(PICK, dxf=list(checker.PICK_DXF_NAMES[:17]))}, "dxf must list"),
+    ({"type": "string", "x-leaf-pick": dict(PICK, dxf=["WIPEOUT"])}, "dxf must list"),
+    ({"type": "string", "x-leaf-pick": dict(PICK, dxf=["LINE", "LINE"])}, "dxf must list"),
+    ({"type": "string", "x-leaf-pick": dict(PICK, prompt="   ")}, "prompt must be"),
+    ({"type": "string", "x-leaf-pick": dict(PICK, prompt="a" + chr(0x200B) + "b")}, "prompt must be"),
+    ({"type": "string", "x-leaf-pick": dict(PICK, closed="true")}, "closed must be a boolean"),
+    ({"type": "string", "x-leaf-pick": dict(PICK, implied=1)}, "implied must be a boolean"),
+])
+def test_invalid_pick_declarations(prop, message):
+    result = check_branch_package(with_params({"handle": prop}), "panel-gap-check")
+    assert not result.ok
+    path = "params.properties.handle.x-leaf-pick"
+    assert any(f["rule"] == "V7" and f["path"] == path and message in f["message"] for f in result.failures), result.failures
+
+
+def test_at_most_eight_pick_declarations():
+    properties = {f"p{i}": {"type": "string", "x-leaf-pick": PICK} for i in range(9)}
+    result = check_branch_package(with_params(properties), "panel-gap-check")
+    assert result.failures == [{"rule": "V7", "path": "params.properties",
+                                "message": "V7: at most 8 x-leaf-pick inputs"}]
+
+
+@pytest.mark.parametrize("host_api", [1, None])
+def test_pick_declarations_need_the_pick_host_api(host_api):
+    files = with_params({"handle": {"type": "string", "x-leaf-pick": PICK}}, host_api=1)
+    if host_api is None:
+        manifest = json.loads(files["tool.json"])
+        del manifest["hosts"]["min_host_api"]
+        files["tool.json"] = json.dumps(manifest).encode()
+    result = check_branch_package(files, "panel-gap-check")
+    assert {"rule": "V10", "path": "hosts",
+            "message": "V10: x-leaf-pick inputs need hosts.min_host_api >= 2"} in result.failures
+    assert check_branch_package(with_params({"radius": {"type": "integer"}}, host_api=1), "panel-gap-check").ok

@@ -21,7 +21,8 @@ namespace LeafSolarDesign.ScriptHost
         ScriptError,
         RevocationInvalid,
         WrongTenant,
-        ConfirmationDeclined
+        ConfirmationDeclined,
+        PickCancelled
     }
 
     public static class ToolDecisions
@@ -48,6 +49,7 @@ namespace LeafSolarDesign.ScriptHost
                 case ToolDecision.RevocationInvalid: return "revocation_invalid";
                 case ToolDecision.WrongTenant: return "wrong_tenant";
                 case ToolDecision.ConfirmationDeclined: return "confirmation_declined";
+                case ToolDecision.PickCancelled: return "pick_cancelled";
                 default: throw new ArgumentOutOfRangeException(nameof(decision), decision, "Unknown tool decision.");
             }
         }

@@ -28,7 +28,7 @@ import { branchCompileCheck, branchHostFloor, setBranchCompileCheckForTests, set
 import { FsTenantRepo } from "../src/vendor/mushy-author/agent/tools/fsTenantRepo.js";
 import * as repoPathSafety from "../src/vendor/mushy-author/agent/tools/repoPathSafety.js";
 import {
-  BranchPackageError, prepareBranchPackage, validateBranchPackage,
+  BranchPackageError, MAX_PICK_INPUTS, PICK_DXF_NAMES, PICK_MIN_HOST_API, pickDiagnostics, prepareBranchPackage, validateBranchPackage,
   type BranchToolProposal,
 } from "../src/vendor/mushy-author/registry/branchPackageSchema.js";
 
@@ -167,7 +167,71 @@ describe("branch package proposals", () => {
     expect(prompt).toContain("Keep the outline when you fill: a fill alone does not draw the shape.");
   });
 
-  it.skipIf(!COMPILE_CONFIGURED)("compiles area-marks and refuses HTML-encoded operators", async () => {
+  it("documents x-leaf-pick with the corner-marks example and the pick host API", () => {
+    const prompt = branchTargetPrompt();
+    const corner = fixture("good-corner-marks");
+    expect(corner.hosts.min_host_api).toBe(PICK_MIN_HOST_API);
+    expect(prompt).toContain(corner.main_csx.replace(/\n$/, ""));
+    expect(prompt).toContain('"handle": {"type": "string", "x-leaf-pick": {"prompt": "Pick a closed polyline", "dxf": ["LWPOLYLINE"], "closed": true, "implied": true}}');
+    expect(prompt).toContain(`must set hosts.min_host_api to at least ${PICK_MIN_HOST_API}, the first plugin API version that supports picks.`);
+    expect(prompt).toContain(`hosts: {"min_release": 2023, "min_host_api": ${PICK_MIN_HOST_API}}`);
+    expect(prompt).toContain(`At most ${MAX_PICK_INPUTS} pick inputs, prompted in params.properties key order.`);
+    expect(prompt).toContain("The tool never prompts itself.");
+    expect(JSON.parse(prompt.split("\nparams: ")[1]!.split("\n")[0]!)).toEqual(corner.params);
+  });
+
+  it("checks x-leaf-pick declarations against the contract shape", () => {
+    const pick = { prompt: "Pick a closed polyline", dxf: ["LWPOLYLINE"], closed: true, implied: true };
+    const params = (properties: Record<string, unknown>) => ({ type: "object", properties });
+    const ok = (p: unknown) => ({ handle: { type: "string", "x-leaf-pick": p } });
+    const hosts = { min_release: 2023, min_host_api: PICK_MIN_HOST_API };
+    expect(pickDiagnostics(params(ok(pick)), hosts)).toEqual([]);
+    expect(pickDiagnostics(params(ok({ prompt: "x".repeat(120), dxf: PICK_DXF_NAMES.slice(0, 16) })), hosts)).toEqual([]);
+    expect(pickDiagnostics(params(ok(pick)), { min_release: 2023, min_host_api: PICK_MIN_HOST_API })).toEqual([]);
+    for (const hosts of [{ min_release: 2023, min_host_api: PICK_MIN_HOST_API - 1 }, {}, null]) {
+      expect(pickDiagnostics(params(ok(pick)), hosts)).toContainEqual({ rule: "V10", path: "hosts",
+        message: `x-leaf-pick inputs need hosts.min_host_api >= ${PICK_MIN_HOST_API}` });
+    }
+    expect(pickDiagnostics(params({ radius: { type: "integer" } }), {})).toEqual([]);
+    expect(pickDiagnostics(params({ radius: { type: "integer" } }))).toEqual([]);
+    const eight = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`p${i}`, ok(pick).handle]));
+    expect(pickDiagnostics(params(eight), hosts)).toEqual([]);
+    expect(pickDiagnostics(params({ ...eight, p8: ok(pick).handle }), hosts)).toEqual([
+      { rule: "V7", path: "params.properties", message: "at most 8 x-leaf-pick inputs" }]);
+    for (const [property, message] of [
+      [{ type: "integer", "x-leaf-pick": pick }, "only valid on a \"type\": \"string\" property"],
+      [{ type: ["string"], "x-leaf-pick": pick }, "only valid on a \"type\": \"string\" property"],
+      [{ type: "string", "x-leaf-pick": true }, "expected an object"],
+      [{ type: "string", "x-leaf-pick": { ...pick, layer: "A" } }, "unknown key layer"],
+      [{ type: "string", "x-leaf-pick": { ...pick, prompt: "" } }, "prompt must be"],
+      [{ type: "string", "x-leaf-pick": { ...pick, prompt: "x".repeat(121) } }, "prompt must be"],
+      [{ type: "string", "x-leaf-pick": { ...pick, prompt: "a\u0085b" } }, "prompt must be"],
+      [{ type: "string", "x-leaf-pick": { dxf: ["LINE"] } }, "prompt must be"],
+      [{ type: "string", "x-leaf-pick": { ...pick, dxf: [] } }, "dxf must list"],
+      [{ type: "string", "x-leaf-pick": { ...pick, dxf: ["lwpolyline"] } }, "dxf must list"],
+      [{ type: "string", "x-leaf-pick": { ...pick, dxf: ["WIPEOUT"] } }, "dxf must list"],
+      [{ type: "string", "x-leaf-pick": { ...pick, dxf: ["LINE", "LINE"] } }, "dxf must list"],
+      [{ type: "string", "x-leaf-pick": { ...pick, prompt: "   " } }, "prompt must be"],
+      [{ type: "string", "x-leaf-pick": { ...pick, prompt: "a" + String.fromCodePoint(0x200b) + "b" } }, "prompt must be"],
+      [{ type: "string", "x-leaf-pick": { ...pick, dxf: PICK_DXF_NAMES.slice(0, 17) } }, "dxf must list"],
+      [{ type: "string", "x-leaf-pick": { ...pick, closed: "true" } }, "closed must be a boolean"],
+      [{ type: "string", "x-leaf-pick": { ...pick, implied: 1 } }, "implied must be a boolean"],
+    ] as Array<[Record<string, unknown>, string]>) {
+      const diagnostics = pickDiagnostics(params({ handle: property }));
+      expect(diagnostics, JSON.stringify(property)).toContainEqual(expect.objectContaining({
+        rule: "V7", path: "params.properties.handle.x-leaf-pick", message: expect.stringContaining(message) }));
+    }
+    const corner = fixture("good-corner-marks");
+    const bad = { ...corner, params: { ...corner.params, properties: { handle: { type: "integer", "x-leaf-pick": pick } } } };
+    expect(() => prepareBranchPackage(bad, "pick-test", NOW)).toThrow("V7: params.properties.handle.x-leaf-pick:");
+  });
+
+  // One real-compiler case (allowlisted as the single skip in run-all-gates): area-marks, its HTML-entity
+  // repair, and the corner-marks pick example the author prompt teaches.
+  it.skipIf(!COMPILE_CONFIGURED)("compiles area-marks and corner-marks, and refuses HTML-encoded operators", async () => {
+    const corner = fixture("good-corner-marks");
+    const cornerPackage = prepareBranchPackage(corner, "compile-test", NOW);
+    expect((await branchCompileCheck(corner.name, cornerPackage.files)).status).toBe("accept");
     const proposal = fixture("good-area-marks");
     const good = prepareBranchPackage(proposal, "compile-test", NOW);
     expect((await branchCompileCheck(proposal.name, good.files)).status).toBe("accept");
@@ -182,7 +246,7 @@ describe("branch package proposals", () => {
     expect((await branchCompileCheck(proposal.name, repaired.files)).status).toBe("accept");
   }, 60_000);
 
-  it.each(["good-panel-count", "good-label-writer", "good-area-marks"])("writes exactly the recorded %s package", name => {
+  it.each(["good-panel-count", "good-label-writer", "good-area-marks", "good-corner-marks"])("writes exactly the recorded %s package", name => {
     const root = temp();
     const proposal = fixture(name);
     const submitted = submitBranchToolProposal(root, proposal, { session: "fixture-session", now: NOW });

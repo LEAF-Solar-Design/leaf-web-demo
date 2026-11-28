@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://leafautomation.ai/contracts/build-plan.v1.schema.json",
   "title": "leaf.build-plan.v1",
-  "$comment": "The server also checks the 16384-byte canonical UTF-8 limit and uniqueness of inputs by name.",
+  "$comment": "The server also checks the 16384-byte canonical UTF-8 limit and uniqueness of inputs by name. Pick inputs (R2-11) appear only on branch plans, at most 8 per plan.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "target", "change_kind", "tool_name", "title", "summary", "behavior", "inputs", "output", "capabilities", "undo", "assumptions", "acceptance", "answers"],
@@ -38,6 +38,13 @@
     }
   },
   "else": {"not": {"required": ["target_tool_name"]}},
+  "allOf": [
+    {
+      "if": {"properties": {"target": {"const": "branch"}}},
+      "then": {"properties": {"inputs": {"contains": {"properties": {"type": {"const": "pick"}}}, "minContains": 0, "maxContains": 8}}},
+      "else": {"properties": {"inputs": {"not": {"contains": {"properties": {"type": {"const": "pick"}}}}}}}
+    }
+  ],
   "$defs": {
     "multiline": {
       "type": "string",
@@ -51,10 +58,16 @@
       "required": ["name", "type", "default", "description"],
       "properties": {
         "name": {"$ref": "#/$defs/text", "pattern": "^[a-z][a-z0-9_]{0,39}$"},
-        "type": {"enum": ["string", "integer", "boolean", "number"]},
+        "type": {"enum": ["string", "integer", "boolean", "number", "pick"]},
         "default": {"type": ["string", "number", "boolean", "null"], "maxLength": 200},
-        "description": {"$ref": "#/$defs/text", "maxLength": 200}
+        "description": {"$ref": "#/$defs/text", "maxLength": 200},
+        "prompt": {"$ref": "#/$defs/text", "minLength": 1, "maxLength": 120},
+        "dxf": {"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": {"enum": ["LWPOLYLINE", "POLYLINE", "LINE", "ARC", "CIRCLE", "INSERT", "TEXT", "MTEXT", "HATCH", "POINT", "SPLINE", "ELLIPSE", "SOLID", "3DFACE", "3DSOLID", "REGION", "RAY", "XLINE", "DIMENSION", "LEADER", "MULTILEADER"]}},
+        "closed": {"type": "boolean"}
       },
+      "if": {"properties": {"type": {"const": "pick"}}},
+      "then": {"required": ["prompt", "dxf"], "properties": {"default": {"type": "null"}}},
+      "else": {"not": {"anyOf": [{"required": ["prompt"]}, {"required": ["dxf"]}, {"required": ["closed"]}]}},
       "allOf": [
         {"if": {"properties": {"type": {"const": "string"}}}, "then": {"properties": {"default": {"anyOf": [{"$ref": "#/$defs/text"}, {"type": "null"}]}}}},
         {"if": {"properties": {"type": {"const": "integer"}}}, "then": {"properties": {"default": {"type": ["integer", "null"]}}}},

@@ -4,7 +4,7 @@ import { TextEncoder } from 'node:util'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import BranchToolsPanel from './BranchToolsPanel.jsx'
-import { buildFormModel, describeDecision, formArgs, serializeArgs, TOOL_DECISIONS } from './branchTools.js'
+import { buildFormModel, describeDecision, formArgs, isToolResponse, serializeArgs, TOOL_DECISIONS } from './branchTools.js'
 
 const tool = { name: 'panel-gap-check', version: '1.0.0',
   packageDigest: '079bc8c277c9cba64b38d881a58fdaede524d19636d7400887fc99273bcd1f72',
@@ -94,12 +94,29 @@ describe('Branch tools panel', () => {
     'revoked', 'stale_revocation_list', 'unreviewed', 'unentitled', 'host_api_too_low',
     'capability_violation', 'timeout', 'compile_failed', 'script_error', 'revocation_invalid',
     'invalid_command', 'tool_not_installed', 'version_not_current', 'confirmation_declined',
-    'run_tool_unavailable'])('shows the host refusal %s in plain words', async (reason) => {
+    'pick_cancelled', 'run_tool_unavailable'])('shows the host refusal %s in plain words', async (reason) => {
     expect(Object.hasOwn(TOOL_DECISIONS, reason)).toBe(true)
     bridge.runTool.mockResolvedValue({ ...accepted, decision: 'refused', reason, result: null })
     render(<BranchToolsPanel bridge={bridge} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Run panel-gap-check' }))
     await screen.findByText(TOOL_DECISIONS[reason])
+  })
+
+  it('leaves pick inputs to AutoCAD and reports a cancelled pick as a plain status line', async () => {
+    const pick = { prompt: 'Pick a closed polyline', dxf: ['LWPOLYLINE'], closed: true }
+    bridge.listTools.mockResolvedValue({ tools: [{ ...tool, params: { type: 'object', required: ['handle'], properties: {
+      handle: { type: 'string', 'x-leaf-pick': pick }, radius: { type: 'integer', default: 6 },
+    } } }] })
+    const cancelled = { ...accepted, decision: 'refused', reason: 'pick_cancelled', result: null }
+    expect(isToolResponse('run_tool', cancelled)).toBe(true)
+    bridge.runTool.mockResolvedValue(cancelled)
+    render(<BranchToolsPanel bridge={bridge} />)
+    expect(await screen.findByLabelText('radius')).toBeTruthy()
+    expect(screen.queryByLabelText('handle')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Run panel-gap-check' }))
+    expect((await screen.findByText('Cancelled in AutoCAD: no object was picked. Nothing changed.')).getAttribute('role')).toBe('status')
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(bridge.runTool.mock.calls[0][0].args).toEqual({ radius: 6 })
   })
 
   it('shows transport failures and result truncation', async () => {
