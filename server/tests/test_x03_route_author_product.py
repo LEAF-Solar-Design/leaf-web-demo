@@ -95,9 +95,29 @@ def test_authored_route_crossings(ask, entities, crosses, contained):
         [footprint("Aisle", "C1", 0, 3), footprint("Aisle", "C2", 3, 6)],
         [], [], ["B1"],
     ),
-], ids=["bend", "two-gaps-and-array", "continuous-boundary"])
+    (
+        "Check which cable routes stay in the marked aisles.",
+        "LEAF-HOMERUN-START", [(1, 1), (3, 1)],
+        [footprint("Aisle", "C1", 0, 2)],
+        [(0, [2, 1], [3, 1], 1)], [], [],
+    ),
+    (
+        "Check which cable routes cross panel arrays.",
+        "leaf-homerun-end", [(1, 1), (5, 1)],
+        [footprint("Aisle", "C1", 0, 2), footprint("Array", "A1", 3, 4)],
+        [(0, [2, 1], [5, 1], 3)], ["B1"], [],
+    ),
+    (
+        "Check which cable routes stay in the marked aisles.",
+        "LEAF-FEEDER", [(1, 1), (3, 1)],
+        [footprint("Aisle", "C1", 0, 4)],
+        [], [], ["B1"],
+    ),
+], ids=["bend", "two-gaps-and-array", "continuous-boundary", "start-homerun", "end-homerun", "feeder"])
 def test_authored_route_departure_lengths(ask, layer, points, footprints, outside, crosses, contained):
-    result, overlay = run_authored(ask, [*footprints, entity(layer, "B1", points)])
+    result, overlay = run_authored(ask, [
+        *footprints, entity(layer, "B1", points), entity("LEAF-FEEDER-NOTES", "D1", points),
+    ])
     assert result["outside_aisle_intervals"] == [
         {"handle": "B1", "segment_index": index, "from": start, "to": end, "length": length}
         for index, start, end, length in outside

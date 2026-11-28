@@ -1,6 +1,8 @@
 """Standalone offline tool for a plan-view cable route and footprint check."""
 import re
 
+from solar_route_export import LAYERS
+
 
 _ROUTE = r"\b(?:cables?|wires?|wiring|conduits?|routes?)\b"
 _ROUTE_SUBJECT = rf"{_ROUTE}(?:\s+(?:paths?|runs?|segments?))?"
@@ -95,7 +97,8 @@ def location(point, edges):
 """
 
 
-ROUTE_CROSSINGS_BODY = PLANAR_GEOMETRY_BODY + r"""
+_EXPORTED_ROUTE_LAYERS = tuple(sorted(layer.casefold() for layer in LAYERS.values()))
+ROUTE_CROSSINGS_BODY = PLANAR_GEOMETRY_BODY + f"\n_EXPORTED_ROUTE_LAYERS = {_EXPORTED_ROUTE_LAYERS!r}\n" + r"""
 from math import hypot
 
 
@@ -155,8 +158,10 @@ def run(intake, params):
     for entity in intake.get("polylines", []):
         if entity.get("space") == "paper":
             continue
-        words = set(re.findall(r"[a-z0-9]+", entity.get("layer", "").casefold()))
-        if words & {"cable", "cables", "wire", "wires", "wiring", "conduit", "conduits", "route", "routes"}:
+        layer = entity.get("layer", "").casefold()
+        words = set(re.findall(r"[a-z0-9]+", layer))
+        route_words = {"cable", "cables", "wire", "wires", "wiring", "conduit", "conduits", "route", "routes"}
+        if layer in _EXPORTED_ROUTE_LAYERS or words & route_words:
             role = "route"
         elif words & {"aisle", "aisles"}:
             role = "aisle"
