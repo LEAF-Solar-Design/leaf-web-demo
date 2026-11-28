@@ -323,6 +323,36 @@ def run(intake, params):
         "links": links,
     }, None)
 """
+_SHEET_PLOT_SETUP_REQUEST = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\b(?:identify|report|show|list|check|flag|which)\b",
+        r"\b(?:sheets?|layouts?)\b",
+        r"\b(?:page\s+|plot\s+)?setups?\b",
+        r"\b(?:share[sd]?|sharing|valid|missing|conflict(?:ing|s)?|ambiguous|bindings?)\b",
+    )
+]
+_SHEET_PLOT_SETUPS_BODY = """
+def run(intake, params):
+    report = intake.get("dependency_report") or {}
+    bindings = report.get("plot_layout_bindings")
+    if bindings is None:
+        return ({"status": "unavailable", "message": "Reopen a DXF with saved sheet plot settings."}, None)
+
+    matched = {}
+    for binding in bindings:
+        if binding["setup_status"] == "matched":
+            name = binding["page_setup"]
+            group = matched.setdefault(name.casefold(), {"page_setup": name, "sheets": []})
+            group["sheets"].append(binding["layout"])
+
+    return ({
+        "status": "reported",
+        "scope": "saved_sheet_plot_settings",
+        "bindings": bindings,
+        "shared_setups": [group for group in matched.values() if len(group["sheets"]) > 1],
+    }, None)
+"""
 
 
 _PANEL_COUNT_TARGET = re.compile(
@@ -748,6 +778,11 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "check", "check_route_crossings"
         drawing_body = authored_route_crossings.ROUTE_CROSSINGS_BODY
         summary = "checks cable routes against array and aisle boundaries"
+
+    if drawing_body is None and all(pattern.search(description) for pattern in _SHEET_PLOT_SETUP_REQUEST):
+        verb, engine_op = "report", "sheet_plot_setups"
+        drawing_body = _SHEET_PLOT_SETUPS_BODY
+        summary = "reports saved page setup links and shared setups across sheets"
 
     if drawing_body is None and all(pattern.search(description) for pattern in _PANEL_MATERIAL_LINK_REQUEST):
         verb, engine_op = "report", "panel_material_links"

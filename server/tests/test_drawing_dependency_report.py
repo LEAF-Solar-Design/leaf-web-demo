@@ -545,3 +545,52 @@ def test_authored_panel_material_report_on_saved_dxf(case, prompt, status, defin
     }
     sandbox_status, payload = _run_source_in_sandbox(code, "authored.py", {"dependency_report": {}}, {})
     assert sandbox_status == "ok" and payload[0]["status"] == "unavailable"
+
+
+@pytest.mark.parametrize(("prompt", "devices", "expected_status"), [
+    ("Identify which sheets share a valid setup and which point to a missing or conflicting one.",
+     ["East.pc3"], "matched"),
+    ("List layouts with missing page setups.", [], "unresolved"),
+    ("Show sheets with conflicting plot setup bindings.", ["East.pc3", "Other.pc3"], "ambiguous"),
+])
+def test_authored_sheet_plot_setup_report_on_saved_dxf(prompt, devices, expected_status):
+    from io import StringIO
+
+    import ezdxf
+
+    from tool_loader import _run_source_in_sandbox
+    from tools_fallback import author_tool
+
+    doc = ezdxf.new("R2018")
+    for sheet, setup in (("West", "Office"), ("Center", "office"), ("East", "Edge")):
+        doc.layouts.new(sheet).dxf_layout.dxf.page_setup_name = setup
+    doc.objects.new_entity("PLOTSETTINGS", {
+        "page_setup_name": "Office", "plot_configuration_file": "Shared.pc3",
+    })
+    for device in devices:
+        doc.objects.new_entity("PLOTSETTINGS", {
+            "page_setup_name": "Edge", "plot_configuration_file": device,
+        })
+    saved = StringIO()
+    doc.write(saved)
+    intake = parse_dxf_bytes(saved.getvalue().encode("utf-8"))
+    manifest, code, _ = author_tool(prompt)
+    assert manifest["engine_op"] == "sheet_plot_setups"
+    assert manifest["capabilities"] == ["drawing.read"]
+
+    status, payload = _run_source_in_sandbox(code, "authored.py", intake, {})
+    assert status == "ok", payload
+    result, overlay = payload
+    assert overlay is None
+    assert result["scope"] == "saved_sheet_plot_settings"
+    assert result["shared_setups"] == [{"page_setup": "Office", "sheets": ["West", "Center"]}]
+    bindings = {binding["layout"]: binding for binding in result["bindings"]}
+    assert "Model" not in bindings
+    assert bindings["Layout1"]["setup_status"] == "direct"
+    assert bindings["Center"]["page_setup"] == "office"
+    assert bindings["East"]["page_setup"] == "Edge"
+    assert bindings["East"]["setup_status"] == expected_status
+    assert (bindings["East"]["setup_resources"] is not None) == (expected_status == "matched")
+
+    status, payload = _run_source_in_sandbox(code, "authored.py", {"dependency_report": {}}, {})
+    assert status == "ok" and payload[0]["status"] == "unavailable"
