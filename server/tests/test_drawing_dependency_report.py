@@ -665,3 +665,43 @@ def test_authored_note_style_report_on_saved_dxf(case, prompt, expected_status, 
 
     status, payload = _run_source_in_sandbox(code, "authored.py", {"dependency_report": {}}, {})
     assert status == "ok" and payload[0]["status"] == "unavailable"
+
+
+def test_authored_schedule_styles_distinguish_missing_cycles_and_competing_definitions():
+    from dxf_intake import parse_dxf_bytes
+    from tool_loader import _run_source_in_sandbox
+    from tools_fallback import author_tool
+
+    def table(handle, target):
+        return [(0, "ACAD_TABLE"), (5, handle), (100, "AcDbEntity"), (8, "0"),
+                (100, "AcDbTable"), (342, target), (91, 1), (92, 1),
+                (171, 1), (1, "Schedule value"), (342, "B2")]
+
+    def style(handle, description):
+        return [(0, "TABLESTYLE"), (5, handle), (100, "AcDbTableStyle"), (3, description)]
+
+    pairs = [(0, "SECTION"), (2, "ENTITIES")]
+    for handle, target in [("A1", "B1"), ("A2", "C1"), ("A3", "A3"), ("A4", "B2"),
+                           ("A5", "A6"), ("A6", "A5"), ("A7", "A5")]:
+        pairs.extend(table(handle, target))
+    pairs += [(0, "ENDSEC"), (0, "SECTION"), (2, "OBJECTS")]
+    pairs += style("B1", "Valid") + style("B2", "Field") + style("B2", "Office")
+    pairs += [(0, "ENDSEC"), (0, "EOF")]
+    intake = parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in pairs).encode())
+
+    prompt = "Identify which schedules have a missing style, a cycle or competing definitions."
+    manifest, code, _ = author_tool(prompt)
+    assert manifest["engine_op"] == "table_style_dependencies"
+    assert manifest["capabilities"] == ["drawing.read"]
+    status, payload = _run_source_in_sandbox(code, "authored.py", intake, {})
+    assert status == "ok", payload
+    report, overlay = payload
+    assert overlay is None and report["scope"] == "drawing_schedule_styles"
+    rows = {row["table_handle"]: row for row in report["schedules"]}
+    assert {handle: row["status"] for handle, row in rows.items()} == {
+        "A1": "resolved", "A2": "missing_style", "A3": "cyclic", "A4": "ambiguous",
+        "A5": "cyclic", "A6": "cyclic", "A7": "invalid_style",
+    }
+    assert rows["A1"]["style_handles"] == ["B1"]
+    assert [item["description"] for item in rows["A4"]["definitions"]] == ["Field", "Office"]
+    assert intake["dependency_report"]["external_files_opened"] is False

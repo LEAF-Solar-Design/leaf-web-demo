@@ -323,6 +323,23 @@ def run(intake, params):
         "links": links,
     }, None)
 """
+_TABLE_STYLE_REQUEST = [
+    re.compile(pattern, re.IGNORECASE) for pattern in (
+        r"\b(?:list|show|report|identify|check|flag|which)\b",
+        r"\b(?:schedules?|tables?)\b",
+        r"\bstyles?\b",
+        r"\b(?:missing|cyclic|cycles?|competing|conflicting|ambiguous|dangling|unresolved|links?|bindings?)\b",
+    )
+]
+_TABLE_STYLE_BODY = """
+def run(intake, params):
+    report = intake.get("dependency_report") or {}
+    links = report.get("table_style_links")
+    if links is None:
+        return ({"status": "unavailable", "message": "Reopen the DXF to check schedule styles."}, None)
+    return ({"status": "reported", "scope": "drawing_schedule_styles", "schedules": links}, None)
+"""
+
 _NOTE_STYLE_REQUEST = [
     re.compile(pattern, re.IGNORECASE) for pattern in (
         r"\b(?:list|show|report|identify|check|flag|which)\b",
@@ -799,6 +816,11 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "report", "note_styles"
         drawing_body = _NOTE_STYLE_BODY
         summary = "reports saved text multileader styles and their font definitions"
+
+    if drawing_body is None and all(pattern.search(description) for pattern in _TABLE_STYLE_REQUEST):
+        verb, engine_op = "report", "table_style_dependencies"
+        drawing_body = _TABLE_STYLE_BODY
+        summary = "reports schedule style links and competing definitions in the saved DXF"
 
     if drawing_body is None and all(pattern.search(description) for pattern in _SHEET_PLOT_SETUP_REQUEST):
         verb, engine_op = "report", "sheet_plot_setups"

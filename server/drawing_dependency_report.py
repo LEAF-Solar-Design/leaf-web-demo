@@ -166,6 +166,60 @@ def _resolve_note_style(link, styles):
     return {"status": status, "definitions": matches}
 
 
+def _table_style_fields(pairs, start, end):
+    subclass = None
+    handles = {}
+    for index in range(start, end):
+        code, value = pairs[index]
+        if code == 100:
+            subclass = value
+        elif subclass == "AcDbTable":
+            if code == 171:
+                break
+            if code == 342 and value and value != "0":
+                handles[value.upper()] = None
+    return list(handles)
+
+
+def _table_style_cycles(tables, styles):
+    usage = Counter(table["table_handle"] for table in tables)
+    edges = {}
+    for table in tables:
+        handle, targets = table["table_handle"], table["style_handles"]
+        if usage[handle] == 1 and handle not in styles and len(targets) == 1:
+            edges[handle] = targets[0]
+    cycles = set()
+    visited = set()
+    for handle in edges:
+        path = {}
+        target = handle
+        while target in edges and target not in visited and target not in path:
+            path[target] = len(path)
+            target = edges[target]
+        if target in path:
+            cycles.update(list(path)[path[target]:])
+        visited.update(path)
+    return cycles, usage
+
+
+def _resolve_table_styles(tables, styles):
+    cycles, usage = _table_style_cycles(tables, styles)
+    for table in tables:
+        handles = table["style_handles"]
+        definitions = [definition for handle in handles for definition in styles.get(handle, [])]
+        if len(handles) > 1 or len(definitions) + sum(usage[h] for h in handles) > 1:
+            status = "ambiguous"
+        elif table["table_handle"] in cycles:
+            status = "cyclic"
+        elif definitions:
+            status = "resolved"
+        elif any(usage[h] for h in handles):
+            status = "invalid_style"
+        else:
+            status = "missing_style"
+        table.update(status=status, definitions=definitions)
+
+
 def from_pairs(pairs, *, literal_text=None):
     dependencies = {}
     texture_maps = {}
@@ -179,6 +233,8 @@ def from_pairs(pairs, *, literal_text=None):
     line_linetypes = {}
     styles = {}
     note_style_links = []
+    table_style_links = []
+    table_styles = {}
     material_definitions = {}
     panel_material_links = []
     # Full drawings require owning sections. Bare decoded-record fragments keep
@@ -187,7 +243,7 @@ def from_pairs(pairs, *, literal_text=None):
     owners = {"BLOCK": {"BLOCKS"}, "STYLE": {"TABLES"}, "LTYPE": {"TABLES"},
               "IMAGEDEF": {"OBJECTS"}, "MATERIAL": {"OBJECTS"}, "PDFDEFINITION": {"OBJECTS"},
               "DWFDEFINITION": {"OBJECTS"}, "DGNDEFINITION": {"OBJECTS"},
-              "PLOTSETTINGS": {"OBJECTS"}, "LAYOUT": {"OBJECTS"},
+              "TABLESTYLE": {"OBJECTS"}, "PLOTSETTINGS": {"OBJECTS"}, "LAYOUT": {"OBJECTS"},
               "ACAD_PROXY_ENTITY": {"ENTITIES", "BLOCKS"}, "PROXY_ENTITY": {"ENTITIES", "BLOCKS"},
               "ACAD_PROXY_OBJECT": {"OBJECTS"}, "PROXY_OBJECT": {"OBJECTS"}}
     inline_entities = {"MTEXT", "MULTILEADER", "TABLE", "ACAD_TABLE"}
@@ -218,7 +274,7 @@ def from_pairs(pairs, *, literal_text=None):
         subclasses = {}
         subclass = None
         text_parts = []
-        capture_subclasses = kind in {"LAYOUT", "PLOTSETTINGS", "MATERIAL"} | _PANEL_OUTLINES
+        capture_subclasses = kind in {"LAYOUT", "PLOTSETTINGS", "MATERIAL", "TABLESTYLE"} | _PANEL_OUTLINES
         inline_record = kind in inline_entities
         while end < len(pairs) and pairs[end][0] != 0:
             tag, value = pairs[end]
@@ -265,6 +321,14 @@ def from_pairs(pairs, *, literal_text=None):
                 name = groups.get(code, "")
                 font_kind = "shape_font" if shape or code == 4 else "font"
                 add(font_kind, name, "font remapped", remapped_to="sans-serif")
+        elif kind == "TABLESTYLE" and section == "OBJECTS":
+            fields = subclasses.get("AcDbTableStyle")
+            if fields is not None and (handle := groups.get(5)):
+                handle = handle.upper()
+                table_styles.setdefault(handle, []).append({
+                    "style_handle": handle,
+                    "description": fields.get(3) or None,
+                })
         elif kind == "LTYPE":
             if name := groups.get(2):
                 linetype_names.add(name.casefold())
@@ -332,6 +396,16 @@ def from_pairs(pairs, *, literal_text=None):
                 link = _note_style_link(pairs, i + 1, end, groups)
                 if link is not None:
                     note_style_links.append((link, groups.get(330, "").upper(), section))
+            if kind in {"ACAD_TABLE", "TABLE"} and section in {"ENTITIES", "BLOCKS"}:
+                if handle := groups.get(5):
+                    layout = groups.get(410)
+                    if not layout and section == "ENTITIES" and groups.get(67, "0") == "0":
+                        layout = "Model"
+                    table_style_links.append(({
+                        "table_handle": handle.upper(),
+                        "layout": layout,
+                        "style_handles": _table_style_fields(pairs, i + 1, end),
+                    }, groups.get(330, "").upper()))
             # Font controls can span repeated DXF text chunks. Read them in
             # record order; a first-value map would lose split font names.
             # A tolerance frame stores its content in group 1 and its dimension style in group 3.
@@ -370,10 +444,14 @@ def from_pairs(pairs, *, literal_text=None):
         layout = layout_names.get(owner)
         if layout is not None or note_section == "ENTITIES":
             notes.append({**link, "layout": layout or link["layout"], **_resolve_note_style(link, styles)})
+    schedules = [{**link, "layout": layout_names.get(owner, link["layout"])}
+                 for link, owner in table_style_links]
+    _resolve_table_styles(schedules, table_styles)
     report = {"schema": "leaf.drawing-dependencies.v1",
             "explicit_line_linetypes_checked": True,
             "explicit_panel_material_links": panel_material_links,
             "note_style_links": notes,
+            "table_style_links": schedules,
             "scope": "local_dxf_records", "external_files_opened": False,
             "dependencies": [dependencies[key] for key in sorted(dependencies)],
             "coverage_note": "Lists dependency records preserved in the local DXF conversion; raw DWG metadata coverage requires an independent inventory."}
