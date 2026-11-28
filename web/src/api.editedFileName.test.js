@@ -15,7 +15,7 @@ describe('editedUploadName', () => {
   it.each([
     ['plant-room.dxf', 'plant-room.dxf'],
     ['Parking-Site-R2.dwg', 'Parking-Site-R2.dxf'],
-    ['C:\Demo\Parking-Site-R2.dwg', 'Parking-Site-R2.dxf'],
+    ['C:/Demo/Parking-Site-R2.dwg', 'Parking-Site-R2.dxf'],
   ])('keeps the drawing stem of %j', (input, expected) => {
     expect(editedUploadName(input)).toBe(expected)
   })
