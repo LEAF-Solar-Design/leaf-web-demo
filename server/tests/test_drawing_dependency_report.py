@@ -396,38 +396,54 @@ def test_sequential_intakes_have_drawing_local_reports_without_mutating_prior_ou
     assert {row["name"] for row in first["dependencies"]} == {"first.shx", "first.png"}
     assert {row["name"] for row in second["dependencies"]} == {"second.shx", "second.pdf"}
 
+def _dxf_sections(**sections):
+    pairs = []
+    for name, records in sections.items():
+        pairs.extend([(0, "SECTION"), (2, name.upper()), *records, (0, "ENDSEC")])
+    pairs.append((0, "EOF"))
+    return "".join(f"{code}\n{value}\n" for code, value in pairs).encode("utf-8")
+
+
+def _linetype_table(name, elements):
+    pattern = [(49, length) for length in (2.0, -1.0) * (elements // 2)]
+    fields = [pair for segment in pattern for pair in (segment, (74, 0))]
+    return [(0, "TABLE"), (2, "LTYPE"), (70, 1), (0, "LTYPE"), (5, "C1"),
+            (100, "AcDbSymbolTableRecord"), (100, "AcDbLinetypeTableRecord"),
+            (2, name), (70, 0), (72, 65), (73, elements), (40, 3.0 * (elements // 2)),
+            *fields, (0, "ENDTAB")]
+
+
+def _polyline(handle, points, *, flags=0, entity_fields=()):
+    vertices = [pair for x, y in points for pair in ((10, x), (20, y))]
+    return [(0, "LWPOLYLINE"), (5, handle), (100, "AcDbEntity"), *entity_fields,
+            (100, "AcDbPolyline"), (90, len(points)), (70, flags), *vertices]
+
+
 @pytest.mark.parametrize("elements", [2, 8, 32])
 def test_missing_explicit_line_linetypes_are_reported_with_references(elements):
-    from io import StringIO
-
-    import ezdxf
-
-    doc = ezdxf.new("R2018")
     pattern = f"Project_Dash_{elements}"
-    doc.linetypes.new(pattern, dxfattribs={
-        "pattern": [3.0 * (elements // 2), *([2.0, -1.0] * (elements // 2))],
-    })
-    model = doc.modelspace()
-    line = model.add_line((0, 0), (10, 0), dxfattribs={"linetype": pattern.lower()})
-    polyline = model.add_lwpolyline([(0, 2), (10, 2)], dxfattribs={"linetype": pattern.lower()})
-    model.add_line((0, 4), (10, 4), dxfattribs={"linetype": "Continuous"})
-    model.add_line((0, 6), (10, 6), dxfattribs={"linetype": "BYBLOCK"})
-    model.add_line((0, 8), (10, 8))
 
-    def missing_linetypes():
-        payload = StringIO()
-        doc.write(payload)
-        report = parse_dxf_bytes(payload.getvalue().encode("utf-8"))["dependency_report"]
+    def line(handle, y, linetype=()):
+        return [(0, "LINE"), (5, handle), (100, "AcDbEntity"), *linetype,
+                (100, "AcDbLine"), (10, 0), (20, y), (11, 10), (21, y)]
+
+    reference = [(6, pattern.lower())]
+    entities = [
+        *line("A1", 0, reference), *_polyline("A2", [(0, 2), (10, 2)], entity_fields=reference),
+        *line("A3", 4, [(6, "Continuous")]), *line("A4", 6, [(6, "BYBLOCK")]), *line("A5", 8),
+    ]
+
+    def missing_linetypes(table):
+        report = parse_dxf_bytes(_dxf_sections(tables=table, entities=entities))["dependency_report"]
         assert report["external_files_opened"] is False
         return [row for row in report["dependencies"] if row["kind"] == "linetype"]
 
-    assert missing_linetypes() == []
-    doc.linetypes.remove(pattern)
-    assert missing_linetypes() == [{
+    assert missing_linetypes(_linetype_table(pattern, elements)) == []
+    assert missing_linetypes([]) == [{
         "kind": "linetype", "name": pattern.lower(), "disposition": "missing definition",
         "references": [
-            {"entity_type": "LINE", "handle": line.dxf.handle},
-            {"entity_type": "LWPOLYLINE", "handle": polyline.dxf.handle},
+            {"entity_type": "LINE", "handle": "A1"},
+            {"entity_type": "LWPOLYLINE", "handle": "A2"},
         ],
     }]
 
@@ -438,26 +454,17 @@ def test_missing_explicit_line_linetypes_are_reported_with_references(elements):
     (32, "Check for missing line pattern definitions in this drawing."),
 ])
 def test_authored_export_linetype_check_uses_real_intake(elements, request_text):
-    from io import StringIO
-
-    import ezdxf
-
     from intake_dxf import intake_to_dxf
     from tool_loader import _run_source_in_sandbox
     from tools_fallback import author_tool
 
-    doc = ezdxf.new("R2018")
     name = f"Export_Dash_{elements}"
-    doc.linetypes.new(name, dxfattribs={
-        "pattern": [3.0 * (elements // 2), *([2.0, -1.0] * (elements // 2))],
-    })
-    model = doc.modelspace()
-    first = model.add_lwpolyline([(0, 0), (10, 0)], dxfattribs={"linetype": name})
-    second = model.add_lwpolyline([(0, 2), (10, 2)], dxfattribs={"linetype": name})
-    model.add_lwpolyline([(0, 4), (10, 4)], dxfattribs={"linetype": "Continuous"})
-    payload = StringIO()
-    doc.write(payload)
-    original = parse_dxf_bytes(payload.getvalue().encode("utf-8"))
+    entities = [
+        *_polyline("A1", [(0, 0), (10, 0)], entity_fields=[(8, "0"), (6, name)]),
+        *_polyline("A2", [(0, 2), (10, 2)], entity_fields=[(8, "0"), (6, name)]),
+        *_polyline("A3", [(0, 4), (10, 4)], entity_fields=[(8, "0"), (6, "Continuous")]),
+    ]
+    original = parse_dxf_bytes(_dxf_sections(tables=_linetype_table(name, elements), entities=entities))
     exported = parse_dxf_bytes(intake_to_dxf(original))
 
     manifest, code, _ = author_tool(request_text)
@@ -477,8 +484,8 @@ def test_authored_export_linetype_check_uses_real_intake(elements, request_text)
         "missing_linetypes": [{
             "kind": "linetype", "name": name, "disposition": "missing definition",
             "references": [
-                {"entity_type": "LWPOLYLINE", "handle": first.dxf.handle},
-                {"entity_type": "LWPOLYLINE", "handle": second.dxf.handle},
+                {"entity_type": "LWPOLYLINE", "handle": "A1"},
+                {"entity_type": "LWPOLYLINE", "handle": "A2"},
             ],
         }],
     }
@@ -494,34 +501,33 @@ def test_authored_export_linetype_check_uses_real_intake(elements, request_text)
     ("ambiguous", "List conflicting material definitions referenced by panels.", "ambiguous", ["Edge", "Other"]),
 ])
 def test_authored_panel_material_report_on_saved_dxf(case, prompt, status, definitions):
-    from io import StringIO
-
-    import ezdxf
-
     from tool_loader import _run_source_in_sandbox
     from tools_fallback import author_tool
 
-    doc = ezdxf.new("R2018")
-    doc.layers.new("Panels")
-    shared = doc.materials.new("Shared").dxf.handle
-    edge = doc.materials.new("Edge").dxf.handle
+    shared, edge = "B1", "B2"
     target = "FFFF" if case == "missing" else edge
     points = [(0, 0), (2, 0), (2, 1), (0, 1)]
-    model = doc.modelspace()
-    first = model.add_lwpolyline(points, close=True, dxfattribs={"layer": "Panels", "material_handle": shared})
-    second = model.add_polyline2d(points, close=True, dxfattribs={"layer": "Panels", "material_handle": shared})
-    third = model.add_lwpolyline(points, close=True, dxfattribs={"layer": "Panels", "material_handle": target})
-    model.add_lwpolyline(points, dxfattribs={"material_handle": shared})
-    doc.layout().add_lwpolyline(points, close=True, dxfattribs={"material_handle": shared})
-    duplicate = doc.materials.new("Other").dxf.handle if case == "ambiguous" else None
-    payload = StringIO()
-    doc.write(payload)
-    raw = payload.getvalue()
-    if duplicate:
-        record = f"  0\nMATERIAL\n  5\n{duplicate}\n"
-        assert raw.count(record) == 1
-        raw = raw.replace(record, f"  0\nMATERIAL\n  5\n{edge}\n")
-    intake = parse_dxf_bytes(raw.encode("utf-8"))
+    panel = [(8, "Panels"), (347, shared)]
+    classic = [(0, "POLYLINE"), (5, "A2"), (100, "AcDbEntity"), *panel,
+               (100, "AcDb2dPolyline"), (70, 1)]
+    for x, y in points:
+        classic.extend([(0, "VERTEX"), (100, "AcDbEntity"), (8, "Panels"),
+                        (100, "AcDbVertex"), (100, "AcDb2dVertex"), (10, x), (20, y)])
+    classic.append((0, "SEQEND"))
+    entities = [
+        *_polyline("A1", points, flags=1, entity_fields=panel), *classic,
+        *_polyline("A3", points, flags=1, entity_fields=[(8, "Panels"), (347, target)]),
+        *_polyline("A4", points, entity_fields=panel),
+        *_polyline("A5", points, flags=1, entity_fields=[*panel, (67, 1), (410, "Layout1")]),
+    ]
+
+    def material(handle, name):
+        return [(0, "MATERIAL"), (5, handle), (100, "AcDbMaterial"), (1, name)]
+
+    objects = material(shared, "Shared") + material(edge, "Edge")
+    if case == "ambiguous":
+        objects.extend(material(edge, "Other"))
+    intake = parse_dxf_bytes(_dxf_sections(entities=entities, objects=objects))
     assert intake["dependency_report"]["external_files_opened"] is False
 
     manifest, code, _ = author_tool(prompt)
@@ -535,11 +541,11 @@ def test_authored_panel_material_report_on_saved_dxf(case, prompt, status, defin
         "status": "reported",
         "scope": "direct_material_links_on_closed_model_space_outlines",
         "links": [
-            {"entity_handle": first.dxf.handle, "layer": "Panels", "material_handle": shared,
+            {"entity_handle": "A1", "layer": "Panels", "material_handle": shared,
              "status": "shared", "definitions": ["Shared"]},
-            {"entity_handle": second.dxf.handle, "layer": "Panels", "material_handle": shared,
+            {"entity_handle": "A2", "layer": "Panels", "material_handle": shared,
              "status": "shared", "definitions": ["Shared"]},
-            {"entity_handle": third.dxf.handle, "layer": "Panels", "material_handle": target,
+            {"entity_handle": "A3", "layer": "Panels", "material_handle": target,
              "status": status, "definitions": definitions},
         ],
     }
@@ -554,26 +560,18 @@ def test_authored_panel_material_report_on_saved_dxf(case, prompt, status, defin
     ("Show sheets with conflicting plot setup bindings.", ["East.pc3", "Other.pc3"], "ambiguous"),
 ])
 def test_authored_sheet_plot_setup_report_on_saved_dxf(prompt, devices, expected_status):
-    from io import StringIO
-
-    import ezdxf
-
     from tool_loader import _run_source_in_sandbox
     from tools_fallback import author_tool
 
-    doc = ezdxf.new("R2018")
-    for sheet, setup in (("West", "Office"), ("Center", "office"), ("East", "Edge")):
-        doc.layouts.new(sheet).dxf_layout.dxf.page_setup_name = setup
-    doc.objects.new_entity("PLOTSETTINGS", {
-        "page_setup_name": "Office", "plot_configuration_file": "Shared.pc3",
-    })
+    objects = []
+    for sheet, setup in (("Model", ""), ("Layout1", ""), ("West", "Office"),
+                         ("Center", "office"), ("East", "Edge")):
+        objects.extend([(0, "LAYOUT"), (100, "AcDbPlotSettings"), (1, setup),
+                        (100, "AcDbLayout"), (1, sheet)])
+    objects.extend([(0, "PLOTSETTINGS"), (100, "AcDbPlotSettings"), (1, "Office"), (2, "Shared.pc3")])
     for device in devices:
-        doc.objects.new_entity("PLOTSETTINGS", {
-            "page_setup_name": "Edge", "plot_configuration_file": device,
-        })
-    saved = StringIO()
-    doc.write(saved)
-    intake = parse_dxf_bytes(saved.getvalue().encode("utf-8"))
+        objects.extend([(0, "PLOTSETTINGS"), (100, "AcDbPlotSettings"), (1, "Edge"), (2, device)])
+    intake = parse_dxf_bytes(_dxf_sections(objects=objects))
     manifest, code, _ = author_tool(prompt)
     assert manifest["engine_op"] == "sheet_plot_setups"
     assert manifest["capabilities"] == ["drawing.read"]
@@ -604,47 +602,24 @@ def test_authored_sheet_plot_setup_report_on_saved_dxf(prompt, devices, expected
     ("blank", "Check notes for missing font definitions.", "missing_font", [None]),
 ])
 def test_authored_note_style_report_on_saved_dxf(case, prompt, expected_status, fonts):
-    from io import StringIO
-
-    import ezdxf
-    from ezdxf.math import Vec2
-    from ezdxf.render.mleader import ConnectionSide
-
     from tool_loader import _run_source_in_sandbox
     from tools_fallback import author_tool
 
-    doc = ezdxf.new("R2018")
-    style = doc.styles.new("Notes", {"font": "notes.shx"})
-    other = doc.styles.new("Other", {"font": "other.shx"})
-    layout = doc.modelspace() if case == "resolved" else doc.layouts.new("East")
-    builder = layout.add_multileader_mtext(dxfattribs={"layer": "Notes-East"})
-    builder.set_content("Service disconnect", char_height=1, style="Notes")
-    builder.add_leader_line(ConnectionSide.left, [Vec2(0, 0), Vec2(2, 0)])
-    builder.build(Vec2(10, 5))
-    note, = layout.query("MULTILEADER")
-    block = doc.blocks.new("NoteTemplate")
-    block_note = block.add_multileader_mtext()
-    block_note.set_content("Template note", char_height=1, style="Other")
-    block_note.add_leader_line(ConnectionSide.left, [Vec2(0, 0), Vec2(2, 0)])
-    block_note.build(Vec2(10, 5))
-    output = StringIO()
-    doc.write(output)
-    source = output.getvalue()
-    style_handle = style.dxf.handle
-    if case == "missing":
-        marker = f"343\n{style_handle}\n"
-        assert source.count(marker) == 1
-        style_handle = "BADF00D"
-        source = source.replace(marker, f"343\n{style_handle}\n")
-    if case == "ambiguous":
-        marker = f"  5\n{other.dxf.handle}\n"
-        assert source.count(marker) == 1
-        source = source.replace(marker, f"  5\n{style_handle}\n")
-    if case == "blank":
-        marker = "  3\nnotes.shx\n"
-        assert source.count(marker) == 1
-        source = source.replace(marker, "  3\n\n")
-    intake = parse_dxf_bytes(source.encode())
+    style_handle = "BADF00D" if case == "missing" else "B1"
+    other_handle = "B1" if case == "ambiguous" else "B2"
+    table = [(0, "TABLE"), (2, "STYLE"), (70, 2),
+             (0, "STYLE"), (5, "B1"), (2, "Notes"), (3, "" if case == "blank" else "notes.shx"),
+             (0, "STYLE"), (5, other_handle), (2, "Other"), (3, "other.shx"), (0, "ENDTAB")]
+
+    def note(handle, owner, style, text):
+        return [(0, "MULTILEADER"), (5, handle), (330, owner), (100, "AcDbEntity"), (8, "Notes-East"),
+                (100, "AcDbMLeader"), (300, "CONTEXT_DATA{"), (304, text), (301, "}"),
+                (172, 2), (343, style)]
+
+    blocks = [(0, "BLOCK"), (2, "NoteTemplate"), *note("A2", "C2", "B2", "Template note"), (0, "ENDBLK")]
+    entities = note("A1", "C1", style_handle, "Service disconnect")
+    objects = [(0, "LAYOUT"), (100, "AcDbLayout"), (1, "East"), (330, "C1")] if case != "resolved" else []
+    intake = parse_dxf_bytes(_dxf_sections(tables=table, blocks=blocks, entities=entities, objects=objects))
     assert intake["dependency_report"]["external_files_opened"] is False
 
     manifest, code, _ = author_tool(prompt)
@@ -656,7 +631,7 @@ def test_authored_note_style_report_on_saved_dxf(case, prompt, expected_status, 
     assert result["scope"] == "drawing_text_multileader_styles"
     assert overlay is None
     row, = result["notes"]
-    assert row["note_handle"] == note.dxf.handle
+    assert row["note_handle"] == "A1"
     assert row["layer"] == "Notes-East"
     assert row["layout"] == ("Model" if case == "resolved" else "East")
     assert row["style_handles"] == [style_handle]
