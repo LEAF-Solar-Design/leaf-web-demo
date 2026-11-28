@@ -64,17 +64,26 @@ def run(intake, params):
         return [family for family, forms in forms_by_family.items() if tokens & forms]
 
     observed = {}
+    handle_counts = {}
     for row in intake.get("layers") or []:
         layer = row.get("name") if isinstance(row, dict) else row
         if isinstance(layer, str):
-            observed[layer] = 0
+            observed[layer] = []
     for key in ("polylines", "inserts", "faces3d"):
         for entity in intake.get(key) or []:
             layer = entity.get("layer", "0")
+            handle = entity.get("handle")
+            # Intake uses L-prefixed synthetic IDs when a DXF handle is absent.
+            if isinstance(handle, str) and re.fullmatch(r"[0-9A-Fa-f]+", handle):
+                handle = handle.upper()
+                handle_counts[handle] = handle_counts.get(handle, 0) + 1
+            else:
+                handle = None
             if isinstance(layer, str):
-                observed[layer] = observed.get(layer, 0) + 1
+                observed.setdefault(layer, []).append(handle)
 
     counts = {family: {} for family in families}
+    member_handles_by_layer = {}
     overlaps = []
     total = 0
     rows = []
@@ -82,7 +91,12 @@ def run(intake, params):
         matched = matching_families(layer)
         if not matched:
             continue
-        quantity = observed[layer]
+        handles = observed[layer]
+        quantity = len(handles)
+        # null means membership cannot be located exactly. [] is a known empty layer.
+        member_handles_by_layer[layer] = (
+            sorted(handles) if all(handle_counts.get(handle) == 1 for handle in handles) else None
+        )
         for family in matched:
             counts[family][layer] = quantity
         total += quantity
@@ -94,7 +108,10 @@ def run(intake, params):
                          "Yes" if overlap else ""])
 
     if len(families) == 1:
-        return ({"counts": counts[families[0]], "total": total}, None)
-    return ({"table": {"columns": ["Layer", *families, "Overlap"], "rows": rows},
-             "overlapping_layers": overlaps, "total": total}, None)
+        result = {"counts": counts[families[0]], "total": total}
+    else:
+        result = {"table": {"columns": ["Layer", *families, "Overlap"], "rows": rows},
+                  "overlapping_layers": overlaps, "total": total}
+    result["member_handles_by_layer"] = member_handles_by_layer
+    return result, None
 '''
