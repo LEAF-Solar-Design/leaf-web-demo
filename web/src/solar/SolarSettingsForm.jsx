@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import { readProjectSolarWorkerRefusal, projectSolarWorkerRefusal } from './solarProjectCompletion.js';
 import {
   SETTINGS_FIELDS, DRAWING_UNITS, SOLAR_SETTINGS_REASONS, L2_COLLECTORS_NOTE,
@@ -9,6 +9,9 @@ import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBinding
 
 const projectReasonCode = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}$');
 const projectJobId = new RegExp('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$');
+const panelsInSequenceHelp = 'For manual Roof sizing, this is the maximum number of panels per string for layout. Electrical sizing is checked separately.';
+const settingsSizingNotice = 'Some settings changes require string sizing again.';
+
 function projectFeedback(outcome, admission = null) {
   const code = admission?.error?.reason_code ?? outcome?.envelope?.error?.reason_code ?? outcome?.reason;
   return { outcome, admission, text: PROJECT_SETTINGS_REASONS.preview_refused,
@@ -32,6 +35,7 @@ function exactSettingsPreview(outcome, digest) {
 
 function ProjectSettingsForContext(props) {
   const { solarBinding, authorityKey, projectClient, catalogDigest, newProjectIntentKey, onProjectSubmit, busy, onClose } = props;
+  const panelsInSequenceHelpId = useId();
   let binding = null;
   let bindingKey = null;
   try { binding = createSolarDrawingBinding(solarBinding); bindingKey = solarDrawingBindingKey(binding); } catch { /* local refusal */ }
@@ -365,7 +369,7 @@ function ProjectSettingsForContext(props) {
           <button type="button" onClick={() => change(setProjectDrafts, (previous) => ({ ...previous, latitude: '', longitude: '' }))}>Clear coordinates</button>
           {!effectiveZip && <p>ZIP code is blank. You can save setup. Cloud string sizing needs a saved ZIP code.</p>}
           {zipChanged && coordinatesUnchanged && <p>Changing the ZIP code clears saved coordinates unless you enter both coordinates again.</p>}
-          {hasChanges && <p>Re-size strings after this change</p>}
+          {hasChanges && <p>{settingsSizingNotice}</p>}
           {SETTINGS_FIELDS.map(({ key, label, kind }) => {
             const hasDraft = Object.prototype.hasOwnProperty.call(drafts, key);
             if (kind === 'boolean') {
@@ -385,19 +389,24 @@ function ProjectSettingsForContext(props) {
                 </div>
               );
             }
+            const helpId = key === 'panels_in_sequence' ? panelsInSequenceHelpId : undefined;
             return (
-              <label className="param" key={key}>
-                <span>{label}</span>
-                <input
-                  type="text"
-                  value={hasDraft ? drafts[key] : String(state.settings[key])}
-                  aria-invalid={hasDraft && !parseField(key, drafts[key]).ok ? 'true' : undefined}
-                  onChange={(event) => {
-                    const text = event.target.value;
-                    change(setDrafts, (previous) => ({ ...previous, [key]: text }));
-                  }}
-                />
-              </label>
+              <React.Fragment key={key}>
+                <label className="param">
+                  <span>{label}</span>
+                  <input
+                    type="text"
+                    value={hasDraft ? drafts[key] : String(state.settings[key])}
+                    aria-describedby={helpId}
+                    aria-invalid={hasDraft && !parseField(key, drafts[key]).ok ? 'true' : undefined}
+                    onChange={(event) => {
+                      const text = event.target.value;
+                      change(setDrafts, (previous) => ({ ...previous, [key]: text }));
+                    }}
+                  />
+                </label>
+                {helpId && <p id={helpId}>{panelsInSequenceHelp}</p>}
+              </React.Fragment>
             );
           })}
           {state.mode === 'initialize' && (
@@ -459,6 +468,7 @@ export default function SolarSettingsForm(props) {
 }
 
 function SettingsForContext({ context, readIntake, readVersions, checkoutHeld, busy, onSubmit, onClose, runMessage }) {
+  const panelsInSequenceHelpId = useId();
   const [views, setViews] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [projectDrafts, setProjectDrafts] = useState({});
@@ -543,7 +553,7 @@ function SettingsForContext({ context, readIntake, readVersions, checkoutHeld, b
           <button type="button" onClick={() => setProjectDrafts((previous) => ({ ...previous, latitude: '', longitude: '' }))}>Clear coordinates</button>
           {!effectiveZip && <p>ZIP code is blank. You can save setup. Cloud string sizing needs a saved ZIP code.</p>}
           {zipChanged && coordinatesUnchanged && <p>Changing the ZIP code clears saved coordinates unless you enter both coordinates again.</p>}
-          {hasChanges && <p>Re-size strings after this change</p>}
+          {hasChanges && <p>{settingsSizingNotice}</p>}
           {SETTINGS_FIELDS.map(({ key, label, kind }) => {
             const hasDraft = Object.prototype.hasOwnProperty.call(drafts, key);
             if (kind === 'boolean') {
@@ -563,19 +573,24 @@ function SettingsForContext({ context, readIntake, readVersions, checkoutHeld, b
                 </div>
               );
             }
+            const helpId = key === 'panels_in_sequence' ? panelsInSequenceHelpId : undefined;
             return (
-              <label className="param" key={key}>
-                <span>{label}</span>
-                <input
-                  type="text"
-                  value={hasDraft ? drafts[key] : String(state.settings[key])}
-                  aria-invalid={hasDraft && !parseField(key, drafts[key]).ok ? 'true' : undefined}
-                  onChange={(event) => {
-                    const text = event.target.value;
-                    setDrafts((previous) => ({ ...previous, [key]: text }));
-                  }}
-                />
-              </label>
+              <React.Fragment key={key}>
+                <label className="param">
+                  <span>{label}</span>
+                  <input
+                    type="text"
+                    value={hasDraft ? drafts[key] : String(state.settings[key])}
+                    aria-describedby={helpId}
+                    aria-invalid={hasDraft && !parseField(key, drafts[key]).ok ? 'true' : undefined}
+                    onChange={(event) => {
+                      const text = event.target.value;
+                      setDrafts((previous) => ({ ...previous, [key]: text }));
+                    }}
+                  />
+                </label>
+                {helpId && <p id={helpId}>{panelsInSequenceHelp}</p>}
+              </React.Fragment>
             );
           })}
           {state.mode === 'initialize' && (
