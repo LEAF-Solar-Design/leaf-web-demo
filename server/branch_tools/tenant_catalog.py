@@ -124,6 +124,17 @@ def _entry(root: str | Path, tenant_id: str, name: str, version: str,
         return None
 
 
+def published_digest(root, tenant_id: str, name: str, version: str) -> str | None:
+    try:
+        path = _version(root, tenant_id, name, version)
+        value = _json(_read(path / "envelope.json", ENVELOPE_LIMIT))
+        if _envelope(value, tenant_id, name, version):
+            return value["package"]["package_digest"]
+    except (*_READ_ERRORS, TenantCatalogError, KeyError, TypeError):
+        pass
+    return None
+
+
 def list_versions(root: str | Path, tenant_id: str, *, include_revoked: bool = False) -> list[dict]:
     try:
         directory = _tenant(root, tenant_id)

@@ -79,6 +79,7 @@
           "compare_selections": {"type": ["object", "null"], "default": null, "properties": {"by": {"type": "string", "enum": ["block", "set_id"]}, "before": {"type": "array", "items": {"type": "string"}}, "after": {"type": "array", "items": {"type": "string"}}}, "required": ["by", "before", "after"], "additionalProperties": false, "description": "Compare exact block names or selected set IDs across two selections. Empty denominators yield undefined deltas."},
           "top_layers": {"type": "integer", "minimum": 1, "description": "Rank layers by selected physical module count. Include ties at the requested cutoff."},
           "highlight_ranked_layers": {"type": "boolean", "description": "With top_layers, highlight only the ranked layers, including ties. Totals still cover the full selection."},
+          "visible_layers_only": {"type": "boolean", "description": "Exclude off or frozen drawing layers. Saved layer filters do not change drawing visibility."},
           "panel_scope": {"type": "string", "enum": ["all_layers", "roof_layers"], "description": "For a layer breakdown, select explicitly panel-named blocks in this scope. Unknown candidate roles require a pick."},
           "group_by": {"type": "string", "enum": ["layer"], "description": "Break the selected physical module count down by drawing layer."},
           "set_id": {"type": "string", "description": "Single set identity from this drawing's listing. Omit to list sets."},
