@@ -25,7 +25,7 @@ import urllib.parse
 from datetime import datetime
 from typing import Any, Dict, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -358,6 +358,56 @@ def grant_status(tenant=Depends(_require_grant_owner)):
     except ValueError:
         return _unreachable("harness returned non-JSON")
     return deps.tenant_echo(_status_body(hj), tenant)
+
+
+@router.get("/api/tenant/project-source-authoring/readiness")
+def project_source_authoring_readiness(request: Request, tenant=Depends(_require_grant_owner)):
+    """Project-source posture and effective grant routing, without acquiring a grant."""
+    if not isinstance(tenant, deps.TenantContext) or not tenant.subject:
+        raise HTTPException(status_code=401, detail="active tenant authority required")
+    if request.query_params:
+        raise HTTPException(status_code=400, detail="readiness uses the active tenant")
+    base = _harness_url()
+    if not base:
+        return _unreachable("LEAF_AUTHOR_HARNESS_URL not configured")
+    try:
+        import broker_client
+        import requests
+
+        response = requests.get(
+            f"{base}/internal/project-repository-source/readiness",
+            headers={**broker_client.harness_headers(), "X-Tenant-Id": str(tenant)},
+            timeout=30,
+            allow_redirects=False,
+        )
+        if response.status_code != 200:
+            return _unreachable("authoring readiness read failed")
+        observed = response.json()
+    except (requests.RequestException, ValueError):
+        return _unreachable("authoring readiness read failed")
+    schema = "leaf.project-source-authoring-readiness.v1"
+    if (not isinstance(observed, dict) or observed.get("schema") != schema
+            or observed.get("tenant_id") != str(tenant)):
+        return _unreachable("invalid authoring readiness binding")
+    posture = (
+        observed.get("dependency_ready"), observed.get("route_class"),
+        observed.get("eligible"), observed.get("reason"),
+    )
+    if (type(posture[0]) is not bool or type(posture[2]) is not bool or posture not in (
+        (True, "approved_subscription_pool", True, "ready"),
+        (True, "tenant_override", False, "override_present"),
+        (True, "paid_or_mixed_pool", False, "paid_route_selectable"),
+        (True, "none", False, "no_eligible_grant"),
+        (True, "unknown", False, "metadata_unavailable"),
+        (False, "unknown", False, "dependency_unavailable"),
+    )):
+        return _unreachable("invalid authoring readiness projection")
+    dependency_ready, route_class, eligible, reason = posture
+    return JSONResponse(
+        headers={"Cache-Control": "no-store"},
+        content={"schema": schema, "tenant_id": str(tenant), "dependency_ready": dependency_ready,
+                 "route_class": route_class, "eligible": eligible, "reason": reason},
+    )
 
 
 @router.delete("/api/tenant/claude-grant")

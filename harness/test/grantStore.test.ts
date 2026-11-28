@@ -153,6 +153,35 @@ describe("FileTenantGrantStore", () => {
     expect(await store.get("acme")).toEqual({ kind: "oauth", oauthToken: FAKE });
   });
 
+  it("projects selectable kinds without reading legacy fallbacks or changing the grant record", async () => {
+    let fallbackCalls = 0;
+    const store = new FileTenantGrantStore({ dir, envFallback: { get: async () => {
+      fallbackCalls += 1;
+      return null;
+    } } });
+    expect(await store.selectableGrantKinds("demo-tenant")).toEqual([]);
+    expect(fallbackCalls).toBe(0);
+
+    await store.put("acme", FAKE, "oauth", "max", "max");
+    const quotaLease = await store.acquire("acme");
+    await store.settle("acme", quotaLease.lease_id, {
+      usage: { cost_tokens: 0 },
+      stop_reason: "llm_quota_exhausted",
+      retry_after_s: 600,
+    });
+    await store.put("acme", FAKE2, "api_key", "paid");
+    const paidLease = await store.acquire("acme");
+    await store.settle("acme", paidLease.lease_id, {
+      usage: { cost_tokens: 0 },
+      stop_reason: "error",
+      error_code: "authentication_failed",
+    });
+    const snapshot = () => readdirSync(dir).map(file => readFileSync(join(dir, file)));
+    const before = snapshot();
+    expect(await store.selectableGrantKinds("acme")).toEqual([]);
+    expect(snapshot()).toEqual(before);
+  });
+
   it("skips a quota-cooled mount and fails closed when every eligible mount is cooling", async () => {
     const store = new FileTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
     await store.put("acme", FAKE, "oauth", "team-one", "team");
@@ -357,6 +386,11 @@ describe("EnvelopeTenantGrantStore", () => {
     expect(await store.diagnostic("missing")).toMatchObject({
       backend: "vault", linked: false, record_format: "missing", degraded: false,
     });
+  });
+
+  it("keeps vault readiness unavailable without opening the sealed record", async () => {
+    writeFileSync(join(dir, "acme.grant.json"), "invalid envelope", "utf8");
+    await expect(store.selectableGrantKinds("acme")).resolves.toBeNull();
   });
 
   it("rejects traversal / separator tenant ids (cannot escape the grants dir)", async () => {

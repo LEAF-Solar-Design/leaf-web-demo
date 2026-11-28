@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentGrant, GrantLease, GrantSettlement, OAuthGrantProvider } from "../src/ports/index.js";
 import { TenantAnthropicGrantProvider } from "../src/ports/impl/tenantAnthropicGrant.js";
+import { FileTenantGrantStore } from "../src/ports/impl/oauthGrantProvider.js";
 import { FileTenantProviderStore, TenantProviderConfigError } from "../src/ports/impl/tenantProviderStore.js";
 import { createTenantRunnerFor } from "../src/ports/impl/tenantRunnerFor.js";
 import { buildScrubbedEnv } from "../src/vendor/mushy-author/ports/impl/agentSdkRunner.js";
@@ -21,6 +22,41 @@ afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 async function writeRecord(raw: unknown = record) {
   await writeFile(join(dir, "film-tenant.provider.json"), JSON.stringify(raw));
 }
+
+describe("project authoring route readback", () => {
+  it.each([
+    { name: "Max only", override: false, mixed: false,
+      route_class: "approved_subscription_pool", eligible: true, reason: "ready" },
+    { name: "tenant override before Max", override: true, mixed: false,
+      route_class: "tenant_override", eligible: false, reason: "override_present" },
+    { name: "selectable key in a mixed pool", override: false, mixed: true,
+      route_class: "paid_or_mixed_pool", eligible: false, reason: "paid_route_selectable" },
+  ])("reads $name from the real stores without selecting or acquiring a grant", async scenario => {
+    if (scenario.override) await writeRecord();
+    const store = new FileTenantGrantStore({ dir, envFallback: { get: async () => null } });
+    await store.put("film-tenant", "fake-oauth-account", "oauth", "Private label", "max");
+    if (scenario.mixed) await store.put("film-tenant", "fake-paid-account", "api_key", "Paid");
+    const oauth = { getGrant: vi.fn(), acquireGrant: vi.fn(), settleGrant: vi.fn() };
+    const provider = new TenantAnthropicGrantProvider(oauth, dir,
+      { LEAF_TENANT_PROVIDER_HOSTS: env.LEAF_TENANT_PROVIDER_HOSTS });
+    const status = vi.fn(() => store.selectableGrantKinds("film-tenant"));
+    expect(await provider.observeProjectAuthoringRoute("film-tenant", status)).toEqual({
+      route_class: scenario.route_class, eligible: scenario.eligible, reason: scenario.reason,
+    });
+    expect(status).toHaveBeenCalledTimes(scenario.override ? 0 : 1);
+    for (const method of Object.values(oauth)) expect(method).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for unreadable metadata instead of falling through to the pool", async () => {
+    await writeFile(join(dir, "film-tenant.provider.json"), "{");
+    const provider = new TenantAnthropicGrantProvider({ getGrant: vi.fn() }, dir, env);
+    const status = vi.fn();
+    expect(await provider.observeProjectAuthoringRoute("film-tenant", status)).toEqual({
+      route_class: "unknown", eligible: false, reason: "metadata_unavailable",
+    });
+    expect(status).not.toHaveBeenCalled();
+  });
+});
 
 describe("tenant Anthropic grant routing", () => {
   it("returns the selected tenant's key, base URL and model without delegating", async () => {

@@ -55,6 +55,7 @@ import { PortfolioProposalError, PortfolioProposalService, type PortfolioProposa
 import { CAMPAIGN_SOURCE_BODY_LIMIT, dispatchCampaignSource, type CampaignSourceService } from "./agent/campaignSourceIntegration.js";
 import { ProjectRepositoryEditCoordinator, ProjectRepositoryEditSettlementUnavailable } from "./agent/projectRepositoryEditCoordinator.js";
 import { authorProjectSource, type ProjectSourceAuthorDependencies } from "./agent/projectSourceAuthoring.js";
+import type { ProjectAuthoringRoute } from "./ports/impl/tenantAnthropicGrant.js";
 import { SdkProjectVideoInspector } from "./agent/projectVideoInspection.js";
 import { SdkRepoEditor } from "./vendor/mushy-author/ports/impl/repoEditRunner.js";
 import { redactTokens } from "./redact.js";
@@ -855,6 +856,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
   auth?: HarnessAuthConfig;
   projectRepositoryEdits?: CampaignSourceService;
   projectSourceAuthoring?: ProjectSourceAuthorDependencies;
+  projectSourceAuthoringRoute?: (tenantId: string) => Promise<ProjectAuthoringRoute>;
   projectStaticPreviews?: PrivatePreviewReader;
   projectStaticBuilds?: Pick<PrivateBuildLifecycle,"submit"|"observe">;
   projectStaticViews?: Pick<DurablePrivateNextViews,"observe"|"asset">;
@@ -1286,6 +1288,25 @@ export function createHarness(ports: HarnessPorts, opts?: {
           return send(res, 409, { error: { code: "worker_run_not_active", message: "worker run not active" } });
         }
         return send(res, 200, binding);
+      }
+
+      if (method === "GET" && path === "/internal/project-repository-source/readiness") {
+        const requiredAuth = harnessAuthDenial(req, { ...auth, enabled: true });
+        if (requiredAuth) return send(res, 401, requiredAuth);
+        res.setHeader("cache-control", "no-store");
+        const tenantId = authorityHeader(req, "x-tenant-id");
+        if (!tenantId || requestUrl.search) {
+          return send(res, 400, { error: { code: "invalid_readiness_scope" } });
+        }
+        const dependencyReady = Boolean(authoredExecutionEnabled() && opts?.projectRepositoryEdits
+          && opts.projectSourceAuthoring);
+        const route = dependencyReady && opts?.projectSourceAuthoringRoute
+          ? await opts.projectSourceAuthoringRoute(tenantId)
+          : { route_class: "unknown", eligible: false,
+            reason: dependencyReady ? "metadata_unavailable" : "dependency_unavailable" };
+        return send(res, 200, { schema: "leaf.project-source-authoring-readiness.v1",
+          tenant_id: tenantId, dependency_ready: dependencyReady,
+          route_class: route.route_class, eligible: route.eligible, reason: route.reason });
       }
 
       if (method === "POST" && path === "/internal/project-repository-source/author") {

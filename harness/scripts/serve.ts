@@ -225,7 +225,11 @@ function spineTurnRunner(
 }
 
 /** Compose the real multi-tenant ports. */
-function buildPorts(standardServicesResolver: StandardServicesResolver | undefined): HarnessPorts & { tenantRepo: TenantRepoProviderImpl; labDocuments?: LabDocumentPort } {
+function buildPorts(standardServicesResolver: StandardServicesResolver | undefined): HarnessPorts & {
+  tenantRepo: TenantRepoProviderImpl;
+  grantAdmin: ReturnType<typeof createTenantGrantStore>;
+  labDocuments?: LabDocumentPort;
+} {
   // F18 seam: the backend is selected by $LEAF_GRANT_STORE (default `file` →
   // FileTenantGrantStore under $LEAF_GRANTS_DIR). An explicit `vault` request with no
   // vault wired must fail LOUDLY at boot — never silently persist tokens to disk.
@@ -523,12 +527,17 @@ async function main(): Promise<void> {
         grantProvider: ports.oauth,
       })
     : undefined;
+  const { oauth: sourceGrantProvider, grantAdmin } = ports;
   const serverOptions = {
     portfolioProposals: new PortfolioProposalService({ oauth: ports.oauth }),
     ...(projectRepositoryEdits ? { projectRepositoryEdits,
       projectSourceAuthoring: { oauth: ports.oauth,
         editor: new SdkRepoEditor({ maxTurns: 24, maxWallTimeMs: 240000 }),
-        videoInspector: new SdkProjectVideoInspector() } } : {}),
+        videoInspector: new SdkProjectVideoInspector() },
+      ...(sourceGrantProvider instanceof TenantAnthropicGrantProvider
+        ? { projectSourceAuthoringRoute: (tenantId: string) =>
+          sourceGrantProvider.observeProjectAuthoringRoute(tenantId, () => grantAdmin.selectableGrantKinds(tenantId)) }
+        : {}) } : {}),
     ...(standardServicesApproval ? { standardServicesApproval } : {}),
     ...privateStaticPreview,
     ...(glugMushyAuthor ? { glugMushyAuthor } : {}),

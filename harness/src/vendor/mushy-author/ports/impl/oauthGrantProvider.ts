@@ -233,6 +233,14 @@ const LEASE_TTL_MS = 5 * 60 * 1000;
 const LEASE_RESERVATION_TOKENS = 100_000;
 const ELIGIBLE_OAUTH_PLANS: ReadonlySet<GrantPlan> = new Set(["pro", "max", "team", "enterprise"]);
 const DEFAULT_QUOTA_COOLDOWN_S = 15 * 60;
+
+function isAttested(account: PersistedGrantAccountV3): boolean {
+  return account.kind === "api_key" || (account.plan !== null && ELIGIBLE_OAUTH_PLANS.has(account.plan));
+}
+
+function cooldownElapsed(account: PersistedGrantAccountV3, now: number): boolean {
+  return account.cooldown_until === null || Date.parse(account.cooldown_until) <= now;
+}
 /**
  * These provider refusals exclude the account from automatic selection. Relink with put,
  * or recover the account by activating its id via PATCH /api/tenant/claude-grant.
@@ -591,10 +599,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
       if (leases.length !== account.leases.length) changed = true;
       account.leases = leases;
     }
-    const attested = record.accounts.filter(
-      (account) => account.kind === "api_key" ||
-        (account.plan !== null && ELIGIBLE_OAUTH_PLANS.has(account.plan)),
-    );
+    const attested = record.accounts.filter(isAttested);
     if (!attested.length) {
       if (changed) await this.writeRecord(tenantId, record);
       throw new GrantRequiredError(
@@ -611,9 +616,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
         `Every linked Claude account for tenant ${tenantId} was refused by the provider (${codes.join(", ")}). Link another account or reactivate a fixed one.`,
       );
     }
-    const eligible = usable.filter(
-      (account) => account.cooldown_until === null || Date.parse(account.cooldown_until) <= now,
-    );
+    const eligible = usable.filter((account) => cooldownElapsed(account, now));
     if (!eligible.length) {
       if (changed) await this.writeRecord(tenantId, record);
       const next = Math.min(...usable
@@ -723,6 +726,17 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
       if (g) return { linked: true, linked_at: null, kind: g.kind };
     }
     return { linked: false, linked_at: null };
+  }
+
+  /** Read only the kinds available to acquire, without resolving fallback grants or writing a lease. */
+  async selectableGrantKinds(tenantId: string): Promise<GrantKind[] | null> {
+    const record = await this.readRecord(tenantId);
+    if (!record) return [];
+    const now = Date.now();
+    const selectable = this.asV3(tenantId, record).accounts.filter(
+      account => isAttested(account) && account.auth_refused_at === undefined && cooldownElapsed(account, now),
+    );
+    return [...new Set(selectable.map(account => account.kind))];
   }
 
   async diagnostic(tenantId: string): Promise<GrantDiagnostic> {
@@ -880,6 +894,11 @@ export class EnvelopeTenantGrantStore extends FileTenantGrantStore {
     return { ...await super.diagnostic(tenantId), backend: "vault" };
   }
 
+  override async selectableGrantKinds(_tenantId: string): Promise<null> {
+    // No separate metadata projection is available without opening the sealed grant.
+    return null;
+  }
+
   protected override async readRecordPayload(tenantId: string, path: string): Promise<unknown> {
     if (!existsSync(path)) {
       this.readToken(tenantId);
@@ -946,7 +965,7 @@ export interface TenantGrantStoreOptions extends FileTenantGrantStoreOptions {
  */
 export function createTenantGrantStore(
   opts: TenantGrantStoreOptions = {},
-): TenantGrantStore & TenantGrantAdminStore {
+): FileTenantGrantStore {
   const backend = resolveGrantStoreBackend();
   switch (backend) {
     case "vault":

@@ -130,6 +130,36 @@ describe("mounted first source author transaction with real private Git", () => 
   }
   const attempt = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const correlation = { "x-source-author-attempt": attempt, "x-source-author-wire-sha256": "a".repeat(64) };
+  it("requires the app back-edge and observes the installed author's gate without invoking it", async () => {
+    const observe = vi.fn(async () =>
+      ({ route_class: "approved_subscription_pool", eligible: true, reason: "ready" } as const));
+    const readiness = createHarness(ports, { auth: { enabled: false, secret },
+      projectRepositoryEdits: service, projectSourceAuthoring: { oauth, editor: { edit } },
+      projectSourceAuthoringRoute: observe }).listen(0);
+    try {
+      const target = `http://127.0.0.1:${(readiness.address() as AddressInfo).port}/internal/project-repository-source/readiness`;
+      expect((await fetch(target)).status).toBe(401);
+      const headers = { "x-harness-secret": secret, "x-tenant-id": authority.tenantId };
+      expect((await fetch(`${target}?tenant_id=other`, { headers })).status).toBe(400);
+      expect(observe).not.toHaveBeenCalled();
+      const response = await fetch(target, { headers });
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({ schema: "leaf.project-source-authoring-readiness.v1",
+        tenant_id: authority.tenantId, dependency_ready: true,
+        route_class: "approved_subscription_pool", eligible: true, reason: "ready" });
+      expect(observe).toHaveBeenCalledExactlyOnceWith(authority.tenantId);
+      vi.stubEnv("LEAF_AUTHORED_EXECUTION", "0");
+      expect(await (await fetch(target, { headers })).json()).toEqual({
+        schema: "leaf.project-source-authoring-readiness.v1", tenant_id: authority.tenantId,
+        dependency_ready: false, route_class: "unknown", eligible: false, reason: "dependency_unavailable",
+      });
+      expect(observe).toHaveBeenCalledTimes(1);
+      expect(oauth.acquireGrant).not.toHaveBeenCalled();
+      expect(edit).not.toHaveBeenCalled();
+      unchanged();
+    } finally { await new Promise<void>(resolve => readiness.close(() => resolve())); }
+  });
+
   it.each(["disabled", "dependencies"])("captures dependency refusal correlation before the handler: %s", async kind => {
     if (kind === "disabled") vi.stubEnv("LEAF_AUTHORED_EXECUTION", "0");
     const unavailable = createHarness(ports, { auth: { enabled: false, secret } }).listen(0);
